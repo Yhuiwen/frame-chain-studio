@@ -1,0 +1,106 @@
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+from app.models.entities import (
+    AssetType,
+    GenerationKind,
+    GenerationTaskStatus,
+    ShotStatus,
+)
+
+
+class ProjectCreate(BaseModel):
+    name: str
+    description: str = ""
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class ProjectRead(ProjectCreate):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ShotCreate(BaseModel):
+    title: str
+    description: str = ""
+    duration_seconds: float = 4.0
+    prompt: str = ""
+    negative_prompt: str = ""
+
+
+class ShotUpdate(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    duration_seconds: float | None = None
+    prompt: str | None = None
+    negative_prompt: str | None = None
+
+
+class ShotRead(ShotCreate):
+    id: int
+    project_id: int
+    sort_order: int
+    status: ShotStatus
+    start_frame_asset_id: int | None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReorderShot(BaseModel):
+    id: int
+    sort_order: int
+
+
+class AssetRead(BaseModel):
+    id: int
+    project_id: int
+    shot_id: int | None
+    type: AssetType
+    path: str
+    mime_type: str
+    source_asset_id: int | None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class GenerationRequestRead(BaseModel):
+    id: int
+    project_id: int
+    shot_id: int
+    kind: GenerationKind
+    provider_name: str
+    status: GenerationTaskStatus
+    prompt_snapshot: str
+    negative_prompt_snapshot: str
+    input_asset_ids: str
+    output_asset_ids: str
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TaskLogRead(BaseModel):
+    id: int
+    request_id: int | None
+    shot_id: int | None
+    level: str
+    message: str
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectDetail(ProjectRead):
+    shots: list[ShotRead]
+    assets: list[AssetRead]
+    requests: list[GenerationRequestRead]
+    logs: list[TaskLogRead]
