@@ -43,12 +43,25 @@ class ShotUpdate(BaseModel):
     negative_prompt: str | None = None
 
 
+class ShotAssetSummary(BaseModel):
+    asset_id: int
+    url: str
+    source_type: str
+    source_shot_id: int | None = None
+    source_shot_title: str | None = None
+    file_name: str
+    created_at: datetime
+
+
 class ShotRead(ShotCreate):
     id: int
     project_id: int
     sort_order: int
     status: ShotStatus
     start_frame_asset_id: int | None
+    start_frame: ShotAssetSummary | None = None
+    target_keyframe: ShotAssetSummary | None = None
+    locked_tail_frame: ShotAssetSummary | None = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -64,7 +77,8 @@ class AssetRead(BaseModel):
     project_id: int
     shot_id: int | None
     type: AssetType
-    path: str
+    url: str
+    file_name: str
     mime_type: str
     source_asset_id: int | None
     created_at: datetime

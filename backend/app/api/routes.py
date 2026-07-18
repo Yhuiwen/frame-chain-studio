@@ -1,7 +1,10 @@
+from pathlib import Path
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Response
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
 from app.models.entities import Asset, GenerationRequest, Project, Shot
@@ -28,12 +31,24 @@ def run_request_in_background(request_id: int) -> None:
         studio.run_generation_request(session, request_id, provider)
 
 
+@router.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @router.get("/media/{asset_id}")
 def read_asset(asset_id: int, session: Session = Depends(get_session)) -> FileResponse:
     asset = session.get(Asset, asset_id)
     if asset is None:
         raise AppError("ASSET_NOT_FOUND", f"Asset {asset_id} was not found.", 404)
-    return FileResponse(asset.path, media_type=asset.mime_type)
+    settings = get_settings()
+    storage_root = settings.storage_dir.resolve()
+    asset_path = Path(asset.path).resolve()
+    if storage_root not in asset_path.parents and asset_path != storage_root:
+        raise AppError("ASSET_ACCESS_DENIED", "Asset file is outside the configured storage directory.", 403)
+    if not asset_path.exists() or not asset_path.is_file():
+        raise AppError("ASSET_FILE_NOT_FOUND", f"Asset file for {asset_id} was not found.", 404)
+    return FileResponse(asset_path, media_type=asset.mime_type)
 
 
 @router.get("/projects", response_model=list[ProjectRead])
@@ -70,8 +85,8 @@ def delete_project(project_id: int, session: Session = Depends(get_session)) -> 
 
 
 @router.get("/projects/{project_id}/shots", response_model=list[ShotRead])
-def list_shots(project_id: int, session: Session = Depends(get_session)) -> list[Shot]:
-    return studio.list_project_shots(session, project_id)
+def list_shots(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return [studio.shot_payload(session, shot) for shot in studio.list_project_shots(session, project_id)]
 
 
 @router.post("/projects/{project_id}/shots", response_model=ShotRead, status_code=201)

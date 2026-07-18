@@ -9,6 +9,7 @@ vi.mock("@/api/client", () => ({
     listProjects: vi.fn(),
     createProject: vi.fn(),
     getProject: vi.fn(),
+    deleteShot: vi.fn(),
   },
 }));
 
@@ -26,5 +27,53 @@ describe("studio store", () => {
     await store.loadProjects();
     expect(store.projects).toHaveLength(1);
     expect(store.projects[0].name).toBe("Demo");
+  });
+
+  it("deletes a shot and preserves the current route-free refresh flow", async () => {
+    vi.mocked(api.getProject).mockResolvedValue({
+      id: 1,
+      name: "Demo",
+      description: "",
+      created_at: "",
+      updated_at: "",
+      assets: [],
+      requests: [],
+      logs: [],
+      shots: [
+        {
+          id: 2,
+          project_id: 1,
+          sort_order: 0,
+          title: "Shot 2",
+          description: "",
+          duration_seconds: 4,
+          prompt: "",
+          negative_prompt: "",
+          status: "DRAFT",
+          start_frame_asset_id: null,
+          start_frame: null,
+          target_keyframe: null,
+          locked_tail_frame: null,
+        },
+      ],
+    });
+    vi.mocked(api.deleteShot).mockResolvedValue(undefined);
+    const store = useStudioStore();
+    store.current = {
+      id: 1,
+      name: "Demo",
+      description: "",
+      created_at: "",
+      updated_at: "",
+      assets: [],
+      requests: [],
+      logs: [],
+      shots: [],
+    };
+
+    await store.deleteShot(1);
+
+    expect(api.deleteShot).toHaveBeenCalledWith(1);
+    expect(store.current?.shots).toHaveLength(1);
   });
 });

@@ -98,8 +98,84 @@ def update_shot(session: Session, shot_id: int, payload: ShotUpdate) -> Shot:
 
 def delete_shot(session: Session, shot_id: int) -> None:
     shot = get_shot_or_404(session, shot_id)
-    session.delete(shot)
-    session.commit()
+    project_id = shot.project_id
+    deleted_order = shot.sort_order
+    next_shot = session.exec(
+        select(Shot)
+        .where(Shot.project_id == project_id, Shot.sort_order > deleted_order)
+        .order_by(col(Shot.sort_order))
+    ).first()
+    previous_shot = session.exec(
+        select(Shot)
+        .where(Shot.project_id == project_id, Shot.sort_order < deleted_order)
+        .order_by(col(Shot.sort_order).desc())
+    ).first()
+    try:
+        if next_shot is not None:
+            relink_start_frame_after_delete(session, previous_shot, next_shot)
+
+        for state_change in session.exec(select(ShotStateChange).where(ShotStateChange.shot_id == shot_id)).all():
+            session.delete(state_change)
+        for log in session.exec(select(TaskLog).where(TaskLog.shot_id == shot_id)).all():
+            session.delete(log)
+        for request in session.exec(select(GenerationRequest).where(GenerationRequest.shot_id == shot_id)).all():
+            session.delete(request)
+        assets_to_delete = list(session.exec(select(Asset).where(Asset.shot_id == shot_id)).all())
+        asset_ids_to_delete = {asset.id for asset in assets_to_delete if asset.id is not None}
+        for asset in assets_to_delete:
+            references = session.exec(select(Asset).where(Asset.source_asset_id == asset.id)).all()
+            external_references = [reference for reference in references if reference.id not in asset_ids_to_delete]
+            if not external_references:
+                session.delete(asset)
+
+        session.delete(shot)
+        remaining = list(
+            session.exec(select(Shot).where(Shot.project_id == project_id).order_by(col(Shot.sort_order))).all()
+        )
+        for index, remaining_shot in enumerate(remaining):
+            remaining_shot.sort_order = index
+            remaining_shot.updated_at = utcnow()
+            session.add(remaining_shot)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+
+def relink_start_frame_after_delete(
+    session: Session,
+    previous_shot: Shot | None,
+    next_shot: Shot,
+) -> None:
+    for start_asset in session.exec(
+        select(Asset).where(
+            Asset.shot_id == next_shot.id,
+            Asset.type == AssetType.START_FRAME,
+            col(Asset.source_asset_id).is_not(None),
+        )
+    ).all():
+        session.delete(start_asset)
+
+    tail_asset = latest_asset(session, previous_shot.id or 0, AssetType.TAIL_FRAME) if previous_shot else None
+    if tail_asset is None or tail_asset.id is None:
+        next_shot.start_frame_asset_id = None
+        next_shot.updated_at = utcnow()
+        session.add(next_shot)
+        return
+
+    inherited = Asset(
+        project_id=next_shot.project_id,
+        shot_id=next_shot.id,
+        type=AssetType.START_FRAME,
+        path=tail_asset.path,
+        mime_type=tail_asset.mime_type,
+        source_asset_id=tail_asset.id,
+    )
+    session.add(inherited)
+    session.flush()
+    next_shot.start_frame_asset_id = inherited.id
+    next_shot.updated_at = utcnow()
+    session.add(next_shot)
 
 
 def list_project_shots(session: Session, project_id: int) -> list[Shot]:
@@ -273,6 +349,8 @@ def run_generation_request(
 
 def approve_keyframe(session: Session, shot_id: int) -> Shot:
     shot = get_shot_or_404(session, shot_id)
+    if shot.status == ShotStatus.KEYFRAME_APPROVED:
+        return shot
     return transition_shot(session, shot, ShotStatus.KEYFRAME_APPROVED, "keyframe_approved")
 
 
@@ -284,6 +362,8 @@ def reject_keyframe(session: Session, shot_id: int) -> Shot:
 def approve_video(session: Session, shot_id: int) -> Shot:
     settings = get_settings()
     shot = get_shot_or_404(session, shot_id)
+    if shot.status == ShotStatus.COMPLETED:
+        return shot
     transition_shot(session, shot, ShotStatus.VIDEO_APPROVED, "video_approved")
     video = latest_asset(session, shot_id, AssetType.VIDEO)
     if video is None:
@@ -295,17 +375,25 @@ def approve_video(session: Session, shot_id: int) -> Shot:
         / f"tail-frame-shot-{shot.id}.png"
     )
     extract_tail_frame(Path(video.path), tail_path)
-    tail_asset = Asset(
-        project_id=shot.project_id,
-        shot_id=shot.id,
-        type=AssetType.TAIL_FRAME,
-        path=str(tail_path),
-        mime_type="image/png",
-        source_asset_id=video.id,
-    )
-    session.add(tail_asset)
-    session.commit()
-    session.refresh(tail_asset)
+    tail_asset = session.exec(
+        select(Asset).where(
+            Asset.shot_id == shot.id,
+            Asset.type == AssetType.TAIL_FRAME,
+            Asset.source_asset_id == video.id,
+        )
+    ).first()
+    if tail_asset is None:
+        tail_asset = Asset(
+            project_id=shot.project_id,
+            shot_id=shot.id,
+            type=AssetType.TAIL_FRAME,
+            path=str(tail_path),
+            mime_type="image/png",
+            source_asset_id=video.id,
+        )
+        session.add(tail_asset)
+        session.commit()
+        session.refresh(tail_asset)
     transition_shot(session, shot, ShotStatus.TAIL_FRAME_LOCKED, "tail_frame_extracted")
     next_shot = session.exec(
         select(Shot)
@@ -313,17 +401,25 @@ def approve_video(session: Session, shot_id: int) -> Shot:
         .order_by(col(Shot.sort_order))
     ).first()
     if next_shot and tail_asset.id:
-        start_asset = Asset(
-            project_id=shot.project_id,
-            shot_id=next_shot.id,
-            type=AssetType.START_FRAME,
-            path=tail_asset.path,
-            mime_type=tail_asset.mime_type,
-            source_asset_id=tail_asset.id,
-        )
-        session.add(start_asset)
-        session.commit()
-        session.refresh(start_asset)
+        start_asset = session.exec(
+            select(Asset).where(
+                Asset.shot_id == next_shot.id,
+                Asset.type == AssetType.START_FRAME,
+                Asset.source_asset_id == tail_asset.id,
+            )
+        ).first()
+        if start_asset is None:
+            start_asset = Asset(
+                project_id=shot.project_id,
+                shot_id=next_shot.id,
+                type=AssetType.START_FRAME,
+                path=tail_asset.path,
+                mime_type=tail_asset.mime_type,
+                source_asset_id=tail_asset.id,
+            )
+            session.add(start_asset)
+            session.commit()
+            session.refresh(start_asset)
         next_shot.start_frame_asset_id = start_asset.id
         next_shot.updated_at = utcnow()
         session.add(next_shot)
@@ -339,7 +435,7 @@ def reject_video(session: Session, shot_id: int) -> Shot:
 def project_detail(
     session: Session,
     project_id: int,
-) -> tuple[Project, list[Shot], list[Asset], list[GenerationRequest], list[TaskLog]]:
+) -> tuple[Project, list[dict[str, object]], list[dict[str, object]], list[GenerationRequest], list[TaskLog]]:
     project = get_project_or_404(session, project_id)
     shots = list_project_shots(session, project_id)
     assets = list(
@@ -360,4 +456,77 @@ def project_detail(
             .order_by(col(TaskLog.created_at))
         ).all()
     )
-    return project, shots, assets, requests, logs
+    serialized_assets = [asset_payload(asset) for asset in assets]
+    serialized_shots = [shot_payload(session, shot) for shot in shots]
+    return project, serialized_shots, serialized_assets, requests, logs
+
+
+def asset_url(asset_id: int) -> str:
+    return f"/api/media/{asset_id}"
+
+
+def asset_payload(asset: Asset) -> dict[str, object]:
+    return {
+        "id": asset.id,
+        "project_id": asset.project_id,
+        "shot_id": asset.shot_id,
+        "type": asset.type,
+        "url": asset_url(asset.id or 0),
+        "file_name": Path(asset.path).name,
+        "mime_type": asset.mime_type,
+        "source_asset_id": asset.source_asset_id,
+        "created_at": asset.created_at,
+    }
+
+
+def asset_summary(
+    session: Session,
+    asset: Asset | None,
+    source_type: str,
+) -> dict[str, object] | None:
+    if asset is None or asset.id is None:
+        return None
+    source_shot_id: int | None = None
+    source_shot_title: str | None = None
+    if asset.source_asset_id is not None:
+        source_asset = session.get(Asset, asset.source_asset_id)
+        if source_asset and source_asset.shot_id:
+            source_shot = session.get(Shot, source_asset.shot_id)
+            if source_shot:
+                source_shot_id = source_shot.id
+                source_shot_title = source_shot.title
+    return {
+        "asset_id": asset.id,
+        "url": asset_url(asset.id),
+        "source_type": source_type,
+        "source_shot_id": source_shot_id,
+        "source_shot_title": source_shot_title,
+        "file_name": Path(asset.path).name,
+        "created_at": asset.created_at,
+    }
+
+
+def shot_payload(session: Session, shot: Shot) -> dict[str, object]:
+    start_asset = session.get(Asset, shot.start_frame_asset_id) if shot.start_frame_asset_id else None
+    start_source_type = "inherited" if start_asset and start_asset.source_asset_id else "manual"
+    return {
+        "id": shot.id,
+        "project_id": shot.project_id,
+        "sort_order": shot.sort_order,
+        "title": shot.title,
+        "description": shot.description,
+        "duration_seconds": shot.duration_seconds,
+        "prompt": shot.prompt,
+        "negative_prompt": shot.negative_prompt,
+        "status": shot.status,
+        "start_frame_asset_id": shot.start_frame_asset_id,
+        "start_frame": asset_summary(session, start_asset, start_source_type),
+        "target_keyframe": asset_summary(session, latest_asset(session, shot.id or 0, AssetType.KEYFRAME), "generated"),
+        "locked_tail_frame": asset_summary(
+            session,
+            latest_asset(session, shot.id or 0, AssetType.TAIL_FRAME),
+            "generated",
+        ),
+        "created_at": shot.created_at,
+        "updated_at": shot.updated_at,
+    }

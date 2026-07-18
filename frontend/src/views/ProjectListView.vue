@@ -34,7 +34,7 @@ async function createProject() {
       <el-form class="create-form" :inline="true" @submit.prevent="createProject">
         <el-input v-model="form.name" placeholder="项目名称" />
         <el-input v-model="form.description" placeholder="项目描述" />
-        <el-button type="primary" :icon="Plus" @click="createProject">创建</el-button>
+        <el-button native-type="button" type="primary" :icon="Plus" @click="createProject">创建</el-button>
       </el-form>
     </section>
 
@@ -44,7 +44,7 @@ async function createProject() {
       <el-table-column prop="updated_at" label="更新时间" width="220" />
       <el-table-column width="120" align="right">
         <template #default="{ row }">
-          <el-button text type="primary" @click="router.push(`/projects/${row.id}`)">打开</el-button>
+          <el-button native-type="button" text type="primary" @click="router.push(`/projects/${row.id}`)">打开</el-button>
         </template>
       </el-table-column>
     </el-table>

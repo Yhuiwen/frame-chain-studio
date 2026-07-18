@@ -73,6 +73,7 @@ p {
 .timeline,
 .editor-panel,
 .review-panel,
+.asset-panel,
 .log-panel {
   background: #fff;
   border: 1px solid #d8dee8;
@@ -134,6 +135,7 @@ p {
 
 .editor-panel,
 .review-panel,
+.asset-panel,
 .log-panel {
   padding: 18px;
 }
@@ -182,6 +184,72 @@ p {
   object-fit: cover;
   border-radius: 6px;
   border: 1px solid #d8dee8;
+}
+
+.delete-shot {
+  grid-column: 2;
+  justify-self: start;
+  padding-left: 0;
+}
+
+.asset-card {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 16px;
+  align-items: center;
+}
+
+.asset-card .el-image {
+  width: 180px;
+  height: 102px;
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.asset-card dl {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 6px 10px;
+  margin: 0;
+}
+
+.asset-card dt {
+  color: #667085;
+}
+
+.asset-card dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.asset-error {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: #b42318;
+  background: #fff1f0;
+}
+
+.log-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.log-detail {
+  margin-top: 4px;
+  padding: 10px;
+  border-radius: 6px;
+  background: #f6f7f9;
+  color: #667085;
 }
 
 @media (max-width: 960px) {

@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     app_name: str = "Frame Chain Studio API"
     database_url: str = "sqlite:///./data/frame_chain.db"
     storage_dir: Path = Path("./data/storage")
-    fixture_dir: Path = Path("./assets/fixtures")
+    fixture_dir: Path = Path("./tests/fixtures")
     mock_task_delay_seconds: float = 0.05
     cors_origins: list[str] = ["http://localhost:5173"]
 

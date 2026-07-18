@@ -17,13 +17,13 @@ class MockGenerationProvider(GenerationProvider):
         self.settings = get_settings()
 
     def _fixture_image(self) -> Path:
-        fixture = self.settings.fixture_dir / "mock_keyframe.png"
+        fixture = self.settings.fixture_dir / "mock-keyframe.png"
         if not fixture.exists():
             create_test_image(fixture)
         return fixture
 
     def _fixture_video(self) -> Path:
-        fixture = self.settings.fixture_dir / "mock_video.mp4"
+        fixture = self.settings.fixture_dir / "mock-video.mp4"
         if not fixture.exists():
             create_test_video(fixture)
         return fixture

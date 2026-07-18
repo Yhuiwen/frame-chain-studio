@@ -7,7 +7,10 @@ interface StudioState {
   current: ProjectDetail | null;
   selectedShotId: number | null;
   loading: boolean;
+  refreshing: boolean;
 }
+
+export const ACTIVE_TASK_STATUSES = new Set(["QUEUED", "SUBMITTING", "GENERATING", "PENDING", "RUNNING", "PROCESSING"]);
 
 export const useStudioStore = defineStore("studio", {
   state: (): StudioState => ({
@@ -15,6 +18,7 @@ export const useStudioStore = defineStore("studio", {
     current: null,
     selectedShotId: null,
     loading: false,
+    refreshing: false,
   }),
   getters: {
     selectedShot: (state): Shot | null =>
@@ -27,6 +31,8 @@ export const useStudioStore = defineStore("studio", {
       const shotId = state.selectedShotId ?? state.current?.shots[0]?.id;
       return (state.current?.logs ?? []).filter((log) => !shotId || log.shot_id === shotId);
     },
+    hasActiveTasks: (state): boolean =>
+      (state.current?.requests ?? []).some((request) => ACTIVE_TASK_STATUSES.has(request.status)),
   },
   actions: {
     async loadProjects() {
@@ -42,13 +48,25 @@ export const useStudioStore = defineStore("studio", {
       this.projects.unshift(project);
       return project;
     },
-    async loadProject(id: number) {
-      this.loading = true;
+    async loadProject(id: number, options: { showLoading?: boolean } = {}) {
+      const showLoading = options.showLoading ?? true;
+      const previousSelectedId = this.selectedShotId;
+      if (showLoading) this.loading = true;
       try {
         this.current = await api.getProject(id);
-        this.selectedShotId = this.current.shots[0]?.id ?? null;
+        const stillExists = this.current.shots.some((shot) => shot.id === previousSelectedId);
+        this.selectedShotId = stillExists ? previousSelectedId : (this.current.shots[0]?.id ?? null);
       } finally {
-        this.loading = false;
+        if (showLoading) this.loading = false;
+      }
+    },
+    async refreshProjectDetail() {
+      if (!this.current) return;
+      this.refreshing = true;
+      try {
+        await this.loadProject(this.current.id, { showLoading: false });
+      } finally {
+        this.refreshing = false;
       }
     },
     selectShot(id: number) {
@@ -64,6 +82,12 @@ export const useStudioStore = defineStore("studio", {
       });
       await this.loadProject(projectId);
       this.selectedShotId = shot.id;
+    },
+    async deleteShot(shotId: number) {
+      const projectId = this.current?.id;
+      if (!projectId) return;
+      await api.deleteShot(shotId);
+      await this.loadProject(projectId, { showLoading: false });
     },
     async updateSelectedShot(patch: Partial<Shot>) {
       if (!this.selectedShot) return;

@@ -1,23 +1,36 @@
 <script setup lang="ts">
-import { CaretRight, Check, Close, Picture, Plus, Refresh, VideoPlay } from "@element-plus/icons-vue";
-import { ElMessage } from "element-plus";
+import {
+  CaretRight,
+  Check,
+  Close,
+  Delete,
+  Picture,
+  Plus,
+  Refresh,
+  VideoPlay,
+} from "@element-plus/icons-vue";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
-import { api, type Shot } from "@/api/client";
+import { api, type Shot, type ShotAssetSummary } from "@/api/client";
+import { useProjectPolling } from "@/composables/useProjectPolling";
 import { useStudioStore } from "@/stores/studio";
 
 const route = useRoute();
 const store = useStudioStore();
+const { startPolling, tick } = useProjectPolling();
 const draggedShotId = ref<number | null>(null);
+const deletingShotId = ref<number | null>(null);
+const actionBusy = ref(false);
+const expandedLogIds = ref<Set<number>>(new Set());
 const projectId = computed(() => Number(route.params.id));
 const selected = computed(() => store.selectedShot);
-const keyframes = computed(() => (selected.value ? store.assetsByShot(selected.value.id, "KEYFRAME") : []));
 const videos = computed(() => (selected.value ? store.assetsByShot(selected.value.id, "VIDEO") : []));
-const tailFrames = computed(() => (selected.value ? store.assetsByShot(selected.value.id, "TAIL_FRAME") : []));
 
-onMounted(() => {
-  void store.loadProject(projectId.value);
+onMounted(async () => {
+  await store.loadProject(projectId.value);
+  startPolling();
 });
 
 function statusType(status: Shot["status"]) {
@@ -27,11 +40,54 @@ function statusType(status: Shot["status"]) {
   return "info";
 }
 
-async function guarded(action: () => Promise<unknown>) {
+function sourceLabel(asset: ShotAssetSummary | null) {
+  if (!asset) return "当前不存在";
+  if (asset.source_type === "inherited") {
+    return `继承自 ${asset.source_shot_title ?? `Shot ${asset.source_shot_id ?? ""}`} 的实际尾帧`;
+  }
+  if (asset.source_type === "manual") return "手动指定";
+  return "当前 Shot 生成";
+}
+
+async function guarded(action: () => Promise<unknown>, pollAfter = false) {
+  actionBusy.value = true;
   try {
     await action();
+    await store.refreshProjectDetail();
+    if (pollAfter || store.hasActiveTasks) {
+      startPolling();
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "操作失败");
+  } finally {
+    actionBusy.value = false;
+  }
+}
+
+async function refreshProjectDetail() {
+  await guarded(() => tick());
+}
+
+async function deleteShot(shot: Shot, event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  try {
+    await ElMessageBox.confirm(`确定删除 ${shot.title || `Shot ${shot.sort_order + 1}`}？`, "删除 Shot", {
+      confirmButtonText: "删除",
+      cancelButtonText: "取消",
+      type: "warning",
+    });
+  } catch {
+    return;
+  }
+  deletingShotId.value = shot.id;
+  try {
+    await store.deleteShot(shot.id);
+    ElMessage.success("Shot 已删除");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "删除失败");
+  } finally {
+    deletingShotId.value = null;
   }
 }
 
@@ -45,6 +101,15 @@ async function dropOn(target: Shot) {
   draggedShotId.value = null;
   await guarded(() => store.reorder(store.current?.id ?? projectId.value, shots));
 }
+
+function toggleLog(logId: number, event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  const next = new Set(expandedLogIds.value);
+  if (next.has(logId)) next.delete(logId);
+  else next.add(logId);
+  expandedLogIds.value = next;
+}
 </script>
 
 <template>
@@ -55,19 +120,31 @@ async function dropOn(target: Shot) {
         <p>{{ store.current?.description || "Mock 后端阶段：所有生成资产和状态变化都会持久化。" }}</p>
       </div>
       <div class="header-actions">
-        <el-button :icon="Refresh" @click="store.loadProject(projectId)">刷新</el-button>
-        <el-button type="primary" :icon="Plus" @click="guarded(() => store.createShot(projectId))">添加 Shot</el-button>
+        <el-button native-type="button" :icon="Refresh" :loading="store.refreshing" @click="refreshProjectDetail">
+          刷新
+        </el-button>
+        <el-button
+          native-type="button"
+          type="primary"
+          :icon="Plus"
+          :loading="actionBusy"
+          @click="guarded(() => store.createShot(projectId))"
+        >
+          添加 Shot
+        </el-button>
       </div>
     </section>
 
     <section class="layout">
       <aside class="timeline">
-        <button
+        <div
           v-for="shot in store.current?.shots"
           :key="shot.id"
           class="timeline-item"
           :class="{ active: shot.id === selected?.id }"
           draggable="true"
+          role="button"
+          tabindex="0"
           @dragstart="draggedShotId = shot.id"
           @dragover.prevent
           @drop="dropOn(shot)"
@@ -76,7 +153,18 @@ async function dropOn(target: Shot) {
           <span class="order">{{ shot.sort_order + 1 }}</span>
           <span class="shot-title">{{ shot.title }}</span>
           <el-tag size="small" :type="statusType(shot.status)">{{ shot.status }}</el-tag>
-        </button>
+          <el-button
+            class="delete-shot"
+            native-type="button"
+            text
+            type="danger"
+            :icon="Delete"
+            :loading="deletingShotId === shot.id"
+            @click="deleteShot(shot, $event)"
+          >
+            删除 Shot
+          </el-button>
+        </div>
       </aside>
 
       <section v-if="selected" class="review-grid">
@@ -124,34 +212,76 @@ async function dropOn(target: Shot) {
           </el-form>
         </div>
 
+        <div class="asset-panel">
+          <div class="panel-title">
+            <h2>起始帧 Start Frame</h2>
+          </div>
+          <div class="asset-card">
+            <el-image
+              v-if="selected.start_frame"
+              :src="selected.start_frame.url"
+              :preview-src-list="[selected.start_frame.url]"
+              fit="cover"
+            >
+              <template #error>
+                <div class="asset-error">图片加载失败</div>
+              </template>
+            </el-image>
+            <el-empty v-else description="当前不存在" />
+            <dl>
+              <dt>来源</dt>
+              <dd>{{ sourceLabel(selected.start_frame) }}</dd>
+              <dt>资产</dt>
+              <dd>{{ selected.start_frame?.file_name ?? "无" }}</dd>
+              <dt>ID</dt>
+              <dd>{{ selected.start_frame?.asset_id ?? "无" }}</dd>
+              <dt>时间</dt>
+              <dd>{{ selected.start_frame?.created_at ?? "无" }}</dd>
+            </dl>
+          </div>
+        </div>
+
         <div class="review-panel">
           <div class="panel-title">
-            <h2>关键帧审核</h2>
+            <h2>目标关键帧 Target Keyframe</h2>
             <el-button
+              native-type="button"
               type="primary"
               :icon="Picture"
-              :disabled="selected.status !== 'DRAFT'"
-              @click="guarded(() => store.runAction(api.generateKeyframe))"
+              :loading="actionBusy && selected.status === 'DRAFT'"
+              :disabled="selected.status !== 'DRAFT' || actionBusy"
+              @click="guarded(() => store.runAction(api.generateKeyframe), true)"
             >
               生成关键帧
             </el-button>
           </div>
           <div class="asset-strip">
-            <img v-for="asset in keyframes" :key="asset.id" :src="`/api/media/${asset.id}`" :alt="asset.type" />
-            <el-empty v-if="!keyframes.length" description="暂无关键帧" />
+            <el-image
+              v-if="selected.target_keyframe"
+              :src="selected.target_keyframe.url"
+              :preview-src-list="[selected.target_keyframe.url]"
+              fit="contain"
+            >
+              <template #error>
+                <div class="asset-error">关键帧加载失败</div>
+              </template>
+            </el-image>
+            <el-empty v-else description="暂无关键帧" />
           </div>
           <div class="button-row">
             <el-button
+              native-type="button"
               type="success"
               :icon="Check"
-              :disabled="selected.status !== 'KEYFRAME_REVIEW'"
+              :disabled="selected.status !== 'KEYFRAME_REVIEW' || actionBusy"
               @click="guarded(() => store.runAction(api.approveKeyframe))"
             >
               批准
             </el-button>
             <el-button
+              native-type="button"
               :icon="Close"
-              :disabled="selected.status !== 'KEYFRAME_REVIEW'"
+              :disabled="selected.status !== 'KEYFRAME_REVIEW' || actionBusy"
               @click="guarded(() => store.runAction(api.rejectKeyframe))"
             >
               拒绝
@@ -163,50 +293,80 @@ async function dropOn(target: Shot) {
           <div class="panel-title">
             <h2>视频审核</h2>
             <el-button
+              native-type="button"
               type="primary"
               :icon="VideoPlay"
-              :disabled="selected.status !== 'KEYFRAME_APPROVED'"
-              @click="guarded(() => store.runAction(api.generateVideo))"
+              :loading="actionBusy && selected.status === 'KEYFRAME_APPROVED'"
+              :disabled="selected.status !== 'KEYFRAME_APPROVED' || actionBusy"
+              @click="guarded(() => store.runAction(api.generateVideo), true)"
             >
               生成视频
             </el-button>
           </div>
           <div class="asset-strip">
-            <video v-for="asset in videos" :key="asset.id" controls :src="`/api/media/${asset.id}`" />
+            <video v-for="asset in videos" :key="asset.id" controls :src="asset.url" />
             <el-empty v-if="!videos.length" description="暂无视频" />
           </div>
           <div class="button-row">
             <el-button
+              native-type="button"
               type="success"
               :icon="Check"
-              :disabled="selected.status !== 'VIDEO_REVIEW'"
-              @click="guarded(() => store.runAction(api.approveVideo))"
+              :disabled="selected.status !== 'VIDEO_REVIEW' || actionBusy"
+              @click="guarded(() => store.runAction(api.approveVideo), true)"
             >
               批准并锁尾帧
             </el-button>
             <el-button
+              native-type="button"
               :icon="Close"
-              :disabled="selected.status !== 'VIDEO_REVIEW'"
+              :disabled="selected.status !== 'VIDEO_REVIEW' || actionBusy"
               @click="guarded(() => store.runAction(api.rejectVideo))"
             >
               拒绝
             </el-button>
           </div>
-          <div class="tail-row">
-            <span>尾帧</span>
-            <img v-for="asset in tailFrames" :key="asset.id" :src="`/api/media/${asset.id}`" :alt="asset.type" />
+        </div>
+
+        <div class="asset-panel">
+          <div class="panel-title">
+            <h2>锁定尾帧 Locked Tail Frame</h2>
+          </div>
+          <div class="asset-card">
+            <el-image
+              v-if="selected.locked_tail_frame"
+              :src="selected.locked_tail_frame.url"
+              :preview-src-list="[selected.locked_tail_frame.url]"
+              fit="cover"
+            >
+              <template #error>
+                <div class="asset-error">尾帧加载失败</div>
+              </template>
+            </el-image>
+            <el-empty v-else description="当前不存在" />
+            <dl>
+              <dt>来源</dt>
+              <dd>{{ sourceLabel(selected.locked_tail_frame) }}</dd>
+              <dt>资产</dt>
+              <dd>{{ selected.locked_tail_frame?.file_name ?? "无" }}</dd>
+            </dl>
           </div>
         </div>
 
         <div class="log-panel">
           <div class="panel-title">
             <h2>任务日志</h2>
-            <el-button :icon="CaretRight" text @click="store.loadProject(projectId)">同步</el-button>
+            <el-button native-type="button" :icon="CaretRight" text @click="refreshProjectDetail">同步</el-button>
           </div>
           <el-timeline>
             <el-timeline-item v-for="log in store.logsForSelected" :key="log.id" :timestamp="log.created_at">
-              <strong>{{ log.level }}</strong>
-              {{ log.message }}
+              <button type="button" class="log-row" @click="toggleLog(log.id, $event)">
+                <strong>{{ log.level }}</strong>
+                <span>{{ log.message }}</span>
+              </button>
+              <div v-if="expandedLogIds.has(log.id)" class="log-detail">
+                request: {{ log.request_id ?? "none" }} · shot: {{ log.shot_id ?? "none" }}
+              </div>
             </el-timeline-item>
           </el-timeline>
         </div>

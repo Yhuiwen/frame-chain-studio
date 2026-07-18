@@ -28,6 +28,19 @@ export interface Shot {
   negative_prompt: string;
   status: ShotStatus;
   start_frame_asset_id: number | null;
+  start_frame: ShotAssetSummary | null;
+  target_keyframe: ShotAssetSummary | null;
+  locked_tail_frame: ShotAssetSummary | null;
+}
+
+export interface ShotAssetSummary {
+  asset_id: number;
+  url: string;
+  source_type: "inherited" | "manual" | "generated";
+  source_shot_id: number | null;
+  source_shot_title: string | null;
+  file_name: string;
+  created_at: string;
 }
 
 export interface Asset {
@@ -35,7 +48,8 @@ export interface Asset {
   project_id: number;
   shot_id: number | null;
   type: "KEYFRAME" | "VIDEO" | "TAIL_FRAME" | "START_FRAME";
-  path: string;
+  url: string;
+  file_name: string;
   mime_type: string;
   source_asset_id: number | null;
 }
@@ -46,7 +60,7 @@ export interface GenerationRequest {
   shot_id: number;
   kind: "KEYFRAME" | "VIDEO" | "TAIL_FRAME";
   provider_name: string;
-  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  status: "QUEUED" | "SUBMITTING" | "GENERATING" | "PENDING" | "RUNNING" | "PROCESSING" | "SUCCEEDED" | "FAILED";
   error_code: string | null;
   error_message: string | null;
   created_at: string;
@@ -95,6 +109,7 @@ export const api = {
     request<Shot>(`/api/projects/${projectId}/shots`, { method: "POST", body: JSON.stringify(body) }),
   updateShot: (shotId: number, body: Partial<Shot>) =>
     request<Shot>(`/api/shots/${shotId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteShot: (shotId: number) => request<void>(`/api/shots/${shotId}`, { method: "DELETE" }),
   reorderShots: (projectId: number, shots: Shot[]) =>
     request<Shot[]>(`/api/projects/${projectId}/shots/reorder`, {
       method: "POST",
