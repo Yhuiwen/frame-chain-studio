@@ -118,6 +118,7 @@ class GenerationTaskRead(BaseModel):
     attempt_number: int
     retry_count: int
     max_attempts: int
+    result_urls: list[dict[str, object]] = []
     next_retry_at: datetime | None
     last_polled_at: datetime | None
     next_poll_at: datetime | None

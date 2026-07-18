@@ -33,9 +33,16 @@ ALLOWED_TASK_TRANSITIONS: dict[ReliableTaskStatus, set[ReliableTaskStatus]] = {
     ReliableTaskStatus.RUNNING: {
         ReliableTaskStatus.RUNNING,
         ReliableTaskStatus.RETRY_WAIT,
+        ReliableTaskStatus.RESULT_READY,
         ReliableTaskStatus.SUCCEEDED,
         ReliableTaskStatus.FAILED,
         ReliableTaskStatus.CANCELLING,
+        ReliableTaskStatus.CANCELLED,
+    },
+    ReliableTaskStatus.RESULT_READY: {
+        ReliableTaskStatus.SUCCEEDED,
+        ReliableTaskStatus.FAILED,
+        ReliableTaskStatus.CANCELLED,
     },
     ReliableTaskStatus.RETRY_WAIT: {
         ReliableTaskStatus.QUEUED,

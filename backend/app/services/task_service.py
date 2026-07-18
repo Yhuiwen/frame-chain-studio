@@ -36,6 +36,20 @@ def dumps_sanitized(value: Any) -> str:
     return json.dumps(redact_sensitive(value), ensure_ascii=True, sort_keys=True)
 
 
+def loads_json_object(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    parsed = json.loads(value)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def loads_json_list(value: str | None) -> list[Any]:
+    if not value:
+        return []
+    parsed = json.loads(value)
+    return parsed if isinstance(parsed, list) else []
+
+
 def db_time(value: datetime | None = None) -> datetime:
     candidate = value or utcnow()
     if candidate.tzinfo is not None:
@@ -74,6 +88,18 @@ def get_task(session: Session, task_id: int) -> GenerationTask:
     if task is None:
         raise AppError("TASK_NOT_FOUND", f"Generation task {task_id} was not found.", 404)
     return task
+
+
+def task_lease_is_owned(
+    session: Session,
+    task_id: int,
+    *,
+    worker_id: str,
+    now: datetime | None = None,
+) -> bool:
+    task = get_task(session, task_id)
+    current_time = db_time(now)
+    return task.locked_by == worker_id and task.locked_until is not None and task.locked_until > current_time
 
 
 def list_project_tasks(session: Session, project_id: int) -> list[GenerationTask]:
@@ -198,10 +224,17 @@ def transition_task(
     values: dict[str, Any] = {"status": target, "updated_at": current_time}
     if target in {ReliableTaskStatus.SUBMITTING, ReliableTaskStatus.RUNNING} and task.started_at is None:
         values["started_at"] = current_time
-    if target in {ReliableTaskStatus.SUCCEEDED, ReliableTaskStatus.FAILED, ReliableTaskStatus.CANCELLED}:
+    if target in {
+        ReliableTaskStatus.RESULT_READY,
+        ReliableTaskStatus.SUCCEEDED,
+        ReliableTaskStatus.FAILED,
+        ReliableTaskStatus.CANCELLED,
+    }:
         values.update(
             {
-                "completed_at": task.completed_at or current_time,
+                "completed_at": task.completed_at or current_time
+                if target != ReliableTaskStatus.RESULT_READY
+                else task.completed_at,
                 "locked_by": None,
                 "locked_until": None,
                 "lock_acquired_at": None,
@@ -245,12 +278,154 @@ def mark_task_submitted(
         task = transition_task(session, task_id, ReliableTaskStatus.RUNNING, reason_code="task_submitted", now=now)
     current_time = db_time(now)
     task.remote_job_id = remote_job_id
+    task.remote_status = task.remote_status
     task.submitted_at = task.submitted_at or current_time
     task.updated_at = current_time
     session.add(task)
     session.commit()
     session.refresh(task)
     return task
+
+
+def mark_task_remote_submitted(
+    session: Session,
+    task_id: int,
+    *,
+    remote_job_id: str,
+    remote_status: str,
+    response_summary: str,
+    poll_delay_seconds: int,
+    now: datetime | None = None,
+) -> GenerationTask:
+    current_time = db_time(now)
+    task = get_task(session, task_id)
+    if task.status == ReliableTaskStatus.QUEUED:
+        task = transition_task(
+            session,
+            task_id,
+            ReliableTaskStatus.SUBMITTING,
+            expected_current=ReliableTaskStatus.QUEUED,
+            reason_code="remote_submit_started",
+            now=current_time,
+        )
+    if task.status != ReliableTaskStatus.SUBMITTING:
+        raise AppError("TASK_NOT_SUBMITTING", f"Task in {task.status.value} cannot store submit result.", 409)
+    task.remote_job_id = remote_job_id
+    task.remote_status = remote_status
+    task.submitted_at = task.submitted_at or current_time
+    task.response_summary_json = dumps_sanitized({"submit": response_summary})
+    task.next_poll_at = current_time + timedelta(seconds=poll_delay_seconds)
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    return transition_task(
+        session,
+        task_id,
+        ReliableTaskStatus.RUNNING,
+        expected_current=ReliableTaskStatus.SUBMITTING,
+        reason_code="remote_submit_succeeded",
+        now=current_time,
+    )
+
+
+def repair_submitting_with_remote_job(
+    session: Session,
+    task_id: int,
+    *,
+    poll_delay_seconds: int,
+    now: datetime | None = None,
+) -> GenerationTask:
+    current_time = db_time(now)
+    task = get_task(session, task_id)
+    if task.status != ReliableTaskStatus.SUBMITTING or not task.remote_job_id:
+        raise AppError("TASK_NOT_REPAIRABLE", "Only SUBMITTING tasks with remote job IDs can be repaired.", 409)
+    task.next_poll_at = current_time + timedelta(seconds=poll_delay_seconds)
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    return transition_task(
+        session,
+        task_id,
+        ReliableTaskStatus.RUNNING,
+        expected_current=ReliableTaskStatus.SUBMITTING,
+        reason_code="remote_submit_recovered",
+        now=current_time,
+    )
+
+
+def record_running_poll(
+    session: Session,
+    task_id: int,
+    *,
+    remote_status: str,
+    response_summary: str,
+    poll_delay_seconds: int,
+    now: datetime | None = None,
+) -> GenerationTask:
+    task = get_task(session, task_id)
+    if task.status != ReliableTaskStatus.RUNNING:
+        raise AppError("TASK_NOT_RUNNING", f"Task in {task.status.value} cannot be polled.", 409)
+    current_time = db_time(now)
+    task.remote_status = remote_status
+    task.response_summary_json = dumps_sanitized({"poll": response_summary})
+    task.poll_count += 1
+    task.last_polled_at = current_time
+    task.next_poll_at = current_time + timedelta(seconds=poll_delay_seconds)
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+def mark_task_result_ready(
+    session: Session,
+    task_id: int,
+    *,
+    remote_status: str,
+    result_urls: list[dict[str, Any]],
+    response_summary: str,
+    now: datetime | None = None,
+) -> GenerationTask:
+    if not result_urls:
+        raise AppError("TASK_RESULT_URLS_REQUIRED", "At least one result URL is required.", 409)
+    sanitized_urls: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in result_urls:
+        url = str(item.get("url", ""))
+        if not url or "://" not in url or url in seen:
+            continue
+        if len(url) > 8 and url[1:3] == ":\\":
+            continue
+        seen.add(url)
+        sanitized_urls.append(redact_sensitive(item))
+    if not sanitized_urls:
+        raise AppError("TASK_RESULT_URLS_REQUIRED", "At least one valid result URL is required.", 409)
+    current_time = db_time(now)
+    task = get_task(session, task_id)
+    existing_urls = loads_json_list(task.result_urls_json)
+    existing_by_url = {
+        str(item.get("url")): item for item in existing_urls if isinstance(item, dict) and item.get("url")
+    }
+    for item in sanitized_urls:
+        existing_by_url[str(item["url"])] = item
+    task.result_urls_json = dumps_sanitized(list(existing_by_url.values()))
+    task.remote_status = remote_status
+    task.response_summary_json = dumps_sanitized({"poll": response_summary})
+    task.poll_count += 1
+    task.last_polled_at = current_time
+    task.next_poll_at = None
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    return transition_task(
+        session,
+        task_id,
+        ReliableTaskStatus.RESULT_READY,
+        expected_current=ReliableTaskStatus.RUNNING,
+        reason_code="remote_result_ready",
+        now=current_time,
+    )
 
 
 def mark_task_running(session: Session, task_id: int, *, now: datetime | None = None) -> GenerationTask:
@@ -379,6 +554,15 @@ def mark_task_failed(
         now=now,
     )
     return transition_task(session, task_id, ReliableTaskStatus.FAILED, reason_code="task_failed", now=now)
+
+
+def mark_remote_cancelled(session: Session, task_id: int, *, now: datetime | None = None) -> GenerationTask:
+    task = get_task(session, task_id)
+    if task.status == ReliableTaskStatus.CANCELLED:
+        return task
+    if task.status not in {ReliableTaskStatus.RUNNING, ReliableTaskStatus.SUBMITTING, ReliableTaskStatus.CANCELLING}:
+        raise AppError("TASK_NOT_CANCELLABLE", f"Task in {task.status.value} cannot be marked cancelled.", 409)
+    return transition_task(session, task_id, ReliableTaskStatus.CANCELLED, reason_code="remote_cancelled", now=now)
 
 
 def request_task_cancel(session: Session, task_id: int, *, now: datetime | None = None) -> GenerationTask:

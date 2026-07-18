@@ -265,3 +265,25 @@ def test_mark_succeeded_is_idempotent_and_detects_result_conflict(session: Sessi
     with pytest.raises(AppError) as exc:
         task_service.mark_task_succeeded(session, task.id or 0, result_asset_id=456)
     assert exc.value.code == "TASK_RESULT_CONFLICT"
+
+
+def test_mark_result_ready_persists_deduped_urls_and_releases_lease(session: Session) -> None:
+    request = logical_request(session)
+    task = task_service.create_task_attempt(session, generation_request=request)
+    task_service.mark_task_running(session, task.id or 0)
+    task_service.acquire_task_lease(session, task.id or 0, worker_id="worker", lease_seconds=30)
+
+    ready = task_service.mark_task_result_ready(
+        session,
+        task.id or 0,
+        remote_status="succeeded",
+        result_urls=[
+            {"url": "http://127.0.0.1/result.png", "mime_type": "image/png"},
+            {"url": "http://127.0.0.1/result.png", "mime_type": "image/png"},
+        ],
+        response_summary='{"status":"succeeded"}',
+    )
+
+    assert ready.status == ReliableTaskStatus.RESULT_READY
+    assert ready.locked_by is None
+    assert len(task_service.loads_json_list(ready.result_urls_json)) == 1

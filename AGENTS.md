@@ -39,6 +39,12 @@
 - Every new provider must declare capabilities and pass Fake Provider or `httpx.MockTransport` tests.
 - Business retries, remote result downloads, Worker loops, and task recovery belong to later orchestration stages, not Provider implementations.
 - Future workers must acquire a task lease before processing a task.
+- Generation Workers must acquire a database lease before every task execution cycle, and Provider HTTP calls must happen outside database transactions.
+- Worker submit and recovery paths must reuse `GenerationTask.idempotency_key` as the Provider `client_request_id`; never generate a new client request ID while recovering `SUBMITTING`.
+- `RUNNING` recovery must poll the existing `remote_job_id`, not resubmit.
+- Remote Provider success must move tasks to `RESULT_READY`; only a later media and asset stage may complete `RESULT_READY -> SUCCEEDED`.
+- Workers must not modify `Shot`, create `Asset`, download media, or perform FFmpeg/FFprobe result processing.
+- Worker tests must cover crash recovery, expired lease takeover, and two-worker lease competition.
 - Do not perform network requests, FFmpeg work, sleeps, or long-running provider operations inside database transactions.
 - Task completion must be idempotent and must not create duplicate result assets.
 - New task-model fields require an Alembic migration and migration tests.

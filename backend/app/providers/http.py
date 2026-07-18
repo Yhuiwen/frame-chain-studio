@@ -56,6 +56,7 @@ class MappedAsyncHttpProvider(AsyncGenerationProvider):
             verify=config.verify_tls,
             transport=transport,
             headers={"User-Agent": "frame-chain-studio-provider/0.1"},
+            trust_env=False,
         )
 
     async def __aenter__(self) -> "MappedAsyncHttpProvider":
@@ -79,7 +80,12 @@ class MappedAsyncHttpProvider(AsyncGenerationProvider):
             self.config.mapping.image_request.fixed_fields,
             skip_none=self.config.mapping.image_request.skip_none,
         )
-        raw = await self._request_json("POST", self.config.image_submit_path, json_payload=payload)
+        raw = await self._request_json(
+            "POST",
+            self.config.image_submit_path,
+            json_payload=payload,
+            client_request_id=request.client_request_id,
+        )
         return self._parse_submit(raw, self.config.mapping.submit_response)
 
     async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
@@ -90,7 +96,12 @@ class MappedAsyncHttpProvider(AsyncGenerationProvider):
             self.config.mapping.video_request.fixed_fields,
             skip_none=self.config.mapping.video_request.skip_none,
         )
-        raw = await self._request_json("POST", self.config.video_submit_path, json_payload=payload)
+        raw = await self._request_json(
+            "POST",
+            self.config.video_submit_path,
+            json_payload=payload,
+            client_request_id=request.client_request_id,
+        )
         return self._parse_submit(raw, self.config.mapping.submit_response)
 
     async def get_job(self, remote_job_id: str) -> ProviderJobResult:
@@ -118,21 +129,30 @@ class MappedAsyncHttpProvider(AsyncGenerationProvider):
         encoded = quote(remote_job_id, safe="")
         return template.replace("{remote_job_id}", encoded)
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, client_request_id: str | None = None) -> dict[str, str]:
         headers = dict(self._extra_headers)
         if self.config.api_key:
             headers[self.config.auth_header_name] = (
                 f"{self.config.auth_prefix}{self.config.api_key.get_secret_value()}"
             )
+        if client_request_id and self.config.idempotency_header_name:
+            headers[self.config.idempotency_header_name] = client_request_id
         return headers
 
-    async def _request_json(self, method: str, path: str, *, json_payload: dict[str, Any] | None = None) -> Any:
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_payload: dict[str, Any] | None = None,
+        client_request_id: str | None = None,
+    ) -> Any:
         try:
             response = await self._client.request(
                 method,
                 self._build_url(path),
                 json=json_payload,
-                headers=self._headers(),
+                headers=self._headers(client_request_id=client_request_id),
                 follow_redirects=False,
             )
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:

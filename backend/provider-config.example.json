@@ -7,6 +7,7 @@
       "api_key": null,
       "auth_header_name": "Authorization",
       "auth_prefix": "Bearer ",
+      "idempotency_header_name": "Idempotency-Key",
       "image_submit_path": "/fake/v1/images/generations",
       "video_submit_path": "/fake/v1/videos/generations",
       "job_status_path_template": "/fake/v1/jobs/{remote_job_id}",
@@ -49,7 +50,8 @@
             "negative_prompt": "input.negative",
             "width": "parameters.width",
             "height": "parameters.height",
-            "seed": "parameters.seed"
+            "seed": "parameters.seed",
+            "client_request_id": "client_request_id"
           },
           "fixed_fields": {
             "parameters.output_format": "png"
@@ -63,7 +65,8 @@
             "fps": "input.fps",
             "start_frame.url": "input.first_frame_url",
             "end_frame.url": "input.last_frame_url",
-            "seed": "parameters.seed"
+            "seed": "parameters.seed",
+            "client_request_id": "client_request_id"
           },
           "fixed_fields": {
             "parameters.output_format": "mp4"

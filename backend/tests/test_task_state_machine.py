@@ -16,6 +16,7 @@ def test_all_declared_task_transitions_are_allowed() -> None:
     [
         (ReliableTaskStatus.QUEUED, ReliableTaskStatus.SUCCEEDED),
         (ReliableTaskStatus.RETRY_WAIT, ReliableTaskStatus.SUCCEEDED),
+        (ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.RUNNING),
         (ReliableTaskStatus.SUCCEEDED, ReliableTaskStatus.RUNNING),
         (ReliableTaskStatus.FAILED, ReliableTaskStatus.QUEUED),
         (ReliableTaskStatus.CANCELLED, ReliableTaskStatus.QUEUED),
@@ -32,3 +33,10 @@ def test_rejects_illegal_and_terminal_recovery_transitions(
 
 def test_same_status_transition_is_idempotent() -> None:
     ensure_task_transition_allowed(ReliableTaskStatus.RUNNING, ReliableTaskStatus.RUNNING)
+
+
+def test_result_ready_transitions() -> None:
+    ensure_task_transition_allowed(ReliableTaskStatus.RUNNING, ReliableTaskStatus.RESULT_READY)
+    ensure_task_transition_allowed(ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.SUCCEEDED)
+    ensure_task_transition_allowed(ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.FAILED)
+    ensure_task_transition_allowed(ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.CANCELLED)

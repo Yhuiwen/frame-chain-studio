@@ -46,6 +46,7 @@ class ReliableTaskStatus(str, Enum):
     SUBMITTING = "SUBMITTING"
     RUNNING = "RUNNING"
     RETRY_WAIT = "RETRY_WAIT"
+    RESULT_READY = "RESULT_READY"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLING = "CANCELLING"
@@ -177,6 +178,7 @@ class GenerationTask(SQLModel, table=True):
     root_task_id: int | None = Field(default=None, foreign_key="generationtask.id")
     request_payload_json: str = Field(default="{}")
     response_summary_json: str = Field(default="{}")
+    result_urls_json: str = Field(default="[]")
     provider_config_snapshot_json: str = Field(default="{}")
     error_code: str | None = None
     error_message: str | None = None

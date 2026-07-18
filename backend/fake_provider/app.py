@@ -10,6 +10,9 @@ app = FastAPI(title="Frame Chain Studio Fake Provider", version="0.1.0")
 
 JOBS: dict[str, dict[str, Any]] = {}
 ATTEMPTS: dict[str, int] = {}
+JOBS_BY_IDEMPOTENCY_KEY: dict[str, str] = {}
+SUBMIT_CALLS = 0
+CREATED_JOBS = 0
 
 
 def _format_response(job: dict[str, Any], response_format: str, base_url: str) -> dict[str, Any]:
@@ -44,7 +47,19 @@ async def _submit(
     request_key: str | None,
     slow_seconds: str | None,
 ) -> JSONResponse:
+    global SUBMIT_CALLS, CREATED_JOBS
     await _maybe_slow(scenario, slow_seconds)
+    SUBMIT_CALLS += 1
+    body = await request.json()
+    idempotency_key = request.headers.get("Idempotency-Key") or request.headers.get("X-Idempotency-Key")
+    if not idempotency_key and isinstance(body, dict):
+        value = body.get("client_request_id")
+        idempotency_key = str(value) if value else None
+    if idempotency_key and idempotency_key in JOBS_BY_IDEMPOTENCY_KEY:
+        job = JOBS[JOBS_BY_IDEMPOTENCY_KEY[idempotency_key]]
+        if job["kind"] != kind:
+            return JSONResponse({"error": {"code": "idempotency_conflict"}}, status_code=409)
+        return JSONResponse(_format_response(job, response_format, str(request.base_url).rstrip("/")))
     key = _request_key(request.url.path, scenario, request_key)
     ATTEMPTS[key] = ATTEMPTS.get(key, 0) + 1
     if scenario == "submit_429_once" and ATTEMPTS[key] == 1:
@@ -65,13 +80,37 @@ async def _submit(
         "polls": 0,
         "running_polls": int(running_polls or "2"),
         "format": response_format,
+        "idempotency_key": idempotency_key,
     }
+    CREATED_JOBS += 1
+    if idempotency_key:
+        JOBS_BY_IDEMPOTENCY_KEY[idempotency_key] = job_id
     return JSONResponse(_format_response(JOBS[job_id], response_format, str(request.base_url).rstrip("/")))
 
 
 @app.get("/fake/v1/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "fake-provider"}
+
+
+@app.get("/fake/v1/test/stats")
+def test_stats() -> dict[str, object]:
+    return {
+        "created_jobs": CREATED_JOBS,
+        "submit_calls": SUBMIT_CALLS,
+        "jobs_by_idempotency_key": dict(JOBS_BY_IDEMPOTENCY_KEY),
+    }
+
+
+@app.post("/fake/v1/test/reset")
+def test_reset() -> dict[str, str]:
+    global SUBMIT_CALLS, CREATED_JOBS
+    JOBS.clear()
+    ATTEMPTS.clear()
+    JOBS_BY_IDEMPOTENCY_KEY.clear()
+    SUBMIT_CALLS = 0
+    CREATED_JOBS = 0
+    return {"status": "reset"}
 
 
 @app.post("/fake/v1/images/generations")

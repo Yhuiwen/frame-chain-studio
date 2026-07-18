@@ -496,7 +496,7 @@ def project_detail(
     list[dict[str, object]],
     list[dict[str, object]],
     list[GenerationRequest],
-    list[GenerationTask],
+    list[dict[str, object]],
     list[TaskLog],
 ]:
     project = get_project_or_404(session, project_id)
@@ -511,7 +511,7 @@ def project_detail(
             .order_by(col(GenerationRequest.created_at))
         ).all()
     )
-    tasks = task_service.list_project_tasks(session, project_id)
+    tasks = [task_payload(task) for task in task_service.list_project_tasks(session, project_id)]
     shot_ids = [shot.id for shot in shots if shot.id is not None]
     logs = list(
         session.exec(
@@ -523,6 +523,36 @@ def project_detail(
     serialized_assets = [asset_payload(asset) for asset in assets]
     serialized_shots = [shot_payload(session, shot) for shot in shots]
     return project, serialized_shots, serialized_assets, requests, tasks, logs
+
+
+def task_payload(task: GenerationTask) -> dict[str, object]:
+    return {
+        "id": task.id,
+        "generation_request_id": task.generation_request_id,
+        "project_id": task.project_id,
+        "shot_id": task.shot_id,
+        "task_type": task.task_type,
+        "provider_id": task.provider_id,
+        "status": task.status,
+        "remote_job_id": task.remote_job_id,
+        "remote_status": task.remote_status,
+        "attempt_number": task.attempt_number,
+        "retry_count": task.retry_count,
+        "max_attempts": task.max_attempts,
+        "result_urls": task_service.loads_json_list(task.result_urls_json),
+        "next_retry_at": task.next_retry_at,
+        "last_polled_at": task.last_polled_at,
+        "next_poll_at": task.next_poll_at,
+        "locked_by": task.locked_by,
+        "locked_until": task.locked_until,
+        "error_code": task.error_code,
+        "error_message": task.error_message,
+        "result_asset_id": task.result_asset_id,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+    }
 
 
 def asset_url(asset_id: int) -> str:

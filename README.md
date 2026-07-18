@@ -248,6 +248,89 @@ $env:FCS_PROVIDER_CONFIG_FILE="D:\AIProjects\frame-chain-studio\backend\provider
 
 Provider config may contain `api_key`, but it is modeled as a secret and must not appear in logs, repr output, response summaries, or database snapshots. The current frontend does not edit Provider configuration.
 
+## Generation Worker
+
+Phase 2C adds an independent persistent Worker process for remote Provider coordination. The Web API still starts on its own; it does not launch the Worker in FastAPI startup or lifespan hooks. This keeps auto-reload and multi-process web serving from accidentally starting duplicate Workers.
+
+Worker responsibilities:
+
+- find due `GenerationTask` rows in `QUEUED`, `SUBMITTING`, `RUNNING`, or due `RETRY_WAIT`
+- acquire and release database leases
+- build Provider request DTOs from `GenerationRequest` and `GenerationTask`
+- submit to the configured Provider with a stable idempotency key
+- persist `remote_job_id`, `remote_status`, polling timestamps, retry metadata, and result URLs
+- recover after Worker or service restart
+
+The Worker does not download result URLs, validate media with FFprobe, create result assets, extract tail frames, or advance Shot review states.
+
+Remote success now moves through an intermediate local state:
+
+```text
+QUEUED -> SUBMITTING -> RUNNING -> RESULT_READY -> later 2E -> SUCCEEDED
+```
+
+`RESULT_READY` means the Provider has succeeded and result URLs are persisted in `GenerationTask.result_urls_json`, but the media has not been downloaded, validated, or registered as an `Asset`. `SUCCEEDED` keeps its stronger meaning: local result processing is complete.
+
+`result_urls_json` stores a redacted, deduplicated list:
+
+```json
+[
+  {
+    "url": "http://127.0.0.1:8090/fake/v1/results/fake-123.mp4",
+    "mime_type": "video/mp4",
+    "file_name": "fake-123.mp4",
+    "metadata": {}
+  }
+]
+```
+
+Run the Worker:
+
+```powershell
+cd backend
+$env:FCS_PROVIDER_CONFIG_FILE="provider-config.example.json"
+python -m app.workers.cli --once
+python -m app.workers.cli --until-idle
+python -m app.workers.cli
+```
+
+Run Fake Provider and Worker together:
+
+```powershell
+cd backend
+python -m uvicorn fake_provider.app:app --host 127.0.0.1 --port 8090
+```
+
+In another terminal:
+
+```powershell
+cd backend
+$env:FCS_PROVIDER_CONFIG_FILE="provider-config.example.json"
+python -m app.workers.cli --until-idle
+```
+
+Worker environment variables:
+
+- `FCS_PROVIDER_CONFIG_FILE`: JSON Provider config path; required for Worker startup.
+- `FCS_WORKER_ID`: stable ID for this Worker process. Defaults to hostname, process ID, and a random suffix.
+- `FCS_WORKER_LEASE_SECONDS`: lease duration, default `30`.
+- `FCS_WORKER_POLL_INTERVAL_SECONDS`: next-poll delay, default `1`.
+- `FCS_WORKER_RETRY_DELAY_SECONDS`: minimal retry delay for retryable Provider errors, default `5`.
+- `FCS_WORKER_MAX_UNKNOWN_POLLS`: unknown remote status limit, default `3`.
+- `FCS_WORKER_BATCH_SIZE`: due-task scan limit, default `10`.
+
+Recovery rules:
+
+- `QUEUED`: submit once with `GenerationTask.idempotency_key` as `client_request_id`.
+- `SUBMITTING` without `remote_job_id`: resubmit with the same idempotency key.
+- `SUBMITTING` with `remote_job_id`: repair to `RUNNING` without resubmitting.
+- `RUNNING` with `remote_job_id`: poll the existing remote job.
+- `RUNNING` without `remote_job_id`: fail as invalid task data.
+- due `RETRY_WAIT` with `remote_job_id`: return to polling.
+- due `RETRY_WAIT` without `remote_job_id`: return to submission.
+
+SQLite concurrency is intentionally conservative. Each task cycle uses short database transactions and conditional lease updates; Provider HTTP calls occur outside transactions. The default Worker concurrency is effectively one task batch loop per process. For production multi-worker deployments, PostgreSQL row-level locking or a stronger lease primitive is recommended.
+
 ## Database Migrations
 
 Alembic is used for schema upgrades. `SQLModel.metadata.create_all()` remains available only for isolated test fixtures and non-Alembic fallback; it is not the migration mechanism.

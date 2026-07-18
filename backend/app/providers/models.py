@@ -164,6 +164,7 @@ class MappedHttpProviderConfig(BaseModel):
     api_key: SecretStr | None = Field(default=None, repr=False)
     auth_header_name: str = "Authorization"
     auth_prefix: str = "Bearer "
+    idempotency_header_name: str | None = "Idempotency-Key"
     image_submit_path: str = "/fake/v1/images/generations"
     video_submit_path: str = "/fake/v1/videos/generations"
     job_status_path_template: str = "/fake/v1/jobs/{remote_job_id}"

@@ -74,12 +74,22 @@ export interface GenerationTask {
   shot_id: number;
   task_type: string;
   provider_id: string;
-  status: "QUEUED" | "SUBMITTING" | "RUNNING" | "RETRY_WAIT" | "SUCCEEDED" | "FAILED" | "CANCELLING" | "CANCELLED";
+  status:
+    | "QUEUED"
+    | "SUBMITTING"
+    | "RUNNING"
+    | "RETRY_WAIT"
+    | "RESULT_READY"
+    | "SUCCEEDED"
+    | "FAILED"
+    | "CANCELLING"
+    | "CANCELLED";
   remote_job_id: string | null;
   remote_status: string | null;
   attempt_number: number;
   retry_count: number;
   max_attempts: number;
+  result_urls?: Array<Record<string, unknown>>;
   next_retry_at: string | null;
   last_polled_at: string | null;
   next_poll_at: string | null;
