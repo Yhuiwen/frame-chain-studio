@@ -63,12 +63,13 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def project_detail(project_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
-    project, shots, assets, requests, logs = studio.project_detail(session, project_id)
+    project, shots, assets, requests, tasks, logs = studio.project_detail(session, project_id)
     return {
         **ProjectRead.model_validate(project).model_dump(),
         "shots": shots,
         "assets": assets,
         "requests": requests,
+        "tasks": tasks,
         "logs": logs,
     }
 

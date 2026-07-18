@@ -89,6 +89,84 @@ The media endpoint only serves database-registered files under the configured st
 
 The project detail page uses a single local refresh function to reload project metadata, shots, structured assets, requests, and logs without a full-page reload. Generation actions refresh once immediately, then start finite polling when active tasks exist. Polling uses one timeout chain, avoids overlapping requests, stops on terminal task states, stops on unmount, slows down while the tab is hidden, and refreshes immediately when the tab becomes visible again.
 
+## Reliable Async Task Model
+
+Phase 2A adds the durable task model needed for future remote providers and workers. It does not add real HTTP providers, file downloads, background worker loops, WebSocket, SSE, or frontend provider configuration.
+
+`GenerationRequest` represents a user's logical generation intent: the Shot, generation kind, prompt snapshots, input assets, output assets, and first-stage compatibility status. A request may have multiple execution attempts.
+
+`GenerationTask` represents one execution attempt for a `GenerationRequest`. Failed or cancelled attempts remain in history; manual retry creates a new task attempt linked by `retry_of_task_id` and `root_task_id`. This keeps historical attempts immutable instead of moving a failed task back to `QUEUED`.
+
+Task statuses:
+
+- `QUEUED`: local task exists and has not started submitting.
+- `SUBMITTING`: a future worker is submitting to a provider.
+- `RUNNING`: a provider job is running or the Mock Provider is executing locally.
+- `RETRY_WAIT`: a retryable error occurred and the task is waiting for the next attempt inside the same execution attempt.
+- `SUCCEEDED`: the result has been registered locally.
+- `FAILED`: the task reached an unrecoverable error or retry limit.
+- `CANCELLING`: cancellation was requested and is awaiting provider acknowledgement.
+- `CANCELLED`: the task is cancelled and will not execute.
+
+Allowed task transitions:
+
+```text
+QUEUED -> SUBMITTING
+QUEUED -> CANCELLED
+SUBMITTING -> RUNNING
+SUBMITTING -> RETRY_WAIT
+SUBMITTING -> FAILED
+SUBMITTING -> CANCELLING
+SUBMITTING -> CANCELLED
+RUNNING -> RUNNING
+RUNNING -> RETRY_WAIT
+RUNNING -> SUCCEEDED
+RUNNING -> FAILED
+RUNNING -> CANCELLING
+RETRY_WAIT -> QUEUED
+RETRY_WAIT -> SUBMITTING
+RETRY_WAIT -> CANCELLED
+RETRY_WAIT -> FAILED
+CANCELLING -> CANCELLED
+CANCELLING -> FAILED
+CANCELLING -> RUNNING
+```
+
+All task transitions must go through `TaskService`, which validates transitions, records `TaskStateChange`, and keeps repeated same-state operations idempotent.
+
+`idempotency_key` has a database uniqueness constraint and prevents duplicate task attempts for the same logical operation. `attempt_number` is the attempt's ordinal number within one logical generation request, starting at 1. `retry_count` is the number of retryable execution failures inside the current attempt.
+
+Lease fields prepare for future multi-worker execution:
+
+- `locked_by`
+- `locked_until`
+- `lock_acquired_at`
+- `lock_version`
+
+Lease acquisition and renewal use short conditional database updates. With SQLite this is a lightweight best-effort coordination mechanism suitable for local development and tests; a production multi-worker deployment should move this to PostgreSQL row-level locking or equivalent lease primitives. Network calls, FFmpeg work, sleeps, and provider execution must not happen inside database transactions.
+
+Request payloads, response summaries, provider snapshots, and error details are saved through a recursive redaction helper. Sensitive keys such as `authorization`, `api_key`, `token`, `cookie`, `password`, and `secret` are replaced with `***REDACTED***`.
+
+## Database Migrations
+
+Alembic is used for schema upgrades. `SQLModel.metadata.create_all()` remains available only for isolated test fixtures and non-Alembic fallback; it is not the migration mechanism.
+
+Commands:
+
+```powershell
+cd backend
+python -m alembic current
+python -m alembic upgrade head
+python -m alembic current
+```
+
+To create a future migration after model changes:
+
+```powershell
+cd backend
+python -m alembic revision -m "describe change"
+```
+
 ## Local Development
 
 Backend:
@@ -159,4 +237,4 @@ On Windows PowerShell:
 
 ## Database Initialization
 
-The backend uses an explicit startup initializer, `SQLModel.metadata.create_all`, in `app.db.init_db()`. This keeps the first stage simple while making schema creation deterministic. A migration tool can be added when schema evolution begins.
+The backend startup initializer applies Alembic migrations to the configured database. The default SQLite database path is still `backend/data/frame_chain.db`, and runtime data remains ignored by Git.

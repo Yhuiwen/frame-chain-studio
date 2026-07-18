@@ -13,7 +13,9 @@ from app.models.entities import (
     GenerationKind,
     GenerationRequest,
     GenerationTaskStatus,
+    GenerationTask,
     Project,
+    ReliableTaskStatus,
     Shot,
     ShotStateChange,
     ShotStatus,
@@ -22,6 +24,7 @@ from app.models.entities import (
 )
 from app.models.schemas import ProjectCreate, ProjectUpdate, ReorderShot, ShotCreate, ShotUpdate
 from app.providers.base import GenerationProvider
+from app.services import task_service
 
 
 def get_project_or_404(session: Session, project_id: int) -> Project:
@@ -228,10 +231,12 @@ def log_task(
     shot: Shot | None,
     message: str,
     level: str = "INFO",
+    task: GenerationTask | None = None,
 ) -> None:
     session.add(
         TaskLog(
             request_id=request.id if request else None,
+            task_id=task.id if task else None,
             shot_id=shot.id if shot else None,
             level=level,
             message=message,
@@ -246,19 +251,28 @@ def create_generation_request(
     kind: GenerationKind,
     input_asset_ids: list[int] | None = None,
 ) -> GenerationRequest:
-    request = GenerationRequest(
+    request = task_service.create_generation_request(
+        session,
         project_id=shot.project_id,
         shot_id=shot.id or 0,
         kind=kind,
         provider_name="mock",
         prompt_snapshot=shot.prompt,
         negative_prompt_snapshot=shot.negative_prompt,
-        input_asset_ids=json.dumps(input_asset_ids or []),
+        input_asset_ids=input_asset_ids or [],
     )
-    session.add(request)
-    session.commit()
-    session.refresh(request)
-    log_task(session, request, shot, f"{kind.value.lower()} request created")
+    task = task_service.create_task_attempt(
+        session,
+        generation_request=request,
+        provider_id="mock",
+        request_payload={
+            "prompt": shot.prompt,
+            "negative_prompt": shot.negative_prompt,
+            "input_asset_ids": input_asset_ids or [],
+        },
+        provider_config_snapshot={"provider_id": "mock", "mode": "local_fixture"},
+    )
+    log_task(session, request, shot, f"{kind.value.lower()} request created", task=task)
     return request
 
 
@@ -299,6 +313,10 @@ def run_generation_request(
     if request is None:
         raise AppError("REQUEST_NOT_FOUND", f"Generation request {request_id} was not found.", 404)
     shot = get_shot_or_404(session, request.shot_id)
+    task = active_or_latest_task_for_request(session, request.id or 0)
+    if task is None:
+        task = task_service.create_task_attempt(session, generation_request=request, provider_id=provider.name)
+    task_service.mark_task_running(session, task.id or 0)
     request.status = GenerationTaskStatus.RUNNING
     request.updated_at = utcnow()
     session.add(request)
@@ -331,8 +349,14 @@ def run_generation_request(
         request.updated_at = utcnow()
         session.add(request)
         session.commit()
+        task_service.mark_task_succeeded(
+            session,
+            task.id or 0,
+            result_asset_id=asset.id,
+            response_summary={"asset_id": asset.id, "asset_type": asset_type.value},
+        )
         transition_shot(session, shot, next_status, f"{request.kind.value.lower()}_generation_succeeded")
-        log_task(session, request, shot, f"{request.kind.value.lower()} request succeeded")
+        log_task(session, request, shot, f"{request.kind.value.lower()} request succeeded", task=task)
     except Exception as exc:
         request.status = GenerationTaskStatus.FAILED
         request.error_code = exc.__class__.__name__
@@ -340,11 +364,43 @@ def run_generation_request(
         request.updated_at = utcnow()
         session.add(request)
         session.commit()
+        task_service.mark_task_failed(
+            session,
+            task.id or 0,
+            error_code=request.error_code or "UNKNOWN_ERROR",
+            error_message=request.error_message or "",
+        )
         fallback = ShotStatus.DRAFT if request.kind == GenerationKind.KEYFRAME else ShotStatus.KEYFRAME_APPROVED
         transition_shot(session, shot, fallback, f"{request.kind.value.lower()}_generation_failed")
-        log_task(session, request, shot, str(exc), "ERROR")
+        log_task(session, request, shot, str(exc), "ERROR", task=task)
     session.refresh(request)
     return request
+
+
+def active_or_latest_task_for_request(session: Session, request_id: int) -> GenerationTask | None:
+    active = session.exec(
+        select(GenerationTask)
+        .where(
+            GenerationTask.generation_request_id == request_id,
+            col(GenerationTask.status).in_(
+                [
+                    ReliableTaskStatus.QUEUED.value,
+                    ReliableTaskStatus.SUBMITTING.value,
+                    ReliableTaskStatus.RUNNING.value,
+                    ReliableTaskStatus.RETRY_WAIT.value,
+                    ReliableTaskStatus.CANCELLING.value,
+                ]
+            ),
+        )
+        .order_by(col(GenerationTask.created_at).desc())
+    ).first()
+    if active is not None:
+        return active
+    return session.exec(
+        select(GenerationTask)
+        .where(GenerationTask.generation_request_id == request_id)
+        .order_by(col(GenerationTask.created_at).desc())
+    ).first()
 
 
 def approve_keyframe(session: Session, shot_id: int) -> Shot:
@@ -435,7 +491,14 @@ def reject_video(session: Session, shot_id: int) -> Shot:
 def project_detail(
     session: Session,
     project_id: int,
-) -> tuple[Project, list[dict[str, object]], list[dict[str, object]], list[GenerationRequest], list[TaskLog]]:
+) -> tuple[
+    Project,
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[GenerationRequest],
+    list[GenerationTask],
+    list[TaskLog],
+]:
     project = get_project_or_404(session, project_id)
     shots = list_project_shots(session, project_id)
     assets = list(
@@ -448,6 +511,7 @@ def project_detail(
             .order_by(col(GenerationRequest.created_at))
         ).all()
     )
+    tasks = task_service.list_project_tasks(session, project_id)
     shot_ids = [shot.id for shot in shots if shot.id is not None]
     logs = list(
         session.exec(
@@ -458,7 +522,7 @@ def project_detail(
     )
     serialized_assets = [asset_payload(asset) for asset in assets]
     serialized_shots = [shot_payload(session, shot) for shot in shots]
-    return project, serialized_shots, serialized_assets, requests, logs
+    return project, serialized_shots, serialized_assets, requests, tasks, logs
 
 
 def asset_url(asset_id: int) -> str:

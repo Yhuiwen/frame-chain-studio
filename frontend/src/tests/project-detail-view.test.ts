@@ -45,7 +45,18 @@ function project(shots: ProjectDetail["shots"]): ProjectDetail {
     updated_at: "",
     assets: [],
     requests: [],
-    logs: [{ id: 1, request_id: 9, shot_id: shots[0]?.id ?? null, level: "INFO", message: "created", created_at: "" }],
+    tasks: [],
+    logs: [
+      {
+        id: 1,
+        request_id: 9,
+        task_id: null,
+        shot_id: shots[0]?.id ?? null,
+        level: "INFO",
+        message: "created",
+        created_at: "",
+      },
+    ],
     shots,
   };
 }

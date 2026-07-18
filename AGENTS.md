@@ -30,6 +30,13 @@
 - New providers must not hard-code local absolute paths; route storage and fixture access through settings.
 - After changing storage, fixture, Docker, provider, or media logic, run `.\scripts\check.ps1`.
 - Do not start phase two work in the same broad change as phase-one baseline cleanup.
+- Do not assign `GenerationTask.status` directly. Every task state change must go through `TaskService`.
+- Providers must not directly mutate database models. They execute generation capability and return results to orchestration code.
+- Future workers must acquire a task lease before processing a task.
+- Do not perform network requests, FFmpeg work, sleeps, or long-running provider operations inside database transactions.
+- Task completion must be idempotent and must not create duplicate result assets.
+- New task-model fields require an Alembic migration and migration tests.
+- After changing task models or migrations, run migration tests and `.\scripts\check.ps1`.
 
 ## Phase Two Order
 

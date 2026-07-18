@@ -38,6 +38,7 @@ describe("studio store", () => {
       updated_at: "",
       assets: [],
       requests: [],
+      tasks: [],
       logs: [],
       shots: [
         {
@@ -67,6 +68,7 @@ describe("studio store", () => {
       updated_at: "",
       assets: [],
       requests: [],
+      tasks: [],
       logs: [],
       shots: [],
     };

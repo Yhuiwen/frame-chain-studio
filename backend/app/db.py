@@ -1,6 +1,8 @@
 from collections.abc import Generator
 from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import get_settings
@@ -15,7 +17,13 @@ def init_db() -> None:
     if settings.database_url.startswith("sqlite:///"):
         db_path = Path(settings.database_url.replace("sqlite:///", "", 1))
         db_path.parent.mkdir(parents=True, exist_ok=True)
-    SQLModel.metadata.create_all(engine)
+    alembic_ini = Path(__file__).resolve().parents[1] / "alembic.ini"
+    if alembic_ini.exists():
+        alembic_config = Config(str(alembic_ini))
+        alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
+        command.upgrade(alembic_config, "head")
+    else:
+        SQLModel.metadata.create_all(engine)
 
 
 def get_session() -> Generator[Session, None, None]:

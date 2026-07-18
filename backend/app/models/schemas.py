@@ -6,6 +6,8 @@ from app.models.entities import (
     AssetType,
     GenerationKind,
     GenerationTaskStatus,
+    GenerationTaskType,
+    ReliableTaskStatus,
     ShotStatus,
 )
 
@@ -103,9 +105,38 @@ class GenerationRequestRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class GenerationTaskRead(BaseModel):
+    id: int
+    generation_request_id: int
+    project_id: int
+    shot_id: int
+    task_type: GenerationTaskType
+    provider_id: str
+    status: ReliableTaskStatus
+    remote_job_id: str | None
+    remote_status: str | None
+    attempt_number: int
+    retry_count: int
+    max_attempts: int
+    next_retry_at: datetime | None
+    last_polled_at: datetime | None
+    next_poll_at: datetime | None
+    locked_by: str | None
+    locked_until: datetime | None
+    error_code: str | None
+    error_message: str | None
+    result_asset_id: int | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    model_config = ConfigDict(from_attributes=True)
+
+
 class TaskLogRead(BaseModel):
     id: int
     request_id: int | None
+    task_id: int | None
     shot_id: int | None
     level: str
     message: str
@@ -117,4 +148,5 @@ class ProjectDetail(ProjectRead):
     shots: list[ShotRead]
     assets: list[AssetRead]
     requests: list[GenerationRequestRead]
+    tasks: list[GenerationTaskRead]
     logs: list[TaskLogRead]

@@ -38,6 +38,7 @@ describe("useProjectPolling", () => {
       shots: [],
       assets: [],
       logs: [],
+      tasks: [],
       requests: [{ id: 1, project_id: 1, shot_id: 1, kind: "KEYFRAME", provider_name: "mock", status: "RUNNING", error_code: null, error_message: null, created_at: "", updated_at: "" }],
     };
     const refresh = vi.spyOn(store, "refreshProjectDetail").mockImplementation(async () => {
@@ -64,6 +65,7 @@ describe("useProjectPolling", () => {
       shots: [],
       assets: [],
       logs: [],
+      tasks: [],
       requests: [{ id: 1, project_id: 1, shot_id: 1, kind: "VIDEO", provider_name: "mock", status: "RUNNING", error_code: null, error_message: null, created_at: "", updated_at: "" }],
     };
     vi.spyOn(store, "refreshProjectDetail").mockResolvedValue(undefined);

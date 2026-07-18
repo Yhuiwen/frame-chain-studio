@@ -189,7 +189,7 @@ def test_project_detail_returns_start_frame_source_and_readable_url(session: Ses
     first, second = create_two_shot_project(session)
     complete_first_shot(session, first)
 
-    _, shots, _, _, _ = studio.project_detail(session, first.project_id)
+    _, shots, _, _, _, _ = studio.project_detail(session, first.project_id)
     second_payload = next(shot for shot in shots if shot["id"] == second.id)
     start_frame = second_payload["start_frame"]
     assert isinstance(start_frame, dict)
