@@ -82,7 +82,7 @@ def cancel_task(
         reason=payload.reason if payload else "",
         cancellation_timeout_seconds=120,
     )
-    return studio.task_payload(task)
+    return studio.task_payload(session, task)
 
 
 @router.post("/tasks/{task_id}/retry", response_model=GenerationTaskRead)
@@ -98,7 +98,7 @@ def retry_task(
         idempotency_key=idempotency_key or f"retry:{task_id}:{datetime.now().timestamp()}",
         reason=payload.reason if payload else "",
     )
-    return studio.task_payload(retry)
+    return studio.task_payload(session, retry)
 
 
 @router.get("/media/{asset_id}")

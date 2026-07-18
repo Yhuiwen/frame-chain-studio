@@ -103,7 +103,8 @@ Task statuses:
 - `SUBMITTING`: a future worker is submitting to a provider.
 - `RUNNING`: a provider job is running or the Mock Provider is executing locally.
 - `RETRY_WAIT`: a retryable error occurred and the task is waiting for the next attempt inside the same execution attempt.
-- `RESULT_READY`: a provider job succeeded and result URLs are persisted, but local media processing is not implemented yet.
+- `RESULT_READY`: a provider job succeeded and result URLs are persisted, but local media processing has not started.
+- `PROCESSING_RESULT`: local result download, validation, finalization, or Asset registration is in progress.
 - `SUCCEEDED`: the result has been registered locally.
 - `FAILED`: the task reached an unrecoverable error or retry limit.
 - `CANCELLING`: cancellation was requested and is awaiting provider acknowledgement.
@@ -129,6 +130,11 @@ RUNNING -> CANCELLED
 RESULT_READY -> SUCCEEDED
 RESULT_READY -> FAILED
 RESULT_READY -> CANCELLED
+RESULT_READY -> PROCESSING_RESULT
+PROCESSING_RESULT -> PROCESSING_RESULT
+PROCESSING_RESULT -> SUCCEEDED
+PROCESSING_RESULT -> FAILED
+PROCESSING_RESULT -> CANCELLED
 RETRY_WAIT -> QUEUED
 RETRY_WAIT -> SUBMITTING
 RETRY_WAIT -> CANCELLED
@@ -277,10 +283,10 @@ The Worker does not download result URLs, validate media with FFprobe, create re
 Remote success now moves through an intermediate local state:
 
 ```text
-QUEUED -> SUBMITTING -> RUNNING -> RESULT_READY -> later 2E -> SUCCEEDED
+QUEUED -> SUBMITTING -> RUNNING -> RESULT_READY -> PROCESSING_RESULT -> SUCCEEDED
 ```
 
-`RESULT_READY` means the Provider has succeeded and result URLs are persisted in `GenerationTask.result_urls_json`, but the media has not been downloaded, validated, or registered as an `Asset`. `SUCCEEDED` keeps its stronger meaning: local result processing is complete.
+`RESULT_READY` means the Provider has succeeded and result URLs are persisted in `GenerationTask.result_urls_json`, but the media has not been downloaded, validated, or registered as an `Asset`. `PROCESSING_RESULT` means the local ResultWorker has claimed the task and is downloading, validating, finalizing, or registering the result. `SUCCEEDED` keeps its stronger meaning: local result processing is complete and the task has a registered `result_asset_id`.
 
 `result_urls_json` stores a redacted, deduplicated list:
 
@@ -334,6 +340,21 @@ Worker environment variables:
 - `FCS_WORKER_CANCELLATION_TIMEOUT_SECONDS`: maximum time to wait for cancellation confirmation, default `120`.
 - `FCS_WORKER_MAX_UNKNOWN_POLLS`: unknown remote status limit, default `3`.
 - `FCS_WORKER_BATCH_SIZE`: due-task scan limit, default `10`.
+- `FCS_RESULT_WORKER_LEASE_SECONDS`: result processing lease duration, default `300`.
+- `FCS_RESULT_CONNECT_TIMEOUT_SECONDS`: result download connect timeout, default `10`.
+- `FCS_RESULT_READ_TIMEOUT_SECONDS`: result download read timeout, default `60`.
+- `FCS_RESULT_TOTAL_TIMEOUT_SECONDS`: total result download timeout, default `900`.
+- `FCS_RESULT_MAX_IMAGE_BYTES`: maximum image download size in bytes, default `52428800`.
+- `FCS_RESULT_MAX_VIDEO_BYTES`: maximum video download size in bytes, default `2147483648`.
+- `FCS_RESULT_MAX_IMAGE_PIXELS`: maximum decoded image pixels, default `80000000`.
+- `FCS_RESULT_DOWNLOAD_CHUNK_BYTES`: streaming chunk size in bytes, default `1048576`.
+- `FCS_RESULT_MAX_REDIRECTS`: maximum manual redirects, default `3`.
+- `FCS_RESULT_MAX_ATTEMPTS`: maximum local result attempts, default `3`.
+- `FCS_RESULT_RETRY_BASE_SECONDS`: result retry base delay, default `2`.
+- `FCS_RESULT_RETRY_MAX_SECONDS`: result retry max delay, default `300`.
+- `FCS_RESULT_RETRY_JITTER_RATIO`: result retry jitter ratio, default `0.2`.
+- `FCS_RESULT_TEMP_FILE_TTL_HOURS`: stale result temp-file cleanup age, default `24`.
+- `FCS_FFPROBE_TIMEOUT_SECONDS`: FFprobe timeout, default `30`.
 
 Recovery rules:
 
@@ -354,6 +375,90 @@ Cancellation and manual retry APIs:
 - `SUCCEEDED` tasks are not cancellable. `RESULT_READY` tasks are not manually retryable in Phase 2D because local result processing has not run yet.
 
 SQLite concurrency is intentionally conservative. Each task cycle uses short database transactions and conditional lease updates; Provider HTTP calls occur outside transactions. The default Worker concurrency is effectively one task batch loop per process. For production multi-worker deployments, PostgreSQL row-level locking or a stronger lease primitive is recommended.
+
+## Result Processing Worker
+
+Phase 2E adds a separate ResultWorker for local result processing. It is intentionally separate from the Provider polling Worker:
+
+- Provider Worker: submit jobs, poll remote status, persist remote result URLs, stop at `RESULT_READY`.
+- ResultWorker: claim `RESULT_READY` or recoverable `PROCESSING_RESULT`, download the primary result, validate media, create an `Asset`, advance the Shot to review, and mark the task `SUCCEEDED`.
+
+Run it:
+
+```powershell
+cd backend
+$env:FCS_ENV="development"
+$env:FCS_RESULT_ALLOWED_PRIVATE_HOSTS="127.0.0.1"
+python -m app.workers.result_cli --once
+python -m app.workers.result_cli --until-idle
+python -m app.workers.result_cli
+```
+
+Clean old unreferenced temporary result files:
+
+```powershell
+cd backend
+python -m app.workers.result_cli --cleanup-temp
+```
+
+Result task states:
+
+```text
+RESULT_READY -> PROCESSING_RESULT -> SUCCEEDED
+PROCESSING_RESULT -> FAILED
+PROCESSING_RESULT -> CANCELLED
+```
+
+`PROCESSING_RESULT` is not normally user-cancellable. `RESULT_READY` remains cancellable before local file processing starts.
+
+`GenerationTaskResult` stores durable per-URL processing state. It records the source URL hash, result index, primary flag, temporary and final relative paths, SHA-256, file size, media metadata, linked `asset_id`, retry state, and sanitized errors. The API does not return full source URLs or presigned query strings; project detail returns only `result_count`, `result_hosts`, `processing_status`, and `result_asset_id`.
+
+Primary result selection is deterministic:
+
+- If a result has `metadata.primary = true`, it is primary.
+- Otherwise result index `0` is primary.
+- All URLs get `GenerationTaskResult` rows, but Phase 2E only requires the primary result to succeed.
+- Secondary failures do not overwrite a successful primary result.
+- `KEYFRAME_GENERATION` requires image media; `VIDEO_GENERATION` requires video media.
+
+Result retry is separate from Provider retry. `result_retry_count`, `max_result_attempts`, `next_result_retry_at`, and `last_result_retry_delay_seconds` track local download and validation retry state without changing Provider `retry_count`.
+
+### Result URL Safety
+
+Result downloads use a dedicated `httpx.AsyncClient` with `trust_env=False`, no automatic redirects, no Provider API key, no Authorization header, and no Cookie header.
+
+Only `http` and `https` URLs are accepted. The downloader rejects credentials, empty hosts, invalid ports, fragments, overlong URLs, unsupported schemes, localhost variants, loopback, private, link-local, multicast, unspecified, reserved, and metadata-service addresses. DNS is resolved before download, and every resolved address must pass the same IP checks.
+
+Redirects are handled manually. Each `Location` is normalized, resolved, and checked again. HTTPS to HTTP downgrade is rejected; HTTP to HTTPS is allowed. Redirect loops and redirects beyond `FCS_RESULT_MAX_REDIRECTS` fail.
+
+Fake Provider results live on private/local addresses, so tests and local development may opt in:
+
+```text
+FCS_ENV=development
+FCS_RESULT_ALLOWED_PRIVATE_HOSTS=127.0.0.1,fake-provider
+```
+
+This allowlist is ignored outside `development` and `test` and is only for result downloads. Do not use private-host allowlists in production.
+
+### Streaming Downloads And Validation
+
+Downloads stream into `data/storage/temp/results/*.part`. Remote file names and `Content-Disposition` are not trusted. `Content-Length` is checked before download when present, and actual bytes are enforced while streaming. Over-limit or failed downloads remove the partial file.
+
+After download, the worker computes SHA-256 and validates real media content:
+
+- Images: Pillow opens the file, runs `verify()`, reopens and `load()`s pixels, rejects SVG, corrupt files, empty files, unsupported formats, animations, and images over `FCS_RESULT_MAX_IMAGE_PIXELS`.
+- Videos: FFprobe runs without shell, with a timeout, and must find a valid video stream, width, height, and duration. Audio is optional.
+
+Validated files move atomically into deterministic paths under `data/storage/results/task-{id}/result-{id}-{sha}.png|mp4`. Database result paths are relative to storage; Asset serving still checks that files remain under the configured storage root.
+
+Asset registration is idempotent per project, Shot, media type, and SHA-256. Reprocessing the same task does not create duplicate Assets or duplicate final files. Stale results from older task attempts are marked `STALE_RESULT` before download and cannot overwrite newer task output.
+
+Workflow bridge:
+
+- Keyframe result Asset -> Shot enters `KEYFRAME_REVIEW`; it is not auto-approved.
+- Video result Asset -> Shot enters `VIDEO_REVIEW`; tail-frame extraction still happens only when the user approves the video through the existing first-stage path.
+
+Phase 2E still does not implement authenticated vendor downloads, object storage, video stitching, audio, subtitles, super-resolution, CLIP/VLM scoring, Provider settings UI, WebSocket/SSE, Redis, Celery, Kafka, automatic Git commits, or tags.
 
 ## Database Migrations
 

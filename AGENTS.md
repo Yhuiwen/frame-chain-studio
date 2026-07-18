@@ -42,7 +42,7 @@
 - Generation Workers must acquire a database lease before every task execution cycle, and Provider HTTP calls must happen outside database transactions.
 - Worker submit and recovery paths must reuse `GenerationTask.idempotency_key` as the Provider `client_request_id`; never generate a new client request ID while recovering `SUBMITTING`.
 - `RUNNING` recovery must poll the existing `remote_job_id`, not resubmit.
-- Remote Provider success must move tasks to `RESULT_READY`; only a later media and asset stage may complete `RESULT_READY -> SUCCEEDED`.
+- Remote Provider success must move tasks to `RESULT_READY`; ResultWorker owns `RESULT_READY -> PROCESSING_RESULT -> SUCCEEDED`.
 - Workers must not modify `Shot`, create `Asset`, download media, or perform FFmpeg/FFprobe result processing.
 - `max_attempts` counts the first automatic execution plus automatic retries; manual retry creates a new linked task attempt.
 - Cancellation API handlers must only record durable intent. Provider cancellation belongs in the Worker.
@@ -50,6 +50,18 @@
 - Manual retry is allowed only from `FAILED` or `CANCELLED`, and must use a durable `TaskCommand` idempotency key.
 - Task query payloads may expose sanitized error code/message and control flags, but must not expose raw provider error details.
 - Phase 2D does not include result URL download, FFprobe validation, asset registration, Shot advancement, provider settings UI, Redis/Celery/Kafka/APScheduler, WebSocket/SSE, or real vendor APIs.
+- Result downloads must validate URL scheme, credentials, fragments, DNS results, and resolved IP addresses before every request.
+- Never use automatic redirects for result downloads. Every redirect target must be revalidated, and HTTPS-to-HTTP downgrade must be rejected.
+- Result downloads must not send Provider API keys, Authorization headers, Cookie headers, or custom user-supplied headers.
+- Result downloads must stream to `.part` files under the configured storage temp directory and enforce byte limits while streaming.
+- Local result file names must come from internal IDs and content hashes, not remote file names or `Content-Disposition`.
+- Media type must be determined by Pillow or FFprobe validation, not URL suffix or Content-Type alone.
+- Result download, FFprobe, file moves, sleeps, and network calls must happen outside database transactions.
+- Asset creation from result processing must be idempotent per project, Shot, asset type, and SHA-256.
+- ResultWorker must not directly mutate Shot fields. It must call workflow/service functions that validate Shot transitions.
+- Older task results must not overwrite newer task attempts. Stale results should be marked explicitly and skipped before download when detectable.
+- API payloads must not expose full result source URLs, presigned query strings, temp paths, storage roots, or local absolute paths.
+- `PROCESSING_RESULT` crash recovery and duplicate Worker competition require tests.
 - Worker tests must cover crash recovery, expired lease takeover, and two-worker lease competition.
 - Retry/cancel tests must cover legal and illegal manual retry, cancel idempotency, retry limits, provider cancel failures, and timeout paths.
 - Do not perform network requests, FFmpeg work, sleeps, or long-running provider operations inside database transactions.

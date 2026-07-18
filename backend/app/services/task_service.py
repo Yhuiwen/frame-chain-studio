@@ -1,8 +1,9 @@
 import json
+import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, update
+from sqlalchemy import func, or_, true, update
 from sqlmodel import Session, col, select
 
 from app.core.errors import AppError
@@ -13,11 +14,19 @@ from app.domain.task_state_machine import (
     ensure_task_transition_allowed,
 )
 from app.models.entities import (
+    Asset,
+    AssetType,
     GenerationKind,
     GenerationRequest,
+    GenerationTaskStatus,
     GenerationTask,
+    GenerationTaskResult,
+    GenerationTaskResultStatus,
     GenerationTaskType,
+    ResultMediaKind,
     ReliableTaskStatus,
+    Shot,
+    ShotStatus,
     TaskCommand,
     TaskCommandStatus,
     TaskCommandType,
@@ -121,6 +130,26 @@ def list_shot_tasks(session: Session, shot_id: int) -> list[GenerationTask]:
             select(GenerationTask).where(GenerationTask.shot_id == shot_id).order_by(col(GenerationTask.created_at))
         ).all()
     )
+
+
+def primary_result_status(session: Session, task_id: int) -> str | None:
+    result = session.exec(
+        select(GenerationTaskResult).where(
+            GenerationTaskResult.generation_task_id == task_id,
+            col(GenerationTaskResult.is_primary).is_(true()),
+        )
+    ).first()
+    return result.status.value if result else None
+
+
+def task_is_latest_attempt(session: Session, task_id: int) -> bool:
+    task = get_task(session, task_id)
+    latest = session.exec(
+        select(GenerationTask)
+        .where(GenerationTask.generation_request_id == task.generation_request_id)
+        .order_by(col(GenerationTask.created_at).desc(), col(GenerationTask.id).desc())
+    ).first()
+    return latest is not None and latest.id == task.id
 
 
 def create_task_attempt(
@@ -535,6 +564,366 @@ def mark_task_result_ready(
     )
 
 
+def mark_task_processing_result(
+    session: Session,
+    task_id: int,
+    *,
+    max_result_attempts: int,
+    now: datetime | None = None,
+) -> GenerationTask:
+    task = get_task(session, task_id)
+    if task.status == ReliableTaskStatus.PROCESSING_RESULT:
+        return task
+    task.max_result_attempts = max_result_attempts
+    task.next_result_retry_at = None
+    task.last_result_retry_delay_seconds = None
+    task.updated_at = db_time(now)
+    session.add(task)
+    session.commit()
+    return transition_task(
+        session,
+        task_id,
+        ReliableTaskStatus.PROCESSING_RESULT,
+        expected_current=ReliableTaskStatus.RESULT_READY,
+        reason_code="result_processing_started",
+        now=now,
+    )
+
+
+def expected_media_kind_for_task(task: GenerationTask) -> ResultMediaKind:
+    if task.task_type == GenerationTaskType.KEYFRAME_GENERATION:
+        return ResultMediaKind.IMAGE
+    if task.task_type == GenerationTaskType.VIDEO_GENERATION:
+        return ResultMediaKind.VIDEO
+    raise AppError("UNSUPPORTED_RESULT_TASK_TYPE", f"Task type {task.task_type.value} has no result media kind.", 400)
+
+
+def source_url_hash(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+def initialize_task_results(
+    session: Session,
+    task_id: int,
+    *,
+    max_attempts: int,
+    now: datetime | None = None,
+) -> list[GenerationTaskResult]:
+    task = get_task(session, task_id)
+    urls = [item for item in loads_json_list(task.result_urls_json) if isinstance(item, dict) and item.get("url")]
+    if not urls:
+        raise AppError("TASK_RESULT_URLS_REQUIRED", "Task has no result URLs to process.", 409)
+    expected = expected_media_kind_for_task(task)
+    primary_index = 0
+    for index, item in enumerate(urls):
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("primary") is True:
+            primary_index = index
+            break
+        if item.get("primary") is True:
+            primary_index = index
+            break
+    current_time = db_time(now)
+    results: list[GenerationTaskResult] = []
+    for index, item in enumerate(urls):
+        url = str(item["url"])
+        url_hash = source_url_hash(url)
+        existing = session.exec(
+            select(GenerationTaskResult).where(
+                GenerationTaskResult.generation_task_id == task_id,
+                GenerationTaskResult.source_url_hash == url_hash,
+            )
+        ).first()
+        if existing is not None:
+            results.append(existing)
+            continue
+        result = GenerationTaskResult(
+            generation_task_id=task_id,
+            result_index=index,
+            source_url=url,
+            source_url_hash=url_hash,
+            expected_media_kind=expected,
+            is_primary=index == primary_index,
+            max_attempts=max_attempts,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+        session.add(result)
+        session.commit()
+        session.refresh(result)
+        results.append(result)
+    return sorted(results, key=lambda item: item.result_index)
+
+
+def get_primary_task_result(session: Session, task_id: int) -> GenerationTaskResult:
+    result = session.exec(
+        select(GenerationTaskResult).where(
+            GenerationTaskResult.generation_task_id == task_id,
+            col(GenerationTaskResult.is_primary).is_(true()),
+        )
+    ).first()
+    if result is None:
+        raise AppError("TASK_RESULT_NOT_FOUND", "Primary task result was not initialized.", 409)
+    return result
+
+
+def transition_result(
+    session: Session,
+    result_id: int,
+    status: GenerationTaskResultStatus,
+    *,
+    now: datetime | None = None,
+) -> GenerationTaskResult:
+    result = session.get(GenerationTaskResult, result_id)
+    if result is None:
+        raise AppError("TASK_RESULT_NOT_FOUND", f"Task result {result_id} was not found.", 404)
+    if result.status == status:
+        return result
+    current_time = db_time(now)
+    result.status = status
+    result.updated_at = current_time
+    if status == GenerationTaskResultStatus.DOWNLOADING:
+        result.download_started_at = result.download_started_at or current_time
+        result.attempt_count += 1
+    elif status == GenerationTaskResultStatus.DOWNLOADED:
+        result.download_completed_at = current_time
+    elif status == GenerationTaskResultStatus.VALIDATED:
+        result.validation_completed_at = current_time
+    elif status == GenerationTaskResultStatus.COMPLETED:
+        result.finalized_at = current_time
+    session.add(result)
+    session.commit()
+    session.refresh(result)
+    return result
+
+
+def record_result_downloaded(
+    session: Session,
+    result_id: int,
+    *,
+    temporary_relative_path: str,
+    file_size: int,
+    sha256: str,
+    mime_type: str | None,
+    file_name: str | None,
+    now: datetime | None = None,
+) -> GenerationTaskResult:
+    result = transition_result(session, result_id, GenerationTaskResultStatus.DOWNLOADED, now=now)
+    result.temporary_relative_path = temporary_relative_path
+    result.file_size = file_size
+    result.sha256 = sha256
+    result.mime_type = mime_type
+    result.file_name = file_name
+    result.updated_at = db_time(now)
+    session.add(result)
+    session.commit()
+    session.refresh(result)
+    return result
+
+
+def record_result_validated(
+    session: Session,
+    result_id: int,
+    *,
+    media_kind: ResultMediaKind,
+    mime_type: str,
+    width: int | None,
+    height: int | None,
+    duration_seconds: float | None = None,
+    fps: float | None = None,
+    frame_count: int | None = None,
+    video_codec: str | None = None,
+    audio_codec: str | None = None,
+    now: datetime | None = None,
+) -> GenerationTaskResult:
+    result = transition_result(session, result_id, GenerationTaskResultStatus.VALIDATED, now=now)
+    result.media_kind = media_kind
+    result.mime_type = mime_type
+    result.width = width
+    result.height = height
+    result.duration_seconds = duration_seconds
+    result.fps = fps
+    result.frame_count = frame_count
+    result.video_codec = video_codec
+    result.audio_codec = audio_codec
+    result.updated_at = db_time(now)
+    session.add(result)
+    session.commit()
+    session.refresh(result)
+    return result
+
+
+def record_result_final_path(
+    session: Session,
+    result_id: int,
+    *,
+    final_relative_path: str,
+    now: datetime | None = None,
+) -> GenerationTaskResult:
+    result = transition_result(session, result_id, GenerationTaskResultStatus.FINALIZING, now=now)
+    result.final_relative_path = final_relative_path
+    result.updated_at = db_time(now)
+    session.add(result)
+    session.commit()
+    session.refresh(result)
+    return result
+
+
+def schedule_result_retry(
+    session: Session,
+    task_id: int,
+    result_id: int,
+    *,
+    delay_seconds: float,
+    error_code: TaskErrorCode | str,
+    error_message: str,
+    error_details: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> GenerationTaskResult:
+    current_time = db_time(now)
+    task = get_task(session, task_id)
+    result = session.get(GenerationTaskResult, result_id)
+    if result is None:
+        raise AppError("TASK_RESULT_NOT_FOUND", f"Task result {result_id} was not found.", 404)
+    task.result_retry_count += 1
+    result.error_code = error_code.value if isinstance(error_code, TaskErrorCode) else error_code
+    result.error_message = error_message
+    result.error_details_json = dumps_sanitized(error_details or {})
+    if task.result_retry_count >= task.max_result_attempts or result.attempt_count >= result.max_attempts:
+        result.status = GenerationTaskResultStatus.FAILED
+        result.next_retry_at = None
+        result.updated_at = current_time
+        task.next_result_retry_at = None
+        task.last_result_retry_delay_seconds = None
+        session.add(result)
+        session.add(task)
+        session.commit()
+        mark_task_failed(
+            session,
+            task_id,
+            error_code=error_code,
+            error_message=error_message,
+            error_details=error_details,
+            now=current_time,
+        )
+        return result
+    result.status = GenerationTaskResultStatus.RETRY_WAIT
+    result.next_retry_at = current_time + timedelta(seconds=delay_seconds)
+    result.updated_at = current_time
+    task.next_result_retry_at = result.next_retry_at
+    task.last_result_retry_delay_seconds = delay_seconds
+    task.updated_at = current_time
+    record_task_error(
+        session,
+        task_id,
+        error_code=error_code,
+        error_message=error_message,
+        error_details=error_details,
+        now=current_time,
+    )
+    session.add(result)
+    session.add(task)
+    session.commit()
+    session.refresh(result)
+    return result
+
+
+def register_result_asset(
+    session: Session,
+    task_id: int,
+    result_id: int,
+    *,
+    final_path: str,
+    asset_type: AssetType,
+    shot_next_status: ShotStatus,
+    workflow_reason: str,
+    now: datetime | None = None,
+) -> tuple[GenerationTask, Any]:
+    from app.services import studio
+
+    current_time = db_time(now)
+    task = get_task(session, task_id)
+    result = session.get(GenerationTaskResult, result_id)
+    if result is None:
+        raise AppError("TASK_RESULT_NOT_FOUND", f"Task result {result_id} was not found.", 404)
+    if task.result_asset_id is not None and result.asset_id is not None:
+        return task, session.get(Asset, result.asset_id)
+    request = session.get(GenerationRequest, task.generation_request_id)
+    if request is None:
+        raise AppError("REQUEST_NOT_FOUND", f"Generation request {task.generation_request_id} was not found.", 404)
+    shot = session.get(Shot, task.shot_id)
+    if shot is None:
+        raise AppError("SHOT_NOT_FOUND", f"Shot {task.shot_id} was not found.", 404)
+    latest = studio.active_or_latest_task_for_request(session, request.id or 0)
+    if latest and latest.id != task.id:
+        record_task_error(
+            session,
+            task_id,
+            error_code="STALE_RESULT",
+            error_message="Task result is stale and will not update the shot.",
+            now=current_time,
+        )
+        transition_task(session, task_id, ReliableTaskStatus.FAILED, reason_code="stale_result", now=current_time)
+        return get_task(session, task_id), None
+    if result.asset_id is not None:
+        asset = session.get(Asset, result.asset_id)
+    else:
+        asset = session.exec(
+            select(Asset).where(
+                Asset.project_id == task.project_id,
+                Asset.shot_id == task.shot_id,
+                Asset.type == asset_type,
+                Asset.sha256 == result.sha256,
+            )
+        ).first()
+        if asset is None:
+            asset = Asset(
+                project_id=task.project_id,
+                shot_id=task.shot_id,
+                type=asset_type,
+                path=final_path,
+                mime_type=result.mime_type or "application/octet-stream",
+                sha256=result.sha256,
+                file_size=result.file_size,
+                width=result.width,
+                height=result.height,
+                duration_seconds=result.duration_seconds,
+                fps=result.fps,
+                frame_count=result.frame_count,
+                video_codec=result.video_codec,
+                audio_codec=result.audio_codec,
+                created_at=current_time,
+            )
+            session.add(asset)
+            session.commit()
+            session.refresh(asset)
+        result.asset_id = asset.id
+    result.status = GenerationTaskResultStatus.COMPLETED
+    result.finalized_at = result.finalized_at or current_time
+    result.updated_at = current_time
+    task.result_asset_id = result.asset_id
+    task.next_result_retry_at = None
+    task.last_result_retry_delay_seconds = None
+    session.add(result)
+    session.add(task)
+    request.status = GenerationTaskStatus.SUCCEEDED
+    request.output_asset_ids = json.dumps([result.asset_id])
+    request.updated_at = current_time
+    session.add(request)
+    session.commit()
+    if shot.status != shot_next_status:
+        studio.transition_shot(session, shot, shot_next_status, workflow_reason)
+    studio.log_task(session, request, shot, f"{request.kind.value.lower()} result registered", task=task)
+    completed = mark_task_succeeded(
+        session,
+        task_id,
+        result_asset_id=result.asset_id,
+        response_summary={"asset_id": result.asset_id, "asset_type": asset_type.value},
+        now=current_time,
+    )
+    return completed, session.get(Asset, result.asset_id)
+
+
 def mark_task_running(session: Session, task_id: int, *, now: datetime | None = None) -> GenerationTask:
     task = get_task(session, task_id)
     if task.status == ReliableTaskStatus.QUEUED:
@@ -677,7 +1066,11 @@ def mark_task_succeeded(
         if task.result_asset_id != result_asset_id:
             raise AppError("TASK_RESULT_CONFLICT", "Task already succeeded with a different result asset.", 409)
         return task
-    if task.status not in {ReliableTaskStatus.RUNNING, ReliableTaskStatus.SUBMITTING}:
+    if task.status not in {
+        ReliableTaskStatus.RUNNING,
+        ReliableTaskStatus.SUBMITTING,
+        ReliableTaskStatus.PROCESSING_RESULT,
+    }:
         raise AppError("TASK_NOT_COMPLETABLE", f"Task in {task.status.value} cannot be marked succeeded.", 409)
     task.result_asset_id = result_asset_id
     task.response_summary_json = dumps_sanitized(response_summary or {})
@@ -734,6 +1127,8 @@ def request_task_cancel(
     current_time = db_time(now)
     if task.status == ReliableTaskStatus.SUCCEEDED:
         raise AppError("TASK_NOT_CANCELLABLE", "Succeeded tasks cannot be cancelled.", 409)
+    if task.status == ReliableTaskStatus.PROCESSING_RESULT:
+        raise AppError("TASK_NOT_CANCELLABLE", "Tasks processing local results cannot be cancelled.", 409)
     if task.status in {ReliableTaskStatus.FAILED, ReliableTaskStatus.CANCELLED}:
         return task
     task.cancel_requested_at = task.cancel_requested_at or current_time
@@ -838,6 +1233,9 @@ def acquire_task_lease(
         return None
     if task.status == ReliableTaskStatus.RETRY_WAIT and task.next_retry_at and task.next_retry_at > current_time:
         return None
+    if task.status in {ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.PROCESSING_RESULT}:
+        if task.next_result_retry_at and task.next_result_retry_at > current_time:
+            return None
     if task.next_poll_at and task.next_poll_at > current_time:
         return None
     statement = (
@@ -851,6 +1249,10 @@ def acquire_task_lease(
                 col(GenerationTask.locked_by) == worker_id,
             ),
             or_(col(GenerationTask.next_retry_at).is_(None), col(GenerationTask.next_retry_at) <= current_time),
+            or_(
+                col(GenerationTask.next_result_retry_at).is_(None),
+                col(GenerationTask.next_result_retry_at) <= current_time,
+            ),
             or_(col(GenerationTask.next_poll_at).is_(None), col(GenerationTask.next_poll_at) <= current_time),
         )
         .values(

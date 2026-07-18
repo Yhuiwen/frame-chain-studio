@@ -34,5 +34,20 @@ services:
       timeout: 3s
       retries: 5
 
+  result-worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.workers.result_cli"]
+    profiles:
+      - worker
+    environment:
+      FCS_DATABASE_URL: sqlite:///./data/frame_chain.db
+      FCS_STORAGE_DIR: ./data/storage
+      FCS_FIXTURE_DIR: ./tests/fixtures
+      FCS_ENV: development
+      FCS_RESULT_ALLOWED_PRIVATE_HOSTS: fake-provider,127.0.0.1
+    volumes:
+      - backend-data:/app/data
+
 volumes:
   backend-data:

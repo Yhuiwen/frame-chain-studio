@@ -32,10 +32,13 @@ def test_upgrade_empty_database_creates_phase_one_and_task_tables(tmp_path: Path
     tables = table_names(db_path)
     assert {"project", "shot", "asset", "generationrequest", "generationtask", "taskstatechange"} <= tables
     assert "taskcommand" in tables
+    assert "generationtaskresult" in tables
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
     assert "cancel_requested_at" in columns(db_path, "generationtask")
     assert "last_retry_delay_seconds" in columns(db_path, "generationtask")
+    assert "next_result_retry_at" in columns(db_path, "generationtask")
+    assert "sha256" in columns(db_path, "asset")
 
 
 def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tmp_path: Path) -> None:
@@ -176,9 +179,12 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260718_0003"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260718_0004"
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
     assert "job_deadline_at" in columns(db_path, "generationtask")
+    assert "result_retry_count" in columns(db_path, "generationtask")
     assert "taskcommand" in table_names(db_path)
+    assert "generationtaskresult" in table_names(db_path)
+    assert "sha256" in columns(db_path, "asset")
     assert "generationtask" in table_names(db_path)

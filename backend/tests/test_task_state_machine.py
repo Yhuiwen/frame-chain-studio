@@ -37,6 +37,11 @@ def test_same_status_transition_is_idempotent() -> None:
 
 def test_result_ready_transitions() -> None:
     ensure_task_transition_allowed(ReliableTaskStatus.RUNNING, ReliableTaskStatus.RESULT_READY)
+    ensure_task_transition_allowed(ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.PROCESSING_RESULT)
+    ensure_task_transition_allowed(ReliableTaskStatus.PROCESSING_RESULT, ReliableTaskStatus.PROCESSING_RESULT)
+    ensure_task_transition_allowed(ReliableTaskStatus.PROCESSING_RESULT, ReliableTaskStatus.SUCCEEDED)
+    ensure_task_transition_allowed(ReliableTaskStatus.PROCESSING_RESULT, ReliableTaskStatus.FAILED)
+    ensure_task_transition_allowed(ReliableTaskStatus.PROCESSING_RESULT, ReliableTaskStatus.CANCELLED)
     ensure_task_transition_allowed(ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.SUCCEEDED)
     ensure_task_transition_allowed(ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.FAILED)
     ensure_task_transition_allowed(ReliableTaskStatus.RESULT_READY, ReliableTaskStatus.CANCELLED)

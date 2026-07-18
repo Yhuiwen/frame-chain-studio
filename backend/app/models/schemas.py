@@ -83,6 +83,12 @@ class AssetRead(BaseModel):
     file_name: str
     mime_type: str
     source_asset_id: int | None
+    sha256: str | None = None
+    file_size: int | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: float | None = None
+    fps: float | None = None
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
@@ -118,7 +124,9 @@ class GenerationTaskRead(BaseModel):
     attempt_number: int
     retry_count: int
     max_attempts: int
-    result_urls: list[dict[str, object]] = []
+    result_count: int = 0
+    result_hosts: list[str] = []
+    processing_status: str | None = None
     can_cancel: bool = False
     can_retry: bool = False
     retry_of_task_id: int | None = None
@@ -130,6 +138,10 @@ class GenerationTaskRead(BaseModel):
     job_deadline_at: datetime | None = None
     cancellation_deadline_at: datetime | None = None
     last_retry_delay_seconds: float | None = None
+    result_retry_count: int = 0
+    max_result_attempts: int = 3
+    next_result_retry_at: datetime | None = None
+    last_result_retry_delay_seconds: float | None = None
     next_retry_at: datetime | None
     last_polled_at: datetime | None
     next_poll_at: datetime | None

@@ -47,6 +47,7 @@ class ReliableTaskStatus(str, Enum):
     RUNNING = "RUNNING"
     RETRY_WAIT = "RETRY_WAIT"
     RESULT_READY = "RESULT_READY"
+    PROCESSING_RESULT = "PROCESSING_RESULT"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLING = "CANCELLING"
@@ -87,6 +88,24 @@ class TaskCommandStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class ResultMediaKind(str, Enum):
+    IMAGE = "image"
+    VIDEO = "video"
+
+
+class GenerationTaskResultStatus(str, Enum):
+    PENDING = "PENDING"
+    DOWNLOADING = "DOWNLOADING"
+    DOWNLOADED = "DOWNLOADED"
+    VALIDATING = "VALIDATING"
+    VALIDATED = "VALIDATED"
+    FINALIZING = "FINALIZING"
+    COMPLETED = "COMPLETED"
+    RETRY_WAIT = "RETRY_WAIT"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
 class ProjectBase(SQLModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
@@ -119,6 +138,11 @@ class Shot(ShotBase, table=True):
 
 
 class Asset(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("project_id", "shot_id", "type", "sha256", name="uq_asset_project_shot_type_sha256"),
+        Index("ix_asset_project_shot_type_sha256", "project_id", "shot_id", "type", "sha256"),
+    )
+
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
     shot_id: int | None = Field(default=None, foreign_key="shot.id", index=True)
@@ -126,6 +150,15 @@ class Asset(SQLModel, table=True):
     path: str
     mime_type: str
     source_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    sha256: str | None = Field(default=None, index=True)
+    file_size: int | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: float | None = None
+    fps: float | None = None
+    frame_count: int | None = None
+    video_codec: str | None = None
+    audio_codec: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -189,6 +222,10 @@ class GenerationTask(SQLModel, table=True):
     retry_count: int = Field(default=0)
     next_retry_at: datetime | None = Field(default=None, index=True)
     last_retry_delay_seconds: float | None = None
+    result_retry_count: int = Field(default=0)
+    max_result_attempts: int = Field(default=3)
+    next_result_retry_at: datetime | None = Field(default=None, index=True)
+    last_result_retry_delay_seconds: float | None = None
     submission_deadline_at: datetime | None = Field(default=None, index=True)
     job_deadline_at: datetime | None = Field(default=None, index=True)
     cancellation_deadline_at: datetime | None = Field(default=None, index=True)
@@ -212,6 +249,53 @@ class GenerationTask(SQLModel, table=True):
     lock_version: int = Field(default=0)
     idempotency_key: str = Field(index=True)
     result_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+
+
+class GenerationTaskResult(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("generation_task_id", "result_index", name="uq_taskresult_task_index"),
+        UniqueConstraint("generation_task_id", "source_url_hash", name="uq_taskresult_task_url_hash"),
+        Index("ix_taskresult_task_status", "generation_task_id", "status"),
+        Index("ix_taskresult_status_next_retry", "status", "next_retry_at"),
+        Index("ix_taskresult_source_url_hash", "source_url_hash"),
+        Index("ix_taskresult_asset_id", "asset_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    generation_task_id: int = Field(foreign_key="generationtask.id", index=True)
+    result_index: int
+    source_url: str
+    source_url_hash: str = Field(index=True)
+    status: GenerationTaskResultStatus = Field(default=GenerationTaskResultStatus.PENDING, index=True)
+    media_kind: ResultMediaKind | None = Field(default=None, index=True)
+    expected_media_kind: ResultMediaKind = Field(index=True)
+    is_primary: bool = Field(default=False, index=True)
+    attempt_count: int = Field(default=0)
+    max_attempts: int = Field(default=3)
+    next_retry_at: datetime | None = Field(default=None, index=True)
+    download_started_at: datetime | None = None
+    download_completed_at: datetime | None = None
+    validation_completed_at: datetime | None = None
+    finalized_at: datetime | None = None
+    temporary_relative_path: str | None = None
+    final_relative_path: str | None = None
+    sha256: str | None = Field(default=None, index=True)
+    file_size: int | None = None
+    mime_type: str | None = None
+    file_name: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: float | None = None
+    fps: float | None = None
+    frame_count: int | None = None
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    asset_id: int | None = Field(default=None, foreign_key="asset.id", index=True)
+    error_code: str | None = None
+    error_message: str | None = None
+    error_details_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class TaskCommand(SQLModel, table=True):

@@ -4,7 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 app = FastAPI(title="Frame Chain Studio Fake Provider", version="0.1.0")
 
@@ -15,6 +15,7 @@ SUBMIT_CALLS = 0
 CREATED_JOBS = 0
 CANCEL_CALLS = 0
 CANCELLED_JOBS = 0
+DOWNLOAD_CALLS = 0
 
 
 def _format_response(job: dict[str, Any], response_format: str, base_url: str) -> dict[str, Any]:
@@ -28,6 +29,19 @@ def _format_response(job: dict[str, Any], response_format: str, base_url: str) -
         numeric = {"queued": 0, "running": 1, "succeeded": 2, "failed": 3, "cancelled": 4}[status]
         return {"id": job_id, "status_code": numeric, "result": {"files": [{"download_url": result_url}]}}
     output_key = "image_url" if job["kind"] == "image" else "video_url"
+    if job.get("scenario") == "result_multiple_urls":
+        return {
+            "data": {
+                "task_id": job_id,
+                "status": status,
+                "output": {
+                    output_key: [
+                        {"url": result_url, "metadata": {"primary": True}},
+                        {"url": f"{base_url}/fake/v1/results/{job_id}.{media_ext}?variant=secondary"},
+                    ]
+                },
+            }
+        }
     return {"data": {"task_id": job_id, "status": status, "output": {output_key: result_url}}}
 
 
@@ -102,13 +116,14 @@ def test_stats() -> dict[str, object]:
         "submit_calls": SUBMIT_CALLS,
         "cancel_calls": CANCEL_CALLS,
         "cancelled_jobs": CANCELLED_JOBS,
+        "download_calls": DOWNLOAD_CALLS,
         "jobs_by_idempotency_key": dict(JOBS_BY_IDEMPOTENCY_KEY),
     }
 
 
 @app.post("/fake/v1/test/reset")
 def test_reset() -> dict[str, str]:
-    global SUBMIT_CALLS, CREATED_JOBS, CANCEL_CALLS, CANCELLED_JOBS
+    global SUBMIT_CALLS, CREATED_JOBS, CANCEL_CALLS, CANCELLED_JOBS, DOWNLOAD_CALLS
     JOBS.clear()
     ATTEMPTS.clear()
     JOBS_BY_IDEMPOTENCY_KEY.clear()
@@ -116,6 +131,7 @@ def test_reset() -> dict[str, str]:
     CREATED_JOBS = 0
     CANCEL_CALLS = 0
     CANCELLED_JOBS = 0
+    DOWNLOAD_CALLS = 0
     return {"status": "reset"}
 
 
@@ -229,14 +245,65 @@ async def cancel_job(
 
 
 @app.get("/fake/v1/results/{job_id}.mp4")
-def video_result(job_id: str) -> FileResponse:
-    if job_id not in JOBS:
+async def video_result(job_id: str, request: Request) -> Response:
+    global DOWNLOAD_CALLS
+    DOWNLOAD_CALLS += 1
+    job = JOBS.get(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    scenario = str(job["scenario"])
+    special = await _special_result_response(request, job_id, scenario, "video")
+    if special is not None:
+        return special
     return FileResponse(Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "mock-video.mp4")
 
 
 @app.get("/fake/v1/results/{job_id}.png")
-def image_result(job_id: str) -> FileResponse:
-    if job_id not in JOBS:
+async def image_result(job_id: str, request: Request) -> Response:
+    global DOWNLOAD_CALLS
+    DOWNLOAD_CALLS += 1
+    job = JOBS.get(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    scenario = str(job["scenario"])
+    special = await _special_result_response(request, job_id, scenario, "image")
+    if special is not None:
+        return special
     return FileResponse(Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "mock-keyframe.png")
+
+
+async def _special_result_response(
+    request: Request,
+    job_id: str,
+    scenario: str,
+    kind: str,
+) -> Response | None:
+    if scenario == "result_404":
+        raise HTTPException(status_code=404, detail="result not found")
+    if scenario == "result_500_once":
+        attempts_key = f"result-500:{job_id}"
+        ATTEMPTS[attempts_key] = ATTEMPTS.get(attempts_key, 0) + 1
+        if ATTEMPTS[attempts_key] == 1:
+            raise HTTPException(status_code=500, detail="temporary result error")
+    if scenario == "result_slow":
+        await asyncio.sleep(0.2)
+    if scenario == "result_redirect" and "redirected" not in request.query_params:
+        suffix = "png" if kind == "image" else "mp4"
+        return RedirectResponse(f"/fake/v1/results/{job_id}.{suffix}?redirected=1", status_code=302)
+    if scenario == "result_redirect_to_private":
+        return RedirectResponse("http://127.0.0.1/private-result", status_code=302)
+    if scenario == "result_corrupt_image" and kind == "image":
+        return PlainTextResponse("not an image", media_type="image/png")
+    if scenario == "result_corrupt_video" and kind == "video":
+        return PlainTextResponse("not a video", media_type="video/mp4")
+    if scenario == "result_html_instead_of_media":
+        return PlainTextResponse("<html>nope</html>", media_type="text/html")
+    if scenario == "result_too_large":
+        return PlainTextResponse("x" * (1024 * 1024 + 1), media_type="application/octet-stream")
+    if scenario == "result_content_type_mismatch":
+        fixture = "mock-keyframe.png" if kind == "image" else "mock-video.mp4"
+        return FileResponse(
+            Path(__file__).resolve().parents[1] / "tests" / "fixtures" / fixture,
+            media_type="text/html",
+        )
+    return None

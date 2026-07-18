@@ -7,6 +7,7 @@ ACTIVE_TASK_STATUSES = {
     ReliableTaskStatus.SUBMITTING,
     ReliableTaskStatus.RUNNING,
     ReliableTaskStatus.RETRY_WAIT,
+    ReliableTaskStatus.PROCESSING_RESULT,
     ReliableTaskStatus.CANCELLING,
 }
 TERMINAL_TASK_STATUSES = {
@@ -19,6 +20,8 @@ LEASEABLE_TASK_STATUSES = {
     ReliableTaskStatus.SUBMITTING,
     ReliableTaskStatus.RUNNING,
     ReliableTaskStatus.RETRY_WAIT,
+    ReliableTaskStatus.RESULT_READY,
+    ReliableTaskStatus.PROCESSING_RESULT,
     ReliableTaskStatus.CANCELLING,
 }
 
@@ -41,6 +44,13 @@ ALLOWED_TASK_TRANSITIONS: dict[ReliableTaskStatus, set[ReliableTaskStatus]] = {
         ReliableTaskStatus.CANCELLED,
     },
     ReliableTaskStatus.RESULT_READY: {
+        ReliableTaskStatus.PROCESSING_RESULT,
+        ReliableTaskStatus.SUCCEEDED,
+        ReliableTaskStatus.FAILED,
+        ReliableTaskStatus.CANCELLED,
+    },
+    ReliableTaskStatus.PROCESSING_RESULT: {
+        ReliableTaskStatus.PROCESSING_RESULT,
         ReliableTaskStatus.SUCCEEDED,
         ReliableTaskStatus.FAILED,
         ReliableTaskStatus.CANCELLED,

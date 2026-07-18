@@ -122,7 +122,8 @@ function idempotencyKey(action: string, taskId: number) {
 function taskType(task: GenerationTask) {
   if (task.status === "FAILED") return "danger";
   if (task.status === "CANCELLED") return "info";
-  if (task.status === "RESULT_READY" || task.status === "SUCCEEDED") return "success";
+  if (task.status === "SUCCEEDED") return "success";
+  if (task.status === "RESULT_READY" || task.status === "PROCESSING_RESULT") return "primary";
   if (task.status === "RETRY_WAIT" || task.status === "CANCELLING") return "warning";
   return "primary";
 }
@@ -420,9 +421,14 @@ async function retryTask(task: GenerationTask) {
               <div class="task-meta">
                 attempt {{ task.attempt_number }} / retries {{ task.retry_count }}/{{ task.max_attempts }}
                 <span v-if="task.next_retry_at">next retry {{ task.next_retry_at }}</span>
+                <span v-if="task.next_result_retry_at">next result retry {{ task.next_result_retry_at }}</span>
                 <span v-if="task.next_poll_at">next poll {{ task.next_poll_at }}</span>
                 <span v-if="task.job_deadline_at">job deadline {{ task.job_deadline_at }}</span>
                 <span v-if="task.cancellation_deadline_at">cancel deadline {{ task.cancellation_deadline_at }}</span>
+                <span v-if="task.result_count">results {{ task.result_count }}</span>
+                <span v-if="task.processing_status">processing {{ task.processing_status }}</span>
+                <span v-if="task.result_asset_id">asset #{{ task.result_asset_id }}</span>
+                <span v-if="task.result_hosts.length">hosts {{ task.result_hosts.join(", ") }}</span>
               </div>
               <div v-if="task.error_code || task.error_message" class="task-error">
                 {{ task.error_code ?? "ERROR" }}: {{ task.error_message ?? "" }}

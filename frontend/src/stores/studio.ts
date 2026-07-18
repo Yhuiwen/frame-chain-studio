@@ -18,6 +18,8 @@ export const ACTIVE_TASK_STATUSES = new Set([
   "RUNNING",
   "PROCESSING",
   "RETRY_WAIT",
+  "RESULT_READY",
+  "PROCESSING_RESULT",
   "CANCELLING",
 ]);
 

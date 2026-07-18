@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sqlmodel import Session, col, select
 
@@ -388,6 +389,8 @@ def active_or_latest_task_for_request(session: Session, request_id: int) -> Gene
                     ReliableTaskStatus.SUBMITTING.value,
                     ReliableTaskStatus.RUNNING.value,
                     ReliableTaskStatus.RETRY_WAIT.value,
+                    ReliableTaskStatus.RESULT_READY.value,
+                    ReliableTaskStatus.PROCESSING_RESULT.value,
                     ReliableTaskStatus.CANCELLING.value,
                 ]
             ),
@@ -511,7 +514,7 @@ def project_detail(
             .order_by(col(GenerationRequest.created_at))
         ).all()
     )
-    tasks = [task_payload(task) for task in task_service.list_project_tasks(session, project_id)]
+    tasks = [task_payload(session, task) for task in task_service.list_project_tasks(session, project_id)]
     shot_ids = [shot.id for shot in shots if shot.id is not None]
     logs = list(
         session.exec(
@@ -525,7 +528,18 @@ def project_detail(
     return project, serialized_shots, serialized_assets, requests, tasks, logs
 
 
-def task_payload(task: GenerationTask) -> dict[str, object]:
+def task_payload(session: Session, task: GenerationTask) -> dict[str, object]:
+    result_items = task_service.loads_json_list(task.result_urls_json)
+    result_hosts = sorted(
+        {
+            parsed.hostname
+            for item in result_items
+            if isinstance(item, dict)
+            for parsed in [urlsplit(str(item.get("url", "")))]
+            if parsed.hostname
+        }
+    )
+    processing_status = task_service.primary_result_status(session, task.id or 0)
     return {
         "id": task.id,
         "generation_request_id": task.generation_request_id,
@@ -539,7 +553,9 @@ def task_payload(task: GenerationTask) -> dict[str, object]:
         "attempt_number": task.attempt_number,
         "retry_count": task.retry_count,
         "max_attempts": task.max_attempts,
-        "result_urls": task_service.loads_json_list(task.result_urls_json),
+        "result_count": len(result_items),
+        "result_hosts": result_hosts,
+        "processing_status": processing_status,
         "can_cancel": task.status
         in {
             ReliableTaskStatus.QUEUED,
@@ -559,6 +575,10 @@ def task_payload(task: GenerationTask) -> dict[str, object]:
         "job_deadline_at": task.job_deadline_at,
         "cancellation_deadline_at": task.cancellation_deadline_at,
         "last_retry_delay_seconds": task.last_retry_delay_seconds,
+        "result_retry_count": task.result_retry_count,
+        "max_result_attempts": task.max_result_attempts,
+        "next_result_retry_at": task.next_result_retry_at,
+        "last_result_retry_delay_seconds": task.last_result_retry_delay_seconds,
         "next_retry_at": task.next_retry_at,
         "last_polled_at": task.last_polled_at,
         "next_poll_at": task.next_poll_at,
@@ -588,6 +608,12 @@ def asset_payload(asset: Asset) -> dict[str, object]:
         "file_name": Path(asset.path).name,
         "mime_type": asset.mime_type,
         "source_asset_id": asset.source_asset_id,
+        "sha256": asset.sha256,
+        "file_size": asset.file_size,
+        "width": asset.width,
+        "height": asset.height,
+        "duration_seconds": asset.duration_seconds,
+        "fps": asset.fps,
         "created_at": asset.created_at,
     }
 

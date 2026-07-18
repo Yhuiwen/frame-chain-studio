@@ -2,7 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "@/api/client";
-import { useStudioStore } from "@/stores/studio";
+import { ACTIVE_TASK_STATUSES, useStudioStore } from "@/stores/studio";
 
 vi.mock("@/api/client", () => ({
   api: {
@@ -77,5 +77,11 @@ describe("studio store", () => {
 
     expect(api.deleteShot).toHaveBeenCalledWith(1);
     expect(store.current?.shots).toHaveLength(1);
+  });
+
+  it("treats result processing states as active", () => {
+    expect(ACTIVE_TASK_STATUSES.has("RESULT_READY")).toBe(true);
+    expect(ACTIVE_TASK_STATUSES.has("PROCESSING_RESULT")).toBe(true);
+    expect(ACTIVE_TASK_STATUSES.has("SUCCEEDED")).toBe(false);
   });
 });

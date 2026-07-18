@@ -52,6 +52,12 @@ export interface Asset {
   file_name: string;
   mime_type: string;
   source_asset_id: number | null;
+  sha256: string | null;
+  file_size: number | null;
+  width: number | null;
+  height: number | null;
+  duration_seconds: number | null;
+  fps: number | null;
 }
 
 export interface GenerationRequest {
@@ -80,6 +86,7 @@ export interface GenerationTask {
     | "RUNNING"
     | "RETRY_WAIT"
     | "RESULT_READY"
+    | "PROCESSING_RESULT"
     | "SUCCEEDED"
     | "FAILED"
     | "CANCELLING"
@@ -93,7 +100,9 @@ export interface GenerationTask {
   can_retry: boolean;
   retry_of_task_id: number | null;
   root_task_id: number | null;
-  result_urls?: Array<Record<string, unknown>>;
+  result_count: number;
+  result_hosts: string[];
+  processing_status: string | null;
   next_retry_at: string | null;
   last_polled_at: string | null;
   next_poll_at: string | null;
@@ -104,6 +113,10 @@ export interface GenerationTask {
   cancelled_at: string | null;
   cancel_reason: string | null;
   last_retry_delay_seconds: number | null;
+  result_retry_count: number;
+  max_result_attempts: number;
+  next_result_retry_at: string | null;
+  last_result_retry_delay_seconds: number | null;
   locked_by: string | null;
   locked_until: string | null;
   error_code: string | null;
