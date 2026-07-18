@@ -68,6 +68,12 @@
 - Task completion must be idempotent and must not create duplicate result assets.
 - New task-model fields require an Alembic migration and migration tests.
 - After changing task models or migrations, run migration tests and `.\scripts\check.ps1`.
+- Project Provider defaults may store only safe Provider IDs, model names, aspect ratio, duration, and seed. Never store API keys, base URLs, or raw Provider JSON on `Project`.
+- Generation endpoints must resolve effective Provider parameters on the backend and persist the safe effective snapshot before queueing a task.
+- Provider capability validation must happen on the backend. Frontend controls may guide the user, but cannot be the only state or capability enforcement.
+- Worker heartbeats are best-effort status signals. Heartbeat failures must be logged and ignored so task processing can continue.
+- Worker status APIs may expose online state, current task ID, processed count, and sanitized errors, but not local paths, raw Provider config, secrets, or raw result URLs.
+- Frontend task views should group attempts by `GenerationRequest`, show actual backend `generation_mode`, and avoid duplicating the full Shot state machine.
 
 ## Phase Two Order
 

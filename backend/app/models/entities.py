@@ -106,9 +106,36 @@ class GenerationTaskResultStatus(str, Enum):
     SKIPPED = "SKIPPED"
 
 
+class GenerationMode(str, Enum):
+    TEXT_TO_IMAGE = "TEXT_TO_IMAGE"
+    START_FRAME_ONLY = "START_FRAME_ONLY"
+    FIRST_LAST_FRAME = "FIRST_LAST_FRAME"
+
+
+class WorkerType(str, Enum):
+    GENERATION = "GENERATION"
+    RESULT = "RESULT"
+
+
+class WorkerStatus(str, Enum):
+    STARTING = "STARTING"
+    IDLE = "IDLE"
+    BUSY = "BUSY"
+    STOPPING = "STOPPING"
+    STOPPED = "STOPPED"
+    ERROR = "ERROR"
+
+
 class ProjectBase(SQLModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
+    image_provider_id: str | None = None
+    video_provider_id: str | None = None
+    image_model: str | None = None
+    video_model: str | None = None
+    default_aspect_ratio: str | None = "16:9"
+    default_video_duration_seconds: float | None = None
+    default_seed: int | None = None
 
 
 class Project(ProjectBase, table=True):
@@ -168,6 +195,13 @@ class GenerationRequest(SQLModel, table=True):
     shot_id: int = Field(foreign_key="shot.id", index=True)
     kind: GenerationKind = Field(index=True)
     provider_name: str
+    effective_provider_id: str | None = Field(default=None, index=True)
+    model: str | None = None
+    generation_mode: GenerationMode | None = Field(default=None, index=True)
+    aspect_ratio: str | None = None
+    seed: int | None = None
+    duration_seconds: float | None = None
+    allow_capability_fallback: bool = Field(default=False)
     status: GenerationTaskStatus = Field(default=GenerationTaskStatus.PENDING, index=True)
     prompt_snapshot: str = ""
     negative_prompt_snapshot: str = ""
@@ -213,6 +247,9 @@ class GenerationTask(SQLModel, table=True):
     completed_at: datetime | None = None
     remote_job_id: str | None = Field(default=None, index=True)
     remote_status: str | None = None
+    remote_progress: float | None = None
+    processing_stage: str | None = None
+    processing_progress: float | None = None
     submitted_at: datetime | None = None
     last_polled_at: datetime | None = Field(default=None, index=True)
     next_poll_at: datetime | None = Field(default=None, index=True)
@@ -249,6 +286,26 @@ class GenerationTask(SQLModel, table=True):
     lock_version: int = Field(default=0)
     idempotency_key: str = Field(index=True)
     result_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+
+
+class WorkerHeartbeat(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("worker_type", "worker_id", name="uq_workerheartbeat_type_id"),
+        Index("ix_workerheartbeat_type_last_seen", "worker_type", "last_seen_at"),
+        Index("ix_workerheartbeat_status_last_seen", "status", "last_seen_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    worker_id: str = Field(index=True)
+    worker_type: WorkerType = Field(index=True)
+    status: WorkerStatus = Field(default=WorkerStatus.STARTING, index=True)
+    started_at: datetime = Field(default_factory=utcnow)
+    last_seen_at: datetime = Field(default_factory=utcnow, index=True)
+    current_task_id: int | None = Field(default=None, foreign_key="generationtask.id", index=True)
+    processed_count: int = Field(default=0)
+    last_error_code: str | None = None
+    last_error_message: str | None = None
+    metadata_json: str = Field(default="{}")
 
 
 class GenerationTaskResult(SQLModel, table=True):

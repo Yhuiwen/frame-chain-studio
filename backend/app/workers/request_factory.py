@@ -3,6 +3,7 @@ from typing import Any
 
 from app.models.entities import GenerationKind, GenerationRequest, GenerationTask, GenerationTaskType
 from app.providers.models import (
+    AssetReference,
     ImageGenerationRequest,
     ProviderCapabilities,
     VideoGenerationRequest,
@@ -45,6 +46,12 @@ class ProviderRequestFactory:
             fps=float(payload.get("fps") or 24),
             aspect_ratio=payload.get("aspect_ratio") if isinstance(payload.get("aspect_ratio"), str) else "16:9",
             seed=payload.get("seed") if isinstance(payload.get("seed"), int) else None,
+            start_frame=self._asset_ref(self._int_list(payload.get("input_asset_ids"))[0])
+            if self._int_list(payload.get("input_asset_ids"))
+            else None,
+            end_frame=self._asset_ref(self._int_list(payload.get("input_asset_ids"))[1])
+            if payload.get("generation_mode") == "FIRST_LAST_FRAME" and len(self._int_list(payload.get("input_asset_ids"))) > 1
+            else None,
             metadata=self._dict(payload.get("metadata")),
             client_request_id=task.idempotency_key,
         )
@@ -65,3 +72,6 @@ class ProviderRequestFactory:
         if not isinstance(value, list):
             return []
         return [item for item in value if isinstance(item, int)]
+
+    def _asset_ref(self, asset_id: int) -> AssetReference:
+        return AssetReference(asset_id=asset_id, url=f"asset://{asset_id}")

@@ -122,12 +122,20 @@ class ProviderCancelResult(BaseModel):
     raw_response_summary: str = ""
 
 
+class ProviderDefaults(BaseModel):
+    image_model: str | None = None
+    video_model: str | None = None
+    aspect_ratio: str | None = "16:9"
+    duration_seconds: float | None = None
+
+
 class ProviderInfo(BaseModel):
     provider_id: str
     display_name: str
     capabilities: ProviderCapabilities
     configured: bool = True
     configuration_error: str | None = None
+    defaults: ProviderDefaults = Field(default_factory=ProviderDefaults)
 
 
 class ResponseMappingConfig(BaseModel):
@@ -171,6 +179,10 @@ class MappedHttpProviderConfig(BaseModel):
     job_cancel_path_template: str = "/fake/v1/jobs/{remote_job_id}/cancel"
     request_timeout_seconds: float = Field(default=10.0, gt=0)
     verify_tls: bool = True
+    default_image_model: str | None = None
+    default_video_model: str | None = None
+    default_aspect_ratio: str | None = "16:9"
+    default_duration_seconds: float | None = None
     capabilities: ProviderCapabilities
     mapping: ProviderMappingConfig
 
@@ -188,6 +200,11 @@ def validate_request_capabilities(
     if isinstance(request, ImageGenerationRequest):
         if not capabilities.text_to_image:
             raise ProviderUnsupportedCapabilityError("Provider does not support text-to-image.")
+        if request.seed is not None and not capabilities.supports_seed:
+            raise ProviderUnsupportedCapabilityError("Provider does not support seed control.")
+        if request.aspect_ratio and capabilities.supported_aspect_ratios:
+            if request.aspect_ratio not in capabilities.supported_aspect_ratios:
+                raise ProviderUnsupportedCapabilityError("Requested aspect ratio is not supported.")
         if len(request.reference_asset_ids) > capabilities.max_reference_images:
             raise ProviderUnsupportedCapabilityError("Too many reference images for provider capability.")
         return
@@ -202,5 +219,10 @@ def validate_request_capabilities(
         raise ProviderUnsupportedCapabilityError("Too many reference images for provider capability.")
     if request.start_frame is not None and request.end_frame is not None and not capabilities.first_last_frame_video:
         raise ProviderUnsupportedCapabilityError("Provider does not support first-last-frame video.")
+    if request.seed is not None and not capabilities.supports_seed:
+        raise ProviderUnsupportedCapabilityError("Provider does not support seed control.")
+    if request.aspect_ratio and capabilities.supported_aspect_ratios:
+        if request.aspect_ratio not in capabilities.supported_aspect_ratios:
+            raise ProviderUnsupportedCapabilityError("Requested aspect ratio is not supported.")
     if capabilities.max_duration_seconds is not None and request.duration_seconds > capabilities.max_duration_seconds:
         raise ProviderUnsupportedCapabilityError("Requested duration exceeds provider capability.")

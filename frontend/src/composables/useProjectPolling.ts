@@ -12,6 +12,7 @@ export function useProjectPolling() {
   const timerId = ref<number | null>(null);
   const inFlight = ref(false);
   const failureCount = ref(0);
+  const tickCount = ref(0);
 
   function stopPolling() {
     if (timerId.value !== null) {
@@ -36,7 +37,11 @@ export function useProjectPolling() {
     }
     inFlight.value = true;
     try {
+      tickCount.value += 1;
       await store.refreshProjectDetail();
+      if (tickCount.value % 2 === 1) {
+        await store.refreshWorkers();
+      }
       failureCount.value = 0;
     } catch (error) {
       failureCount.value += 1;

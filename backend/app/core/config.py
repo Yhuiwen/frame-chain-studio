@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     result_retry_jitter_ratio: float = 0.2
     result_temp_file_ttl_hours: int = 24
     ffprobe_timeout_seconds: int = 30
+    default_image_provider_id: str | None = None
+    default_video_provider_id: str | None = None
+    worker_heartbeat_seconds: int = 10
+    worker_stale_after_seconds: int = 45
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="FCS_")
 

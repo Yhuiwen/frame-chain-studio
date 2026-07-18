@@ -406,6 +406,8 @@ class ProviderExecutionService:
                     remote_status=str(result.remote_status or result.normalized_status.value),
                     response_summary=result.raw_response_summary,
                     poll_delay_seconds=self.settings.poll_interval_seconds,
+                    remote_progress=result.progress,
+                    processing_stage=result.normalized_status.value.lower(),
                     now=now,
                 )
                 return
@@ -426,6 +428,7 @@ class ProviderExecutionService:
                     remote_status=str(result.remote_status or result.normalized_status.value),
                     result_urls=urls,
                     response_summary=result.raw_response_summary,
+                    remote_progress=result.progress,
                     now=now,
                 )
                 return
@@ -448,6 +451,8 @@ class ProviderExecutionService:
                 remote_status=str(result.remote_status or "UNKNOWN"),
                 response_summary=result.raw_response_summary,
                 poll_delay_seconds=self.settings.poll_interval_seconds,
+                remote_progress=result.progress,
+                processing_stage="unknown",
                 now=now,
             )
             if task.poll_count >= self.settings.max_unknown_polls:

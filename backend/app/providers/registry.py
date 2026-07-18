@@ -1,6 +1,6 @@
 from app.providers.async_base import AsyncGenerationProvider
 from app.providers.exceptions import ProviderConfigurationError
-from app.providers.models import ProviderCapabilities, ProviderInfo
+from app.providers.models import ProviderCapabilities, ProviderDefaults, ProviderInfo
 
 
 class ProviderRegistry:
@@ -28,15 +28,24 @@ class ProviderRegistry:
         return provider
 
     def list_capabilities(self) -> list[ProviderInfo]:
-        infos = [
-            ProviderInfo(
-                provider_id=provider.get_capabilities().provider_id,
-                display_name=provider.get_capabilities().display_name,
-                capabilities=provider.get_capabilities(),
-                configured=True,
+        infos = []
+        for provider in self._providers.values():
+            capabilities = provider.get_capabilities()
+            config = getattr(provider, "config", None)
+            infos.append(
+                ProviderInfo(
+                    provider_id=capabilities.provider_id,
+                    display_name=capabilities.display_name,
+                    capabilities=capabilities,
+                    configured=True,
+                    defaults=ProviderDefaults(
+                        image_model=getattr(config, "default_image_model", None),
+                        video_model=getattr(config, "default_video_model", None),
+                        aspect_ratio=getattr(config, "default_aspect_ratio", "16:9"),
+                        duration_seconds=getattr(config, "default_duration_seconds", None),
+                    ),
+                )
             )
-            for provider in self._providers.values()
-        ]
         for provider_id, message in self._configuration_errors.items():
             infos.append(
                 ProviderInfo(

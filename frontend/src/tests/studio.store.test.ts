@@ -21,7 +21,7 @@ describe("studio store", () => {
 
   it("loads projects", async () => {
     vi.mocked(api.listProjects).mockResolvedValue([
-      { id: 1, name: "Demo", description: "", created_at: "", updated_at: "" },
+      projectFields({ id: 1, name: "Demo", description: "", created_at: "", updated_at: "" }),
     ]);
     const store = useStudioStore();
     await store.loadProjects();
@@ -34,6 +34,13 @@ describe("studio store", () => {
       id: 1,
       name: "Demo",
       description: "",
+      image_provider_id: null,
+      video_provider_id: null,
+      image_model: null,
+      video_model: null,
+      default_aspect_ratio: "16:9",
+      default_video_duration_seconds: null,
+      default_seed: null,
       created_at: "",
       updated_at: "",
       assets: [],
@@ -55,6 +62,7 @@ describe("studio store", () => {
           start_frame: null,
           target_keyframe: null,
           locked_tail_frame: null,
+          actions: null,
         },
       ],
     });
@@ -64,6 +72,13 @@ describe("studio store", () => {
       id: 1,
       name: "Demo",
       description: "",
+      image_provider_id: null,
+      video_provider_id: null,
+      image_model: null,
+      video_model: null,
+      default_aspect_ratio: "16:9",
+      default_video_duration_seconds: null,
+      default_seed: null,
       created_at: "",
       updated_at: "",
       assets: [],
@@ -85,3 +100,18 @@ describe("studio store", () => {
     expect(ACTIVE_TASK_STATUSES.has("SUCCEEDED")).toBe(false);
   });
 });
+
+function projectFields<T extends { id: number; name: string; description: string; created_at: string; updated_at: string }>(
+  project: T,
+) {
+  return {
+    image_provider_id: null,
+    video_provider_id: null,
+    image_model: null,
+    video_model: null,
+    default_aspect_ratio: "16:9",
+    default_video_duration_seconds: null,
+    default_seed: null,
+    ...project,
+  };
+}

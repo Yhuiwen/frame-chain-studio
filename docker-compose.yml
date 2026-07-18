@@ -7,6 +7,8 @@ services:
       FCS_STORAGE_DIR: ./data/storage
       FCS_FIXTURE_DIR: ./tests/fixtures
       FCS_CORS_ORIGINS: '["http://localhost:5173"]'
+      FCS_DEFAULT_IMAGE_PROVIDER_ID: mock
+      FCS_DEFAULT_VIDEO_PROVIDER_ID: mock
     ports:
       - "8000:8000"
     volumes:
@@ -34,6 +36,23 @@ services:
       timeout: 3s
       retries: 5
 
+  generation-worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.workers.cli"]
+    profiles:
+      - worker
+    environment:
+      FCS_DATABASE_URL: sqlite:///./data/frame_chain.db
+      FCS_STORAGE_DIR: ./data/storage
+      FCS_FIXTURE_DIR: ./tests/fixtures
+      FCS_PROVIDER_CONFIG_FILE: provider-config.example.json
+      FCS_WORKER_ID: compose-generation-worker
+      FCS_WORKER_HEARTBEAT_SECONDS: 10
+      FCS_WORKER_STALE_AFTER_SECONDS: 45
+    volumes:
+      - backend-data:/app/data
+
   result-worker:
     build:
       context: ./backend
@@ -46,6 +65,9 @@ services:
       FCS_FIXTURE_DIR: ./tests/fixtures
       FCS_ENV: development
       FCS_RESULT_ALLOWED_PRIVATE_HOSTS: fake-provider,127.0.0.1
+      FCS_WORKER_ID: compose-result-worker
+      FCS_WORKER_HEARTBEAT_SECONDS: 10
+      FCS_WORKER_STALE_AFTER_SECONDS: 45
     volumes:
       - backend-data:/app/data
 

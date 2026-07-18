@@ -460,6 +460,75 @@ Workflow bridge:
 
 Phase 2E still does not implement authenticated vendor downloads, object storage, video stitching, audio, subtitles, super-resolution, CLIP/VLM scoring, Provider settings UI, WebSocket/SSE, Redis, Celery, Kafka, automatic Git commits, or tags.
 
+## Provider Settings And Worker Status
+
+Phase 2F adds Provider capability-driven generation settings and task visibility without adding real vendor APIs or streaming transports.
+
+Projects may store safe generation defaults:
+
+- `image_provider_id`
+- `video_provider_id`
+- `image_model`
+- `video_model`
+- `default_aspect_ratio`
+- `default_video_duration_seconds`
+- `default_seed`
+
+Provider resolution order is:
+
+```text
+explicit request payload -> project default -> system default -> local mock default
+```
+
+Image and video providers may differ. Project records never store API keys, base URLs, or raw Provider JSON. `/api/providers` returns only public capability and default-model metadata, including the local `mock` provider. The frontend settings panel lists configured Providers that support the required capability.
+
+Generation requests accept optional safe parameters:
+
+```json
+{
+  "provider_id": "mock",
+  "model": "dev-model",
+  "seed": 123,
+  "duration_seconds": 4,
+  "aspect_ratio": "16:9",
+  "allow_capability_fallback": false
+}
+```
+
+The backend resolves and persists the effective Provider, model, aspect ratio, seed, duration, and continuity mode. It validates Provider capabilities before queueing work:
+
+- keyframes require `text_to_image`
+- video requires `image_to_video`
+- first/last-frame continuity requires `first_last_frame_video`
+- duration, seed support, reference count, and aspect ratio are checked on the backend
+
+If a Shot has both an inherited start frame and a target keyframe but the selected Provider does not support first/last-frame video, the request fails with `PROVIDER_CAPABILITY_UNSUPPORTED` unless `allow_capability_fallback` is true. In fallback mode the backend records `START_FRAME_ONLY`; the UI must display that actual mode instead of claiming full continuity.
+
+Shot API payloads include backend-computed actions:
+
+```json
+{
+  "actions": {
+    "can_generate_keyframe": true,
+    "can_generate_video": false,
+    "reasons": ["VIDEO_REQUIRES_KEYFRAME_APPROVED"]
+  }
+}
+```
+
+The frontend uses these flags for command availability, while the backend remains the source of truth for state validation.
+
+Worker heartbeats are stored in `WorkerHeartbeat` and exposed through `/api/workers/status`. The API reports GenerationWorker and ResultWorker counts, online/stale state, current task, processed count, and sanitized last error messages. Heartbeat writes are best-effort and must not stop task processing.
+
+Worker status variables:
+
+- `FCS_WORKER_HEARTBEAT_SECONDS`: intended heartbeat cadence, default `10`.
+- `FCS_WORKER_STALE_AFTER_SECONDS`: age after which a Worker is treated as offline by the API, default `45`.
+- `FCS_DEFAULT_IMAGE_PROVIDER_ID`: system fallback for keyframe generation, default unset; local mock remains available.
+- `FCS_DEFAULT_VIDEO_PROVIDER_ID`: system fallback for video generation, default unset; local mock remains available.
+
+The project detail page now shows Provider settings, Worker online/offline hints, request-level Provider/model/mode details, and task attempts with remote status, shortened remote job ID, retry state, deadlines, result processing state, and Cancel/Retry commands. It does not expose raw result URLs, local storage paths, Provider secrets, or runnable UI commands beyond fixed copyable process commands.
+
 ## Database Migrations
 
 Alembic is used for schema upgrades. `SQLModel.metadata.create_all()` remains available only for isolated test fixtures and non-Alembic fallback; it is not the migration mechanism.

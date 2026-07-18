@@ -33,17 +33,43 @@ describe("useProjectPolling", () => {
       id: 1,
       name: "Demo",
       description: "",
+      image_provider_id: null,
+      video_provider_id: null,
+      image_model: null,
+      video_model: null,
+      default_aspect_ratio: "16:9",
+      default_video_duration_seconds: null,
+      default_seed: null,
       created_at: "",
       updated_at: "",
       shots: [],
       assets: [],
       logs: [],
       tasks: [],
-      requests: [{ id: 1, project_id: 1, shot_id: 1, kind: "KEYFRAME", provider_name: "mock", status: "RUNNING", error_code: null, error_message: null, created_at: "", updated_at: "" }],
+      requests: [{
+        id: 1,
+        project_id: 1,
+        shot_id: 1,
+        kind: "KEYFRAME",
+        provider_name: "mock",
+        effective_provider_id: "mock",
+        model: null,
+        generation_mode: "TEXT_TO_IMAGE",
+        aspect_ratio: "16:9",
+        seed: null,
+        duration_seconds: null,
+        allow_capability_fallback: false,
+        status: "RUNNING",
+        error_code: null,
+        error_message: null,
+        created_at: "",
+        updated_at: "",
+      }],
     };
     const refresh = vi.spyOn(store, "refreshProjectDetail").mockImplementation(async () => {
       store.current!.requests[0].status = "SUCCEEDED";
     });
+    vi.spyOn(store, "refreshWorkers").mockResolvedValue(undefined);
     const wrapper = mount(Harness);
 
     await wrapper.find("button").trigger("click");
@@ -60,15 +86,41 @@ describe("useProjectPolling", () => {
       id: 1,
       name: "Demo",
       description: "",
+      image_provider_id: null,
+      video_provider_id: null,
+      image_model: null,
+      video_model: null,
+      default_aspect_ratio: "16:9",
+      default_video_duration_seconds: null,
+      default_seed: null,
       created_at: "",
       updated_at: "",
       shots: [],
       assets: [],
       logs: [],
       tasks: [],
-      requests: [{ id: 1, project_id: 1, shot_id: 1, kind: "VIDEO", provider_name: "mock", status: "RUNNING", error_code: null, error_message: null, created_at: "", updated_at: "" }],
+      requests: [{
+        id: 1,
+        project_id: 1,
+        shot_id: 1,
+        kind: "VIDEO",
+        provider_name: "mock",
+        effective_provider_id: "mock",
+        model: null,
+        generation_mode: "START_FRAME_ONLY",
+        aspect_ratio: "16:9",
+        seed: null,
+        duration_seconds: 4,
+        allow_capability_fallback: false,
+        status: "RUNNING",
+        error_code: null,
+        error_message: null,
+        created_at: "",
+        updated_at: "",
+      }],
     };
     vi.spyOn(store, "refreshProjectDetail").mockResolvedValue(undefined);
+    vi.spyOn(store, "refreshWorkers").mockResolvedValue(undefined);
     const wrapper = mount(Harness);
 
     await wrapper.find("button").trigger("click");

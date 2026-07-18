@@ -1,13 +1,26 @@
 import { defineStore } from "pinia";
 
-import { api, type Asset, type GenerationTask, type Project, type ProjectDetail, type Shot, type TaskLog } from "@/api/client";
+import {
+  api,
+  type Asset,
+  type GenerationTask,
+  type Project,
+  type ProjectDetail,
+  type ProviderInfo,
+  type Shot,
+  type TaskLog,
+  type WorkersStatus,
+} from "@/api/client";
 
 interface StudioState {
   projects: Project[];
   current: ProjectDetail | null;
   selectedShotId: number | null;
+  providers: ProviderInfo[];
+  workerStatus: WorkersStatus | null;
   loading: boolean;
   refreshing: boolean;
+  workersRefreshing: boolean;
 }
 
 export const ACTIVE_TASK_STATUSES = new Set([
@@ -28,8 +41,11 @@ export const useStudioStore = defineStore("studio", {
     projects: [],
     current: null,
     selectedShotId: null,
+    providers: [],
+    workerStatus: null,
     loading: false,
     refreshing: false,
+    workersRefreshing: false,
   }),
   getters: {
     selectedShot: (state): Shot | null =>
@@ -84,6 +100,22 @@ export const useStudioStore = defineStore("studio", {
       } finally {
         this.refreshing = false;
       }
+    },
+    async loadProviders() {
+      this.providers = await api.listProviders();
+    },
+    async refreshWorkers() {
+      this.workersRefreshing = true;
+      try {
+        this.workerStatus = await api.getWorkerStatus();
+      } finally {
+        this.workersRefreshing = false;
+      }
+    },
+    async updateProjectSettings(patch: Partial<Project>) {
+      if (!this.current) return;
+      const project = await api.updateProject(this.current.id, patch);
+      this.current = { ...this.current, ...project };
     },
     selectShot(id: number) {
       this.selectedShotId = id;

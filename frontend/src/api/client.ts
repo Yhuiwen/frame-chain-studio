@@ -13,6 +13,13 @@ export interface Project {
   id: number;
   name: string;
   description: string;
+  image_provider_id: string | null;
+  video_provider_id: string | null;
+  image_model: string | null;
+  video_model: string | null;
+  default_aspect_ratio: string | null;
+  default_video_duration_seconds: number | null;
+  default_seed: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -31,6 +38,13 @@ export interface Shot {
   start_frame: ShotAssetSummary | null;
   target_keyframe: ShotAssetSummary | null;
   locked_tail_frame: ShotAssetSummary | null;
+  actions: ShotActionState | null;
+}
+
+export interface ShotActionState {
+  can_generate_keyframe: boolean;
+  can_generate_video: boolean;
+  reasons: string[];
 }
 
 export interface ShotAssetSummary {
@@ -66,6 +80,13 @@ export interface GenerationRequest {
   shot_id: number;
   kind: "KEYFRAME" | "VIDEO" | "TAIL_FRAME";
   provider_name: string;
+  effective_provider_id: string | null;
+  model: string | null;
+  generation_mode: "TEXT_TO_IMAGE" | "START_FRAME_ONLY" | "FIRST_LAST_FRAME" | null;
+  aspect_ratio: string | null;
+  seed: number | null;
+  duration_seconds: number | null;
+  allow_capability_fallback: boolean;
   status: "QUEUED" | "SUBMITTING" | "GENERATING" | "PENDING" | "RUNNING" | "PROCESSING" | "SUCCEEDED" | "FAILED";
   error_code: string | null;
   error_message: string | null;
@@ -93,6 +114,9 @@ export interface GenerationTask {
     | "CANCELLED";
   remote_job_id: string | null;
   remote_status: string | null;
+  remote_progress: number | null;
+  processing_stage: string | null;
+  processing_progress: number | null;
   attempt_number: number;
   retry_count: number;
   max_attempts: number;
@@ -146,6 +170,75 @@ export interface ProjectDetail extends Project {
   logs: TaskLog[];
 }
 
+export interface ProviderCapabilities {
+  provider_id: string;
+  display_name: string;
+  text_to_image: boolean;
+  image_to_image: boolean;
+  image_to_video: boolean;
+  first_last_frame_video: boolean;
+  video_extension: boolean;
+  supports_seed: boolean;
+  supports_cancel: boolean;
+  supports_negative_prompt: boolean;
+  max_reference_images: number;
+  max_duration_seconds: number | null;
+  supported_aspect_ratios: string[];
+  supported_output_types: string[];
+}
+
+export interface ProviderDefaults {
+  image_model: string | null;
+  video_model: string | null;
+  aspect_ratio: string | null;
+  duration_seconds: number | null;
+}
+
+export interface ProviderInfo {
+  provider_id: string;
+  display_name: string;
+  capabilities: ProviderCapabilities;
+  configured: boolean;
+  configuration_error: string | null;
+  defaults: ProviderDefaults;
+}
+
+export interface GenerationStartOptions {
+  provider_id?: string | null;
+  model?: string | null;
+  seed?: number | null;
+  duration_seconds?: number | null;
+  aspect_ratio?: string | null;
+  allow_capability_fallback?: boolean;
+}
+
+export interface WorkerHeartbeat {
+  worker_id: string;
+  worker_type: "GENERATION" | "RESULT";
+  status: "STARTING" | "IDLE" | "BUSY" | "STOPPING" | "STOPPED" | "ERROR";
+  online: boolean;
+  started_at: string;
+  last_seen_at: string;
+  current_task_id: number | null;
+  processed_count: number;
+  last_error_code: string | null;
+  last_error_message: string | null;
+}
+
+export interface WorkerTypeStatus {
+  worker_type: "GENERATION" | "RESULT";
+  online_count: number;
+  total_count: number;
+  stale_after_seconds: number;
+  workers: WorkerHeartbeat[];
+}
+
+export interface WorkersStatus {
+  stale_after_seconds: number;
+  generation: WorkerTypeStatus;
+  result: WorkerTypeStatus;
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -164,10 +257,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listProviders: () => request<ProviderInfo[]>("/api/providers"),
+  getWorkerStatus: () => request<WorkersStatus>("/api/workers/status"),
   listProjects: () => request<Project[]>("/api/projects"),
   createProject: (body: { name: string; description: string }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   getProject: (id: number) => request<ProjectDetail>(`/api/projects/${id}`),
+  updateProject: (id: number, body: Partial<Project>) =>
+    request<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   createShot: (projectId: number, body: Partial<Shot>) =>
     request<Shot>(`/api/projects/${projectId}/shots`, { method: "POST", body: JSON.stringify(body) }),
   updateShot: (shotId: number, body: Partial<Shot>) =>
@@ -178,14 +275,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(shots.map((shot, index) => ({ id: shot.id, sort_order: index }))),
     }),
-  generateKeyframe: (shotId: number) =>
-    request<GenerationRequest>(`/api/shots/${shotId}/keyframe/generate`, { method: "POST" }),
+  generateKeyframe: (shotId: number, body: GenerationStartOptions = {}) =>
+    request<GenerationRequest>(`/api/shots/${shotId}/keyframe/generate`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   approveKeyframe: (shotId: number) =>
     request<Shot>(`/api/shots/${shotId}/keyframe/approve`, { method: "POST" }),
   rejectKeyframe: (shotId: number) =>
     request<Shot>(`/api/shots/${shotId}/keyframe/reject`, { method: "POST" }),
-  generateVideo: (shotId: number) =>
-    request<GenerationRequest>(`/api/shots/${shotId}/video/generate`, { method: "POST" }),
+  generateVideo: (shotId: number, body: GenerationStartOptions = {}) =>
+    request<GenerationRequest>(`/api/shots/${shotId}/video/generate`, { method: "POST", body: JSON.stringify(body) }),
   approveVideo: (shotId: number) => request<Shot>(`/api/shots/${shotId}/video/approve`, { method: "POST" }),
   rejectVideo: (shotId: number) => request<Shot>(`/api/shots/${shotId}/video/reject`, { method: "POST" }),
   cancelTask: (taskId: number, reason: string, idempotencyKey: string) =>

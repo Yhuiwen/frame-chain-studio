@@ -14,7 +14,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
-import { api, type GenerationTask, type Shot, type ShotAssetSummary } from "@/api/client";
+import { api, type GenerationStartOptions, type GenerationTask, type Shot, type ShotAssetSummary } from "@/api/client";
 import { useProjectPolling } from "@/composables/useProjectPolling";
 import { useStudioStore } from "@/stores/studio";
 
@@ -25,16 +25,88 @@ const draggedShotId = ref<number | null>(null);
 const deletingShotId = ref<number | null>(null);
 const actionBusy = ref(false);
 const taskActionBusyId = ref<number | null>(null);
+const settingsBusy = ref(false);
 const expandedLogIds = ref<Set<number>>(new Set());
 const projectId = computed(() => Number(route.params.id));
 const selected = computed(() => store.selectedShot);
 const videos = computed(() => (selected.value ? store.assetsByShot(selected.value.id, "VIDEO") : []));
 const selectedTasks = computed(() => store.tasksForSelected);
+const configuredProviders = computed(() => store.providers.filter((provider) => provider.configured));
+const imageProviders = computed(() => configuredProviders.value.filter((provider) => provider.capabilities.text_to_image));
+const videoProviders = computed(() => configuredProviders.value.filter((provider) => provider.capabilities.image_to_video));
+const settingsForm = ref({
+  image_provider_id: "",
+  video_provider_id: "",
+  image_model: "",
+  video_model: "",
+  default_aspect_ratio: "16:9",
+  default_video_duration_seconds: null as number | null,
+  default_seed: null as number | null,
+  allow_capability_fallback: false,
+});
+const selectedTaskGroups = computed(() => {
+  const requests = new Map((store.current?.requests ?? []).map((request) => [request.id, request]));
+  return selectedTasks.value.map((task) => ({
+    task,
+    request: requests.get(task.generation_request_id) ?? null,
+  }));
+});
+const generationWorkerOnline = computed(() => (store.workerStatus?.generation.online_count ?? 0) > 0);
+const resultWorkerOnline = computed(() => (store.workerStatus?.result.online_count ?? 0) > 0);
 
 onMounted(async () => {
   await store.loadProject(projectId.value);
+  syncSettingsForm();
+  await Promise.all([store.loadProviders(), store.refreshWorkers()]);
   startPolling();
 });
+
+function syncSettingsForm() {
+  const project = store.current;
+  if (!project) return;
+  settingsForm.value = {
+    image_provider_id: project.image_provider_id ?? "",
+    video_provider_id: project.video_provider_id ?? "",
+    image_model: project.image_model ?? "",
+    video_model: project.video_model ?? "",
+    default_aspect_ratio: project.default_aspect_ratio ?? "16:9",
+    default_video_duration_seconds: project.default_video_duration_seconds,
+    default_seed: project.default_seed,
+    allow_capability_fallback: false,
+  };
+}
+
+async function saveGenerationSettings() {
+  settingsBusy.value = true;
+  try {
+    await store.updateProjectSettings({
+      image_provider_id: settingsForm.value.image_provider_id || null,
+      video_provider_id: settingsForm.value.video_provider_id || null,
+      image_model: settingsForm.value.image_model || null,
+      video_model: settingsForm.value.video_model || null,
+      default_aspect_ratio: settingsForm.value.default_aspect_ratio || null,
+      default_video_duration_seconds: settingsForm.value.default_video_duration_seconds,
+      default_seed: settingsForm.value.default_seed,
+    });
+    syncSettingsForm();
+    ElMessage.success("Generation settings saved");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "Save settings failed");
+  } finally {
+    settingsBusy.value = false;
+  }
+}
+
+function generationOptions(kind: "keyframe" | "video"): GenerationStartOptions {
+  return {
+    provider_id: kind === "keyframe" ? settingsForm.value.image_provider_id || null : settingsForm.value.video_provider_id || null,
+    model: kind === "keyframe" ? settingsForm.value.image_model || null : settingsForm.value.video_model || null,
+    aspect_ratio: settingsForm.value.default_aspect_ratio || null,
+    seed: settingsForm.value.default_seed,
+    duration_seconds: kind === "video" ? settingsForm.value.default_video_duration_seconds : null,
+    allow_capability_fallback: settingsForm.value.allow_capability_fallback,
+  };
+}
 
 function statusType(status: Shot["status"]) {
   if (status.includes("APPROVED") || status === "COMPLETED") return "success";
@@ -69,6 +141,30 @@ async function guarded(action: () => Promise<unknown>, pollAfter = false) {
 
 async function refreshProjectDetail() {
   await guarded(() => tick());
+}
+
+function canGenerateKeyframe(shot: Shot) {
+  return shot.actions?.can_generate_keyframe ?? shot.status === "DRAFT";
+}
+
+function canGenerateVideo(shot: Shot) {
+  return shot.actions?.can_generate_video ?? shot.status === "KEYFRAME_APPROVED";
+}
+
+function shortRemoteJobId(value: string | null) {
+  if (!value) return "";
+  return value.length <= 12 ? value : `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function taskStage(task: GenerationTask) {
+  if (task.status === "QUEUED") return "Waiting for GenerationWorker";
+  if (task.status === "SUBMITTING") return "Submitting";
+  if (task.status === "RUNNING") return task.processing_stage ?? "Remote generation";
+  if (task.status === "RESULT_READY") return "Waiting for ResultWorker";
+  if (task.status === "PROCESSING_RESULT") return "Downloading and validating";
+  if (task.status === "RETRY_WAIT") return "Retry backoff";
+  if (task.status === "CANCELLING") return "Cancelling";
+  return task.status;
 }
 
 async function deleteShot(shot: Shot, event: MouseEvent) {
@@ -189,6 +285,85 @@ async function retryTask(task: GenerationTask) {
       </div>
     </section>
 
+    <section class="ops-panel">
+      <div class="settings-panel">
+        <div class="panel-title">
+          <h2>Generation Settings</h2>
+          <el-button native-type="button" type="primary" :loading="settingsBusy" @click="saveGenerationSettings">
+            Save
+          </el-button>
+        </div>
+        <div class="settings-grid">
+          <label>
+            Image Provider
+            <el-select v-model="settingsForm.image_provider_id" placeholder="System default" clearable>
+              <el-option
+                v-for="provider in imageProviders"
+                :key="provider.provider_id"
+                :label="provider.display_name"
+                :value="provider.provider_id"
+              />
+            </el-select>
+          </label>
+          <label>
+            Video Provider
+            <el-select v-model="settingsForm.video_provider_id" placeholder="System default" clearable>
+              <el-option
+                v-for="provider in videoProviders"
+                :key="provider.provider_id"
+                :label="provider.display_name"
+                :value="provider.provider_id"
+              />
+            </el-select>
+          </label>
+          <label>
+            Image Model
+            <el-input v-model="settingsForm.image_model" />
+          </label>
+          <label>
+            Video Model
+            <el-input v-model="settingsForm.video_model" />
+          </label>
+          <label>
+            Aspect Ratio
+            <el-input v-model="settingsForm.default_aspect_ratio" />
+          </label>
+          <label>
+            Duration
+            <el-input-number v-model="settingsForm.default_video_duration_seconds" :min="0.1" :max="60" />
+          </label>
+          <label>
+            Seed
+            <el-input-number v-model="settingsForm.default_seed" />
+          </label>
+          <label class="switch-row">
+            Allow continuity fallback
+            <el-switch v-model="settingsForm.allow_capability_fallback" />
+          </label>
+        </div>
+      </div>
+      <div class="worker-panel">
+        <div class="panel-title">
+          <h2>Workers</h2>
+          <el-button native-type="button" text :loading="store.workersRefreshing" @click="store.refreshWorkers">
+            Refresh
+          </el-button>
+        </div>
+        <div class="worker-row">
+          <el-tag :type="generationWorkerOnline ? 'success' : 'danger'">
+            Generation {{ store.workerStatus?.generation.online_count ?? 0 }}/{{ store.workerStatus?.generation.total_count ?? 0 }}
+          </el-tag>
+          <span v-if="!generationWorkerOnline">Start: python -m app.workers.cli generation</span>
+        </div>
+        <div class="worker-row">
+          <el-tag :type="resultWorkerOnline ? 'success' : 'danger'">
+            Result {{ store.workerStatus?.result.online_count ?? 0 }}/{{ store.workerStatus?.result.total_count ?? 0 }}
+          </el-tag>
+          <span v-if="!resultWorkerOnline">Start: python -m app.workers.result_cli run</span>
+        </div>
+      </div>
+    </section>
+
     <section class="layout">
       <aside class="timeline">
         <div
@@ -303,8 +478,8 @@ async function retryTask(task: GenerationTask) {
               type="primary"
               :icon="Picture"
               :loading="actionBusy && selected.status === 'DRAFT'"
-              :disabled="selected.status !== 'DRAFT' || actionBusy"
-              @click="guarded(() => store.runAction(api.generateKeyframe), true)"
+              :disabled="!canGenerateKeyframe(selected) || actionBusy"
+              @click="guarded(() => store.runAction((shotId) => api.generateKeyframe(shotId, generationOptions('keyframe'))), true)"
             >
               生成关键帧
             </el-button>
@@ -351,8 +526,8 @@ async function retryTask(task: GenerationTask) {
               type="primary"
               :icon="VideoPlay"
               :loading="actionBusy && selected.status === 'KEYFRAME_APPROVED'"
-              :disabled="selected.status !== 'KEYFRAME_APPROVED' || actionBusy"
-              @click="guarded(() => store.runAction(api.generateVideo), true)"
+              :disabled="!canGenerateVideo(selected) || actionBusy"
+              @click="guarded(() => store.runAction((shotId) => api.generateVideo(shotId, generationOptions('video'))), true)"
             >
               生成视频
             </el-button>
@@ -413,13 +588,23 @@ async function retryTask(task: GenerationTask) {
             <el-button native-type="button" :icon="CaretRight" text @click="refreshProjectDetail">同步</el-button>
           </div>
           <div class="task-list">
-            <div v-for="task in selectedTasks" :key="task.id" class="task-row">
+            <div v-for="{ task, request } in selectedTaskGroups" :key="task.id" class="task-row">
+              <div v-if="request" class="request-main">
+                <strong>Request #{{ request.id }} {{ request.kind }}</strong>
+                <span>{{ request.effective_provider_id ?? request.provider_name }}</span>
+                <span v-if="request.model">model {{ request.model }}</span>
+                <span v-if="request.generation_mode">mode {{ request.generation_mode }}</span>
+              </div>
               <div class="task-main">
                 <strong>#{{ task.id }} {{ task.task_type }}</strong>
                 <el-tag size="small" :type="taskType(task)">{{ task.status }}</el-tag>
               </div>
               <div class="task-meta">
+                <span>{{ taskStage(task) }}</span>
                 attempt {{ task.attempt_number }} / retries {{ task.retry_count }}/{{ task.max_attempts }}
+                <span v-if="task.remote_status">remote {{ task.remote_status }}</span>
+                <span v-if="task.remote_job_id">job {{ shortRemoteJobId(task.remote_job_id) }}</span>
+                <span v-if="task.remote_progress !== null">progress {{ Math.round(task.remote_progress * 100) }}%</span>
                 <span v-if="task.next_retry_at">next retry {{ task.next_retry_at }}</span>
                 <span v-if="task.next_result_retry_at">next result retry {{ task.next_result_retry_at }}</span>
                 <span v-if="task.next_poll_at">next poll {{ task.next_poll_at }}</span>
@@ -484,6 +669,57 @@ async function retryTask(task: GenerationTask) {
   margin-bottom: 16px;
 }
 
+.ops-panel {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  margin: 0 0 18px;
+}
+
+.settings-panel,
+.worker-panel {
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  padding: 14px;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+}
+
+.settings-grid label {
+  color: var(--el-text-color-secondary);
+  display: grid;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.switch-row {
+  align-content: end;
+}
+
+.worker-row,
+.request-main {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.worker-row {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  margin-top: 10px;
+}
+
+.request-main {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
 .task-row {
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
@@ -517,5 +753,12 @@ async function retryTask(task: GenerationTask) {
 .task-actions {
   justify-content: flex-start;
   margin-top: 8px;
+}
+
+@media (max-width: 900px) {
+  .ops-panel,
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

@@ -8,8 +8,9 @@ from sqlmodel import Session
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
-from app.models.entities import Asset, GenerationRequest, Project, Shot, TaskCommandType
+from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, Shot, ShotStatus, TaskCommandType
 from app.models.schemas import (
+    GenerationStartRequest,
     GenerationRequestRead,
     ProjectCreate,
     ProjectDetail,
@@ -22,12 +23,13 @@ from app.models.schemas import (
     TaskCancelRequest,
     TaskRetryRequest,
     GenerationTaskRead,
+    WorkersStatusRead,
 )
 from app.providers.config_loader import load_registry_from_env
 from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
-from app.services import studio, task_service
+from app.services import provider_resolution, studio, task_service, worker_status
 
 router = APIRouter()
 provider = MockGenerationProvider()
@@ -46,7 +48,7 @@ def health() -> dict[str, str]:
 @router.get("/providers", response_model=list[ProviderInfo])
 def list_providers() -> list[ProviderInfo]:
     try:
-        return load_registry_from_env().list_capabilities()
+        return provider_resolution.list_public_providers(load_registry_from_env())
     except ProviderError as exc:
         return [
             ProviderInfo(
@@ -60,6 +62,12 @@ def list_providers() -> list[ProviderInfo]:
                 configuration_error=exc.message,
             )
         ]
+
+
+@router.get("/workers/status", response_model=WorkersStatusRead)
+def workers_status(session: Session = Depends(get_session)) -> dict[str, object]:
+    settings = get_settings()
+    return worker_status.status_summary(session, stale_after_seconds=settings.worker_stale_after_seconds)
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=GenerationTaskRead)
@@ -184,10 +192,42 @@ def reorder_shots(
 def generate_keyframe(
     shot_id: int,
     background_tasks: BackgroundTasks,
+    payload: GenerationStartRequest | None = None,
     session: Session = Depends(get_session),
 ) -> GenerationRequest:
-    request = studio.start_keyframe_generation(session, shot_id)
-    background_tasks.add_task(run_request_in_background, request.id or 0)
+    shot = studio.get_shot_or_404(session, shot_id)
+    project = studio.get_project_or_404(session, shot.project_id)
+    settings = get_settings()
+    resolved = provider_resolution.resolve_generation(
+        session,
+        project=project,
+        shot=shot,
+        kind=GenerationKind.KEYFRAME,
+        payload=payload,
+        registry=load_registry_from_env(),
+        system_default_provider_id=settings.default_image_provider_id,
+    )
+    studio.transition_shot(session, shot, ShotStatus.KEYFRAME_GENERATING, "keyframe_generation_started")
+    request = studio.create_generation_request(
+        session,
+        shot,
+        GenerationKind.KEYFRAME,
+        input_asset_ids=resolved.input_asset_ids,
+        provider_id=resolved.provider_id,
+        model=resolved.model,
+        generation_mode=resolved.generation_mode.value,
+        aspect_ratio=resolved.aspect_ratio,
+        seed=resolved.seed,
+        duration_seconds=resolved.duration_seconds,
+        allow_capability_fallback=resolved.allow_capability_fallback,
+        request_payload=resolved.request_payload(shot),
+        provider_config_snapshot={
+            "provider_id": resolved.provider_id,
+            "configured": resolved.provider_info.configured if resolved.provider_info else True,
+        },
+    )
+    if resolved.provider_id == provider_resolution.MOCK_PROVIDER_ID:
+        background_tasks.add_task(run_request_in_background, request.id or 0)
     return request
 
 
@@ -205,10 +245,44 @@ def reject_keyframe(shot_id: int, session: Session = Depends(get_session)) -> Sh
 def generate_video(
     shot_id: int,
     background_tasks: BackgroundTasks,
+    payload: GenerationStartRequest | None = None,
     session: Session = Depends(get_session),
 ) -> GenerationRequest:
-    request = studio.start_video_generation(session, shot_id)
-    background_tasks.add_task(run_request_in_background, request.id or 0)
+    shot = studio.get_shot_or_404(session, shot_id)
+    if shot.status != ShotStatus.KEYFRAME_APPROVED:
+        raise AppError("KEYFRAME_NOT_APPROVED", "Video generation requires an approved keyframe.", 409)
+    project = studio.get_project_or_404(session, shot.project_id)
+    settings = get_settings()
+    resolved = provider_resolution.resolve_generation(
+        session,
+        project=project,
+        shot=shot,
+        kind=GenerationKind.VIDEO,
+        payload=payload,
+        registry=load_registry_from_env(),
+        system_default_provider_id=settings.default_video_provider_id,
+    )
+    studio.transition_shot(session, shot, ShotStatus.VIDEO_GENERATING, "video_generation_started")
+    request = studio.create_generation_request(
+        session,
+        shot,
+        GenerationKind.VIDEO,
+        input_asset_ids=resolved.input_asset_ids,
+        provider_id=resolved.provider_id,
+        model=resolved.model,
+        generation_mode=resolved.generation_mode.value,
+        aspect_ratio=resolved.aspect_ratio,
+        seed=resolved.seed,
+        duration_seconds=resolved.duration_seconds,
+        allow_capability_fallback=resolved.allow_capability_fallback,
+        request_payload=resolved.request_payload(shot),
+        provider_config_snapshot={
+            "provider_id": resolved.provider_id,
+            "configured": resolved.provider_info.configured if resolved.provider_info else True,
+        },
+    )
+    if resolved.provider_id == provider_resolution.MOCK_PROVIDER_ID:
+        background_tasks.add_task(run_request_in_background, request.id or 0)
     return request
 
 

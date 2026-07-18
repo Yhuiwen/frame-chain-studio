@@ -5,21 +5,38 @@ from pydantic import BaseModel, ConfigDict
 from app.models.entities import (
     AssetType,
     GenerationKind,
+    GenerationMode,
     GenerationTaskStatus,
     GenerationTaskType,
     ReliableTaskStatus,
     ShotStatus,
+    WorkerStatus,
+    WorkerType,
 )
 
 
 class ProjectCreate(BaseModel):
     name: str
     description: str = ""
+    image_provider_id: str | None = None
+    video_provider_id: str | None = None
+    image_model: str | None = None
+    video_model: str | None = None
+    default_aspect_ratio: str | None = "16:9"
+    default_video_duration_seconds: float | None = None
+    default_seed: int | None = None
 
 
 class ProjectUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    image_provider_id: str | None = None
+    video_provider_id: str | None = None
+    image_model: str | None = None
+    video_model: str | None = None
+    default_aspect_ratio: str | None = None
+    default_video_duration_seconds: float | None = None
+    default_seed: int | None = None
 
 
 class ProjectRead(ProjectCreate):
@@ -55,6 +72,12 @@ class ShotAssetSummary(BaseModel):
     created_at: datetime
 
 
+class ShotActionState(BaseModel):
+    can_generate_keyframe: bool
+    can_generate_video: bool
+    reasons: list[str] = []
+
+
 class ShotRead(ShotCreate):
     id: int
     project_id: int
@@ -64,6 +87,7 @@ class ShotRead(ShotCreate):
     start_frame: ShotAssetSummary | None = None
     target_keyframe: ShotAssetSummary | None = None
     locked_tail_frame: ShotAssetSummary | None = None
+    actions: ShotActionState | None = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -99,6 +123,13 @@ class GenerationRequestRead(BaseModel):
     shot_id: int
     kind: GenerationKind
     provider_name: str
+    effective_provider_id: str | None
+    model: str | None
+    generation_mode: GenerationMode | None
+    aspect_ratio: str | None
+    seed: int | None
+    duration_seconds: float | None
+    allow_capability_fallback: bool
     status: GenerationTaskStatus
     prompt_snapshot: str
     negative_prompt_snapshot: str
@@ -121,6 +152,9 @@ class GenerationTaskRead(BaseModel):
     status: ReliableTaskStatus
     remote_job_id: str | None
     remote_status: str | None
+    remote_progress: float | None = None
+    processing_stage: str | None = None
+    processing_progress: float | None = None
     attempt_number: int
     retry_count: int
     max_attempts: int
@@ -155,6 +189,42 @@ class GenerationTaskRead(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     model_config = ConfigDict(from_attributes=True)
+
+
+class GenerationStartRequest(BaseModel):
+    provider_id: str | None = None
+    model: str | None = None
+    seed: int | None = None
+    duration_seconds: float | None = None
+    aspect_ratio: str | None = None
+    allow_capability_fallback: bool = False
+
+
+class WorkerHeartbeatRead(BaseModel):
+    worker_id: str
+    worker_type: WorkerType
+    status: WorkerStatus
+    online: bool
+    started_at: datetime
+    last_seen_at: datetime
+    current_task_id: int | None
+    processed_count: int
+    last_error_code: str | None
+    last_error_message: str | None
+
+
+class WorkerTypeStatus(BaseModel):
+    worker_type: WorkerType
+    online_count: int
+    total_count: int
+    stale_after_seconds: int
+    workers: list[WorkerHeartbeatRead]
+
+
+class WorkersStatusRead(BaseModel):
+    stale_after_seconds: int
+    generation: WorkerTypeStatus
+    result: WorkerTypeStatus
 
 
 class TaskLogRead(BaseModel):

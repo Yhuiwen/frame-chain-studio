@@ -251,13 +251,29 @@ def create_generation_request(
     shot: Shot,
     kind: GenerationKind,
     input_asset_ids: list[int] | None = None,
+    provider_id: str = "mock",
+    model: str | None = None,
+    generation_mode: str | None = None,
+    aspect_ratio: str | None = None,
+    seed: int | None = None,
+    duration_seconds: float | None = None,
+    allow_capability_fallback: bool = False,
+    request_payload: dict[str, object] | None = None,
+    provider_config_snapshot: dict[str, object] | None = None,
 ) -> GenerationRequest:
     request = task_service.create_generation_request(
         session,
         project_id=shot.project_id,
         shot_id=shot.id or 0,
         kind=kind,
-        provider_name="mock",
+        provider_name=provider_id,
+        effective_provider_id=provider_id,
+        model=model,
+        generation_mode=generation_mode,
+        aspect_ratio=aspect_ratio,
+        seed=seed,
+        duration_seconds=duration_seconds,
+        allow_capability_fallback=allow_capability_fallback,
         prompt_snapshot=shot.prompt,
         negative_prompt_snapshot=shot.negative_prompt,
         input_asset_ids=input_asset_ids or [],
@@ -265,13 +281,21 @@ def create_generation_request(
     task = task_service.create_task_attempt(
         session,
         generation_request=request,
-        provider_id="mock",
-        request_payload={
+        provider_id=provider_id,
+        request_payload=request_payload
+        or {
+            "provider_id": provider_id,
+            "model": model,
             "prompt": shot.prompt,
             "negative_prompt": shot.negative_prompt,
             "input_asset_ids": input_asset_ids or [],
+            "generation_mode": generation_mode,
+            "aspect_ratio": aspect_ratio,
+            "seed": seed,
+            "duration_seconds": duration_seconds,
+            "allow_capability_fallback": allow_capability_fallback,
         },
-        provider_config_snapshot={"provider_id": "mock", "mode": "local_fixture"},
+        provider_config_snapshot=provider_config_snapshot or {"provider_id": provider_id, "mode": "local_fixture"},
     )
     log_task(session, request, shot, f"{kind.value.lower()} request created", task=task)
     return request
@@ -550,6 +574,9 @@ def task_payload(session: Session, task: GenerationTask) -> dict[str, object]:
         "status": task.status,
         "remote_job_id": task.remote_job_id,
         "remote_status": task.remote_status,
+        "remote_progress": task.remote_progress,
+        "processing_stage": task.processing_stage,
+        "processing_progress": task.processing_progress,
         "attempt_number": task.attempt_number,
         "retry_count": task.retry_count,
         "max_attempts": task.max_attempts,
@@ -666,6 +693,22 @@ def shot_payload(session: Session, shot: Shot) -> dict[str, object]:
             latest_asset(session, shot.id or 0, AssetType.TAIL_FRAME),
             "generated",
         ),
+        "actions": shot_actions(shot),
         "created_at": shot.created_at,
         "updated_at": shot.updated_at,
+    }
+
+
+def shot_actions(shot: Shot) -> dict[str, object]:
+    reasons: list[str] = []
+    can_generate_keyframe = shot.status == ShotStatus.DRAFT
+    if not can_generate_keyframe:
+        reasons.append("KEYFRAME_REQUIRES_DRAFT")
+    can_generate_video = shot.status == ShotStatus.KEYFRAME_APPROVED
+    if not can_generate_video:
+        reasons.append("VIDEO_REQUIRES_KEYFRAME_APPROVED")
+    return {
+        "can_generate_keyframe": can_generate_keyframe,
+        "can_generate_video": can_generate_video,
+        "reasons": reasons,
     }

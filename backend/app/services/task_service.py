@@ -17,6 +17,7 @@ from app.models.entities import (
     Asset,
     AssetType,
     GenerationKind,
+    GenerationMode,
     GenerationRequest,
     GenerationTaskStatus,
     GenerationTask,
@@ -76,6 +77,13 @@ def create_generation_request(
     shot_id: int,
     kind: GenerationKind,
     provider_name: str,
+    effective_provider_id: str | None = None,
+    model: str | None = None,
+    generation_mode: str | GenerationMode | None = None,
+    aspect_ratio: str | None = None,
+    seed: int | None = None,
+    duration_seconds: float | None = None,
+    allow_capability_fallback: bool = False,
     prompt_snapshot: str = "",
     negative_prompt_snapshot: str = "",
     input_asset_ids: list[int] | None = None,
@@ -85,6 +93,13 @@ def create_generation_request(
         shot_id=shot_id,
         kind=kind,
         provider_name=provider_name,
+        effective_provider_id=effective_provider_id,
+        model=model,
+        generation_mode=generation_mode,
+        aspect_ratio=aspect_ratio,
+        seed=seed,
+        duration_seconds=duration_seconds,
+        allow_capability_fallback=allow_capability_fallback,
         prompt_snapshot=prompt_snapshot,
         negative_prompt_snapshot=negative_prompt_snapshot,
         input_asset_ids=json.dumps(input_asset_ids or []),
@@ -496,6 +511,8 @@ def record_running_poll(
     remote_status: str,
     response_summary: str,
     poll_delay_seconds: int,
+    remote_progress: float | None = None,
+    processing_stage: str | None = None,
     now: datetime | None = None,
 ) -> GenerationTask:
     task = get_task(session, task_id)
@@ -503,6 +520,9 @@ def record_running_poll(
         raise AppError("TASK_NOT_RUNNING", f"Task in {task.status.value} cannot be polled.", 409)
     current_time = db_time(now)
     task.remote_status = remote_status
+    task.remote_progress = remote_progress
+    task.processing_stage = processing_stage
+    task.processing_progress = remote_progress
     task.response_summary_json = dumps_sanitized({"poll": response_summary})
     task.poll_count += 1
     task.last_polled_at = current_time
@@ -521,6 +541,7 @@ def mark_task_result_ready(
     remote_status: str,
     result_urls: list[dict[str, Any]],
     response_summary: str,
+    remote_progress: float | None = None,
     now: datetime | None = None,
 ) -> GenerationTask:
     if not result_urls:
@@ -547,6 +568,9 @@ def mark_task_result_ready(
         existing_by_url[str(item["url"])] = item
     task.result_urls_json = dumps_sanitized(list(existing_by_url.values()))
     task.remote_status = remote_status
+    task.remote_progress = remote_progress
+    task.processing_stage = "result_ready"
+    task.processing_progress = 1
     task.response_summary_json = dumps_sanitized({"poll": response_summary})
     task.poll_count += 1
     task.last_polled_at = current_time
