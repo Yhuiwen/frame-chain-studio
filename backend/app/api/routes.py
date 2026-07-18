@@ -19,6 +19,9 @@ from app.models.schemas import (
     ShotRead,
     ShotUpdate,
 )
+from app.providers.config_loader import load_registry_from_env
+from app.providers.exceptions import ProviderError
+from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
 from app.services import studio
 
@@ -34,6 +37,25 @@ def run_request_in_background(request_id: int) -> None:
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/providers", response_model=list[ProviderInfo])
+def list_providers() -> list[ProviderInfo]:
+    try:
+        return load_registry_from_env().list_capabilities()
+    except ProviderError as exc:
+        return [
+            ProviderInfo(
+                provider_id="configured-provider",
+                display_name="Configured Provider",
+                capabilities=ProviderCapabilities(
+                    provider_id="configured-provider",
+                    display_name="Configured Provider",
+                ),
+                configured=False,
+                configuration_error=exc.message,
+            )
+        ]
 
 
 @router.get("/media/{asset_id}")

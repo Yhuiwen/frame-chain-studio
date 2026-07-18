@@ -32,6 +32,12 @@
 - Do not start phase two work in the same broad change as phase-one baseline cleanup.
 - Do not assign `GenerationTask.status` directly. Every task state change must go through `TaskService`.
 - Providers must not directly mutate database models. They execute generation capability and return results to orchestration code.
+- Phase 2 async providers live behind `AsyncGenerationProvider`; they must not import SQLModel `Session`, read or write `GenerationTask`, change `Shot`, create `Asset`, write `TaskLog`, or perform local task state transitions.
+- Providers must return unified DTOs and convert HTTP failures into provider exceptions. Do not pass raw `httpx.Response` objects into services or routes.
+- API keys, authorization headers, cookies, tokens, and secrets must never appear in logs, `repr`, response summaries, or database snapshots.
+- Provider field mapping must stay declarative and safe. Do not use `eval`, JSONPath engines, Python expressions, or templates that execute code.
+- Every new provider must declare capabilities and pass Fake Provider or `httpx.MockTransport` tests.
+- Business retries, remote result downloads, Worker loops, and task recovery belong to later orchestration stages, not Provider implementations.
 - Future workers must acquire a task lease before processing a task.
 - Do not perform network requests, FFmpeg work, sleeps, or long-running provider operations inside database transactions.
 - Task completion must be idempotent and must not create duplicate result assets.

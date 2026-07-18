@@ -147,6 +147,107 @@ Lease acquisition and renewal use short conditional database updates. With SQLit
 
 Request payloads, response summaries, provider snapshots, and error details are saved through a recursive redaction helper. Sensitive keys such as `authorization`, `api_key`, `token`, `cookie`, `password`, and `secret` are replaced with `***REDACTED***`.
 
+## Provider Protocol
+
+Phase 2B adds a database-free asynchronous Provider protocol for future remote AI services. It does not add a Worker loop, automatic polling, result downloads, frontend Provider settings, or any real vendor integration.
+
+`AsyncGenerationProvider` implementations are responsible only for constructing HTTP requests, sending them, parsing remote responses, and returning unified DTOs. They must not access SQLModel sessions, mutate `GenerationTask`, update `Shot`, create `Asset`, write `TaskLog`, or perform task state transitions. `TaskService` remains the owner of durable task state, leases, remote job IDs, errors, and retry metadata.
+
+Provider capabilities are declared with:
+
+- `provider_id`
+- `display_name`
+- `text_to_image`
+- `image_to_image`
+- `image_to_video`
+- `first_last_frame_video`
+- `video_extension`
+- `supports_seed`
+- `supports_cancel`
+- `supports_negative_prompt`
+- `max_reference_images`
+- `max_duration_seconds`
+- `supported_aspect_ratios`
+- `supported_output_types`
+
+Unified request DTOs cover image generation and video generation. They carry prompts, negative prompts, dimensions or duration/FPS, seed, reference assets, metadata, and a client request ID. Asset references use HTTP-accessible URLs plus role metadata; they do not carry database sessions or local absolute disk paths.
+
+Provider return DTOs cover submit, job polling, and cancellation. Remote statuses are normalized to `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, or `UNKNOWN`. These are remote status values, not local `GenerationTask.status` values; a later Worker stage will decide how to translate remote progress into local task transitions.
+
+Provider exceptions classify configuration, authentication, rate limit, remote server, network, timeout, invalid response, unsupported capability, job-not-found, and cancellation errors. HTTP 429 and 5xx errors are marked retryable; HTTP 400, 401, and 403 are not retryable by default. Raw response summaries are redacted and length-limited before they can be stored or reported.
+
+`MappedAsyncHttpProvider` is a configurable HTTP client built on `httpx.AsyncClient`. Its field mapper supports safe dotted paths such as `data.task_id`, `result.items.0.url`, and `start_frame.url`; it supports dict keys, numeric list indexes, missing defaults, `null`, underscores, and hyphens. It deliberately does not support `eval`, JSONPath, templates, or arbitrary Python expressions.
+
+Request mapping is declarative:
+
+```json
+{
+  "fields": {
+    "prompt": "input.text",
+    "negative_prompt": "input.negative",
+    "duration_seconds": "input.duration",
+    "start_frame.url": "input.first_frame_url",
+    "end_frame.url": "input.last_frame_url",
+    "seed": "parameters.seed"
+  },
+  "fixed_fields": {
+    "parameters.output_format": "mp4"
+  }
+}
+```
+
+Response mapping extracts remote job ID, status, progress, result URLs, and error fields. Result URLs may be a string, a string list, or an object list with URL subpaths such as `url`, `download_url`, or `file.url`. The backend does not download those URLs in Phase 2B.
+
+## Fake Provider
+
+The Fake Provider is a local development and test server. It is not a production API and is not started by the main backend.
+
+Start it separately:
+
+```powershell
+cd backend
+python -m uvicorn fake_provider.app:app --host 127.0.0.1 --port 8090
+```
+
+Health check:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8090/fake/v1/health
+```
+
+Endpoints:
+
+- `POST /fake/v1/images/generations`
+- `POST /fake/v1/videos/generations`
+- `GET /fake/v1/jobs/{job_id}`
+- `POST /fake/v1/jobs/{job_id}/cancel`
+- `GET /fake/v1/results/{job_id}.mp4`
+- `GET /fake/v1/results/{job_id}.png`
+
+Scenarios are selected with test headers such as `X-Fake-Scenario`, `X-Fake-Format`, `X-Fake-Running-Polls`, and `X-Fake-Request-Key`. Supported scenarios are `success`, `immediate_success`, `permanent_failure`, `submit_429_once`, `submit_500_once`, `poll_500_once`, `invalid_submit_response`, `invalid_status_response`, `unknown_status`, `cancel_success`, `cancel_not_supported`, `job_not_found`, and `slow_response`.
+
+The Fake Provider supports three response formats:
+
+- Format A: `data.task_id`, `data.status`, `data.output.video_url`
+- Format B: `job.id`, `job.state`, `job.outputs[].url`
+- Format C: `id`, numeric `status_code`, `result.files[].download_url`
+
+## Provider Configuration
+
+Example config:
+
+```text
+backend/provider-config.example.json
+```
+
+Runtime loading uses:
+
+```powershell
+$env:FCS_PROVIDER_CONFIG_FILE="D:\AIProjects\frame-chain-studio\backend\provider-config.example.json"
+```
+
+Provider config may contain `api_key`, but it is modeled as a secret and must not appear in logs, repr output, response summaries, or database snapshots. The current frontend does not edit Provider configuration.
+
 ## Database Migrations
 
 Alembic is used for schema upgrades. `SQLModel.metadata.create_all()` remains available only for isolated test fixtures and non-Alembic fallback; it is not the migration mechanism.

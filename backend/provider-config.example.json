@@ -1,0 +1,75 @@
+{
+  "providers": [
+    {
+      "provider_id": "fake-http",
+      "display_name": "Fake HTTP Provider",
+      "base_url": "http://127.0.0.1:8090",
+      "api_key": null,
+      "auth_header_name": "Authorization",
+      "auth_prefix": "Bearer ",
+      "image_submit_path": "/fake/v1/images/generations",
+      "video_submit_path": "/fake/v1/videos/generations",
+      "job_status_path_template": "/fake/v1/jobs/{remote_job_id}",
+      "job_cancel_path_template": "/fake/v1/jobs/{remote_job_id}/cancel",
+      "request_timeout_seconds": 10,
+      "verify_tls": true,
+      "capabilities": {
+        "provider_id": "fake-http",
+        "display_name": "Fake HTTP Provider",
+        "text_to_image": true,
+        "image_to_video": true,
+        "first_last_frame_video": true,
+        "supports_seed": true,
+        "supports_cancel": true,
+        "supports_negative_prompt": true,
+        "max_reference_images": 2,
+        "max_duration_seconds": 12,
+        "supported_aspect_ratios": ["16:9", "9:16", "1:1"],
+        "supported_output_types": ["png", "mp4"]
+      },
+      "mapping": {
+        "submit_response": {
+          "remote_job_id_path": "data.task_id",
+          "status_path": "data.status"
+        },
+        "job_response": {
+          "remote_job_id_path": "data.task_id",
+          "status_path": "data.status",
+          "result_urls_path": "data.output.video_url",
+          "error_code_path": "data.error.code",
+          "error_message_path": "data.error.message"
+        },
+        "cancel_response": {
+          "remote_job_id_path": "data.task_id",
+          "status_path": "data.status"
+        },
+        "image_request": {
+          "fields": {
+            "prompt": "input.text",
+            "negative_prompt": "input.negative",
+            "width": "parameters.width",
+            "height": "parameters.height",
+            "seed": "parameters.seed"
+          },
+          "fixed_fields": {
+            "parameters.output_format": "png"
+          }
+        },
+        "video_request": {
+          "fields": {
+            "prompt": "input.text",
+            "negative_prompt": "input.negative",
+            "duration_seconds": "input.duration",
+            "fps": "input.fps",
+            "start_frame.url": "input.first_frame_url",
+            "end_frame.url": "input.last_frame_url",
+            "seed": "parameters.seed"
+          },
+          "fixed_fields": {
+            "parameters.output_format": "mp4"
+          }
+        }
+      }
+    }
+  ]
+}
