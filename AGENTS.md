@@ -44,7 +44,14 @@
 - `RUNNING` recovery must poll the existing `remote_job_id`, not resubmit.
 - Remote Provider success must move tasks to `RESULT_READY`; only a later media and asset stage may complete `RESULT_READY -> SUCCEEDED`.
 - Workers must not modify `Shot`, create `Asset`, download media, or perform FFmpeg/FFprobe result processing.
+- `max_attempts` counts the first automatic execution plus automatic retries; manual retry creates a new linked task attempt.
+- Cancellation API handlers must only record durable intent. Provider cancellation belongs in the Worker.
+- Cancellation retries must keep tasks in `CANCELLING`; do not send cancelling tasks through generic `RETRY_WAIT`.
+- Manual retry is allowed only from `FAILED` or `CANCELLED`, and must use a durable `TaskCommand` idempotency key.
+- Task query payloads may expose sanitized error code/message and control flags, but must not expose raw provider error details.
+- Phase 2D does not include result URL download, FFprobe validation, asset registration, Shot advancement, provider settings UI, Redis/Celery/Kafka/APScheduler, WebSocket/SSE, or real vendor APIs.
 - Worker tests must cover crash recovery, expired lease takeover, and two-worker lease competition.
+- Retry/cancel tests must cover legal and illegal manual retry, cancel idempotency, retry limits, provider cancel failures, and timeout paths.
 - Do not perform network requests, FFmpeg work, sleeps, or long-running provider operations inside database transactions.
 - Task completion must be idempotent and must not create duplicate result assets.
 - New task-model fields require an Alembic migration and migration tests.

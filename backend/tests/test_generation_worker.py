@@ -7,7 +7,7 @@ import httpx
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models.entities import Asset, GenerationKind, GenerationTask, Project, ReliableTaskStatus, Shot
+from app.models.entities import Asset, GenerationKind, GenerationTask, Project, ReliableTaskStatus, Shot, TaskErrorCode
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import (
     MappedHttpProviderConfig,
@@ -72,6 +72,11 @@ async def make_registry(scenario: str = "success", running_polls: str = "1") -> 
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         await client.post("/fake/v1/test/reset")
     return registry
+
+
+async def fake_stats() -> dict[str, object]:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        return (await client.get("/fake/v1/test/stats")).json()
 
 
 @contextmanager
@@ -227,7 +232,7 @@ async def test_expired_lease_takeover_and_retryable_error(tmp_path: Path) -> Non
         worker_b = GenerationWorker(
             session_factory=factory,
             registry=registry,
-            settings=WorkerSettings(worker_id="worker-b", lease_seconds=30, retry_delay_seconds=5),
+            settings=WorkerSettings(worker_id="worker-b", lease_seconds=30, retry_base_seconds=5, retry_jitter_ratio=0),
         )
         assert await worker_b.run_once(now=now + timedelta(seconds=2)) == 1
         with factory() as session:
@@ -252,3 +257,120 @@ async def test_running_without_remote_job_and_unknown_limit_fail(tmp_path: Path)
         await worker.run_once()
         with factory() as session:
             assert task_service.get_task(session, task.id or 0).status == ReliableTaskStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_worker_cancels_running_task_remotely(tmp_path: Path) -> None:
+    registry = await make_registry("cancel_success", running_polls="10")
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            task = create_task(session)
+        worker = GenerationWorker(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+        )
+        await worker.run_once()
+        with factory() as session:
+            running = task_service.get_task(session, task.id or 0)
+            assert running.status == ReliableTaskStatus.RUNNING
+            task_service.request_task_cancel(session, running.id or 0, reason="manual stop", cancellation_timeout_seconds=30)
+
+        await worker.run_once()
+
+        with factory() as session:
+            cancelled = task_service.get_task(session, task.id or 0)
+            assert cancelled.status == ReliableTaskStatus.CANCELLED
+            assert cancelled.error_code == TaskErrorCode.CANCELLED.value
+            assert cancelled.cancelled_at is not None
+        stats = await fake_stats()
+        assert stats["cancel_calls"] == 1
+        assert stats["cancelled_jobs"] == 1
+
+
+@pytest.mark.anyio
+async def test_worker_retries_transient_cancel_error_without_leaving_cancelling(tmp_path: Path) -> None:
+    registry = await make_registry("cancel_500_once", running_polls="10")
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            task = create_task(session)
+        worker = GenerationWorker(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(
+                worker_id="worker-a",
+                poll_interval_seconds=0,
+                retry_base_seconds=5,
+                retry_jitter_ratio=0,
+            ),
+        )
+        now = task.created_at
+        await worker.run_once(now=now)
+        with factory() as session:
+            task_service.request_task_cancel(
+                session,
+                task.id or 0,
+                reason="manual stop",
+                cancellation_timeout_seconds=60,
+                now=now,
+            )
+
+        await worker.run_once(now=now)
+        with factory() as session:
+            waiting = task_service.get_task(session, task.id or 0)
+            assert waiting.status == ReliableTaskStatus.CANCELLING
+            assert waiting.retry_count == 1
+            assert waiting.next_poll_at == (now + timedelta(seconds=5)).replace(tzinfo=None)
+
+        await worker.run_once(now=now + timedelta(seconds=5))
+        with factory() as session:
+            assert task_service.get_task(session, task.id or 0).status == ReliableTaskStatus.CANCELLED
+        stats = await fake_stats()
+        assert stats["cancel_calls"] == 2
+
+
+@pytest.mark.anyio
+async def test_worker_resubmits_submitting_task_before_cancel_when_remote_id_missing(tmp_path: Path) -> None:
+    registry = await make_registry("cancel_success", running_polls="10")
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            task = create_task(session, status=ReliableTaskStatus.SUBMITTING)
+            task_service.request_task_cancel(session, task.id or 0, reason="manual stop", cancellation_timeout_seconds=30)
+        worker = GenerationWorker(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+        )
+
+        await worker.run_once()
+
+        with factory() as session:
+            cancelled = task_service.get_task(session, task.id or 0)
+            assert cancelled.status == ReliableTaskStatus.CANCELLED
+            assert cancelled.remote_job_id is not None
+        stats = await fake_stats()
+        assert stats["submit_calls"] == 1
+        assert stats["cancel_calls"] == 1
+
+
+@pytest.mark.anyio
+async def test_worker_job_timeout_requests_cancellation(tmp_path: Path) -> None:
+    registry = await make_registry("cancel_success", running_polls="10")
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            task = create_task(session)
+        worker = GenerationWorker(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0, job_timeout_seconds=1),
+        )
+        now = task.created_at
+        await worker.run_once(now=now)
+
+        await worker.run_once(now=now + timedelta(seconds=2))
+
+        with factory() as session:
+            cancelling = task_service.get_task(session, task.id or 0)
+            assert cancelling.status == ReliableTaskStatus.CANCELLING
+            assert cancelling.error_code == TaskErrorCode.JOB_TIMEOUT.value
+            assert cancelling.cancellation_deadline_at is not None

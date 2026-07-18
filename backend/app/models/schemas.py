@@ -119,6 +119,17 @@ class GenerationTaskRead(BaseModel):
     retry_count: int
     max_attempts: int
     result_urls: list[dict[str, object]] = []
+    can_cancel: bool = False
+    can_retry: bool = False
+    retry_of_task_id: int | None = None
+    root_task_id: int | None = None
+    cancel_requested_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    cancel_reason: str | None = None
+    submission_deadline_at: datetime | None = None
+    job_deadline_at: datetime | None = None
+    cancellation_deadline_at: datetime | None = None
+    last_retry_delay_seconds: float | None = None
     next_retry_at: datetime | None
     last_polled_at: datetime | None
     next_poll_at: datetime | None
@@ -143,6 +154,14 @@ class TaskLogRead(BaseModel):
     message: str
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class TaskCancelRequest(BaseModel):
+    reason: str = ""
+
+
+class TaskRetryRequest(BaseModel):
+    reason: str = ""
 
 
 class ProjectDetail(ProjectRead):

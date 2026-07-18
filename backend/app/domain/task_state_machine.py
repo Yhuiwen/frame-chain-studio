@@ -19,6 +19,7 @@ LEASEABLE_TASK_STATUSES = {
     ReliableTaskStatus.SUBMITTING,
     ReliableTaskStatus.RUNNING,
     ReliableTaskStatus.RETRY_WAIT,
+    ReliableTaskStatus.CANCELLING,
 }
 
 ALLOWED_TASK_TRANSITIONS: dict[ReliableTaskStatus, set[ReliableTaskStatus]] = {

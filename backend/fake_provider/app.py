@@ -13,6 +13,8 @@ ATTEMPTS: dict[str, int] = {}
 JOBS_BY_IDEMPOTENCY_KEY: dict[str, str] = {}
 SUBMIT_CALLS = 0
 CREATED_JOBS = 0
+CANCEL_CALLS = 0
+CANCELLED_JOBS = 0
 
 
 def _format_response(job: dict[str, Any], response_format: str, base_url: str) -> dict[str, Any]:
@@ -98,18 +100,22 @@ def test_stats() -> dict[str, object]:
     return {
         "created_jobs": CREATED_JOBS,
         "submit_calls": SUBMIT_CALLS,
+        "cancel_calls": CANCEL_CALLS,
+        "cancelled_jobs": CANCELLED_JOBS,
         "jobs_by_idempotency_key": dict(JOBS_BY_IDEMPOTENCY_KEY),
     }
 
 
 @app.post("/fake/v1/test/reset")
 def test_reset() -> dict[str, str]:
-    global SUBMIT_CALLS, CREATED_JOBS
+    global SUBMIT_CALLS, CREATED_JOBS, CANCEL_CALLS, CANCELLED_JOBS
     JOBS.clear()
     ATTEMPTS.clear()
     JOBS_BY_IDEMPOTENCY_KEY.clear()
     SUBMIT_CALLS = 0
     CREATED_JOBS = 0
+    CANCEL_CALLS = 0
+    CANCELLED_JOBS = 0
     return {"status": "reset"}
 
 
@@ -190,13 +196,35 @@ async def cancel_job(
     request: Request,
     x_fake_scenario: str | None = Header(default=None),
 ) -> JSONResponse:
+    global CANCEL_CALLS, CANCELLED_JOBS
+    CANCEL_CALLS += 1
     job = JOBS.get(job_id)
-    if job is None or x_fake_scenario == "job_not_found":
+    if job is None or x_fake_scenario in {"job_not_found", "cancel_job_not_found"}:
         return JSONResponse({"error": {"code": "not_found"}}, status_code=404)
     scenario = str(x_fake_scenario or job["scenario"])
     if scenario == "cancel_not_supported":
         return JSONResponse({"error": {"code": "not_supported"}}, status_code=405)
+    if scenario == "cancel_500_once":
+        attempts_key = f"cancel:{job_id}"
+        ATTEMPTS[attempts_key] = ATTEMPTS.get(attempts_key, 0) + 1
+        if ATTEMPTS[attempts_key] == 1:
+            return JSONResponse({"error": {"code": "temporary_cancel_error"}}, status_code=500)
+    if scenario == "cancel_timeout":
+        await asyncio.sleep(0.2)
+    if scenario == "cancel_remote_succeeded":
+        job["status"] = "succeeded"
+        return JSONResponse(_format_response(job, str(job["format"]), str(request.base_url).rstrip("/")))
+    if scenario == "cancel_returns_running":
+        job["status"] = "running"
+        return JSONResponse(_format_response(job, str(job["format"]), str(request.base_url).rstrip("/")))
+    if scenario == "cancel_pending_then_cancelled":
+        attempts_key = f"cancel-pending:{job_id}"
+        ATTEMPTS[attempts_key] = ATTEMPTS.get(attempts_key, 0) + 1
+        if ATTEMPTS[attempts_key] == 1:
+            job["status"] = "running"
+            return JSONResponse(_format_response(job, str(job["format"]), str(request.base_url).rstrip("/")))
     job["status"] = "cancelled"
+    CANCELLED_JOBS += 1
     return JSONResponse(_format_response(job, str(job["format"]), str(request.base_url).rstrip("/")))
 
 

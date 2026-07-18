@@ -103,6 +103,7 @@ Task statuses:
 - `SUBMITTING`: a future worker is submitting to a provider.
 - `RUNNING`: a provider job is running or the Mock Provider is executing locally.
 - `RETRY_WAIT`: a retryable error occurred and the task is waiting for the next attempt inside the same execution attempt.
+- `RESULT_READY`: a provider job succeeded and result URLs are persisted, but local media processing is not implemented yet.
 - `SUCCEEDED`: the result has been registered locally.
 - `FAILED`: the task reached an unrecoverable error or retry limit.
 - `CANCELLING`: cancellation was requested and is awaiting provider acknowledgement.
@@ -120,9 +121,14 @@ SUBMITTING -> CANCELLING
 SUBMITTING -> CANCELLED
 RUNNING -> RUNNING
 RUNNING -> RETRY_WAIT
+RUNNING -> RESULT_READY
 RUNNING -> SUCCEEDED
 RUNNING -> FAILED
 RUNNING -> CANCELLING
+RUNNING -> CANCELLED
+RESULT_READY -> SUCCEEDED
+RESULT_READY -> FAILED
+RESULT_READY -> CANCELLED
 RETRY_WAIT -> QUEUED
 RETRY_WAIT -> SUBMITTING
 RETRY_WAIT -> CANCELLED
@@ -136,7 +142,9 @@ All task transitions must go through `TaskService`, which validates transitions,
 
 `idempotency_key` has a database uniqueness constraint and prevents duplicate task attempts for the same logical operation. `attempt_number` is the attempt's ordinal number within one logical generation request, starting at 1. `retry_count` is the number of retryable execution failures inside the current attempt.
 
-Lease fields prepare for future multi-worker execution:
+`max_attempts` is the total number of automatic executions inside one task attempt, including the first execution. For example, `max_attempts = 3` means the initial try plus two automatic retries. Manual retry is different: it creates a new `GenerationTask` linked to the previous terminal task.
+
+Lease fields prepare for multi-worker execution:
 
 - `locked_by`
 - `locked_until`
@@ -224,7 +232,7 @@ Endpoints:
 - `GET /fake/v1/results/{job_id}.mp4`
 - `GET /fake/v1/results/{job_id}.png`
 
-Scenarios are selected with test headers such as `X-Fake-Scenario`, `X-Fake-Format`, `X-Fake-Running-Polls`, and `X-Fake-Request-Key`. Supported scenarios are `success`, `immediate_success`, `permanent_failure`, `submit_429_once`, `submit_500_once`, `poll_500_once`, `invalid_submit_response`, `invalid_status_response`, `unknown_status`, `cancel_success`, `cancel_not_supported`, `job_not_found`, and `slow_response`.
+Scenarios are selected with test headers such as `X-Fake-Scenario`, `X-Fake-Format`, `X-Fake-Running-Polls`, and `X-Fake-Request-Key`. Supported scenarios are `success`, `immediate_success`, `permanent_failure`, `submit_429_once`, `submit_500_once`, `poll_500_once`, `invalid_submit_response`, `invalid_status_response`, `unknown_status`, `cancel_success`, `cancel_pending_then_cancelled`, `cancel_returns_running`, `cancel_remote_succeeded`, `cancel_500_once`, `cancel_timeout`, `cancel_not_supported`, `cancel_job_not_found`, `job_not_found`, and `slow_response`.
 
 The Fake Provider supports three response formats:
 
@@ -250,16 +258,19 @@ Provider config may contain `api_key`, but it is modeled as a secret and must no
 
 ## Generation Worker
 
-Phase 2C adds an independent persistent Worker process for remote Provider coordination. The Web API still starts on its own; it does not launch the Worker in FastAPI startup or lifespan hooks. This keeps auto-reload and multi-process web serving from accidentally starting duplicate Workers.
+Phase 2C/2D adds an independent persistent Worker process for remote Provider coordination, plus durable retry, timeout, cancellation, and manual retry flows. The Web API still starts on its own; it does not launch the Worker in FastAPI startup or lifespan hooks. This keeps auto-reload and multi-process web serving from accidentally starting duplicate Workers.
 
 Worker responsibilities:
 
-- find due `GenerationTask` rows in `QUEUED`, `SUBMITTING`, `RUNNING`, or due `RETRY_WAIT`
+- find due `GenerationTask` rows in `QUEUED`, `SUBMITTING`, `RUNNING`, `CANCELLING`, or due `RETRY_WAIT`
 - acquire and release database leases
 - build Provider request DTOs from `GenerationRequest` and `GenerationTask`
 - submit to the configured Provider with a stable idempotency key
 - persist `remote_job_id`, `remote_status`, polling timestamps, retry metadata, and result URLs
 - recover after Worker or service restart
+- classify provider errors, schedule exponential backoff with jitter, and honor `Retry-After` when present
+- enforce submission, job, and cancellation deadlines
+- process cancellation requests before lower-priority work
 
 The Worker does not download result URLs, validate media with FFprobe, create result assets, extract tail frames, or advance Shot review states.
 
@@ -315,7 +326,12 @@ Worker environment variables:
 - `FCS_WORKER_ID`: stable ID for this Worker process. Defaults to hostname, process ID, and a random suffix.
 - `FCS_WORKER_LEASE_SECONDS`: lease duration, default `30`.
 - `FCS_WORKER_POLL_INTERVAL_SECONDS`: next-poll delay, default `1`.
-- `FCS_WORKER_RETRY_DELAY_SECONDS`: minimal retry delay for retryable Provider errors, default `5`.
+- `FCS_WORKER_RETRY_BASE_SECONDS`: exponential retry base delay, default `2`.
+- `FCS_WORKER_RETRY_MAX_SECONDS`: maximum retry delay, default `300`.
+- `FCS_WORKER_RETRY_JITTER_RATIO`: proportional random jitter from `0` to `1`, default `0.2`.
+- `FCS_WORKER_SUBMISSION_TIMEOUT_SECONDS`: maximum time a task may remain `SUBMITTING` without a stored remote job ID, default `120`.
+- `FCS_WORKER_JOB_TIMEOUT_SECONDS`: maximum remote job runtime before cancellation/failure handling, default `1800`.
+- `FCS_WORKER_CANCELLATION_TIMEOUT_SECONDS`: maximum time to wait for cancellation confirmation, default `120`.
 - `FCS_WORKER_MAX_UNKNOWN_POLLS`: unknown remote status limit, default `3`.
 - `FCS_WORKER_BATCH_SIZE`: due-task scan limit, default `10`.
 
@@ -328,6 +344,14 @@ Recovery rules:
 - `RUNNING` without `remote_job_id`: fail as invalid task data.
 - due `RETRY_WAIT` with `remote_job_id`: return to polling.
 - due `RETRY_WAIT` without `remote_job_id`: return to submission.
+- `CANCELLING` with `remote_job_id`: call Provider cancellation and persist the result.
+- `CANCELLING` without `remote_job_id`: resubmit once with the original idempotency key to recover or create the remote job, then cancel it.
+
+Cancellation and manual retry APIs:
+
+- `POST /api/tasks/{task_id}/cancel` records a durable cancel command and intent. It never performs the provider call inside the request thread. `QUEUED`, due `RETRY_WAIT`, and `RESULT_READY` tasks are cancelled locally; running provider jobs move to `CANCELLING`.
+- `POST /api/tasks/{task_id}/retry` is allowed only for `FAILED` and `CANCELLED` tasks. It creates a new linked task attempt and is idempotent when the same `Idempotency-Key` is reused.
+- `SUCCEEDED` tasks are not cancellable. `RESULT_READY` tasks are not manually retryable in Phase 2D because local result processing has not run yet.
 
 SQLite concurrency is intentionally conservative. Each task cycle uses short database transactions and conditional lease updates; Provider HTTP calls occur outside transactions. The default Worker concurrency is effectively one task batch loop per process. For production multi-worker deployments, PostgreSQL row-level locking or a stronger lease primitive is recommended.
 

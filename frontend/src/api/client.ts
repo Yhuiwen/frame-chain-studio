@@ -89,10 +89,21 @@ export interface GenerationTask {
   attempt_number: number;
   retry_count: number;
   max_attempts: number;
+  can_cancel: boolean;
+  can_retry: boolean;
+  retry_of_task_id: number | null;
+  root_task_id: number | null;
   result_urls?: Array<Record<string, unknown>>;
   next_retry_at: string | null;
   last_polled_at: string | null;
   next_poll_at: string | null;
+  submission_deadline_at: string | null;
+  job_deadline_at: string | null;
+  cancellation_deadline_at: string | null;
+  cancel_requested_at: string | null;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+  last_retry_delay_seconds: number | null;
   locked_by: string | null;
   locked_until: string | null;
   error_code: string | null;
@@ -164,4 +175,16 @@ export const api = {
     request<GenerationRequest>(`/api/shots/${shotId}/video/generate`, { method: "POST" }),
   approveVideo: (shotId: number) => request<Shot>(`/api/shots/${shotId}/video/approve`, { method: "POST" }),
   rejectVideo: (shotId: number) => request<Shot>(`/api/shots/${shotId}/video/reject`, { method: "POST" }),
+  cancelTask: (taskId: number, reason: string, idempotencyKey: string) =>
+    request<GenerationTask>(`/api/tasks/${taskId}/cancel`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ reason }),
+    }),
+  retryTask: (taskId: number, reason: string, idempotencyKey: string) =>
+    request<GenerationTask>(`/api/tasks/${taskId}/retry`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ reason }),
+    }),
 };

@@ -7,13 +7,14 @@ import {
   Picture,
   Plus,
   Refresh,
+  RefreshRight,
   VideoPlay,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
-import { api, type Shot, type ShotAssetSummary } from "@/api/client";
+import { api, type GenerationTask, type Shot, type ShotAssetSummary } from "@/api/client";
 import { useProjectPolling } from "@/composables/useProjectPolling";
 import { useStudioStore } from "@/stores/studio";
 
@@ -23,10 +24,12 @@ const { startPolling, tick } = useProjectPolling();
 const draggedShotId = ref<number | null>(null);
 const deletingShotId = ref<number | null>(null);
 const actionBusy = ref(false);
+const taskActionBusyId = ref<number | null>(null);
 const expandedLogIds = ref<Set<number>>(new Set());
 const projectId = computed(() => Number(route.params.id));
 const selected = computed(() => store.selectedShot);
 const videos = computed(() => (selected.value ? store.assetsByShot(selected.value.id, "VIDEO") : []));
+const selectedTasks = computed(() => store.tasksForSelected);
 
 onMounted(async () => {
   await store.loadProject(projectId.value);
@@ -109,6 +112,56 @@ function toggleLog(logId: number, event: MouseEvent) {
   if (next.has(logId)) next.delete(logId);
   else next.add(logId);
   expandedLogIds.value = next;
+}
+
+function idempotencyKey(action: string, taskId: number) {
+  const randomPart = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+  return `ui:${action}:${taskId}:${randomPart}`;
+}
+
+function taskType(task: GenerationTask) {
+  if (task.status === "FAILED") return "danger";
+  if (task.status === "CANCELLED") return "info";
+  if (task.status === "RESULT_READY" || task.status === "SUCCEEDED") return "success";
+  if (task.status === "RETRY_WAIT" || task.status === "CANCELLING") return "warning";
+  return "primary";
+}
+
+async function cancelTask(task: GenerationTask) {
+  try {
+    await ElMessageBox.confirm(`Cancel task #${task.id}?`, "Cancel Task", {
+      confirmButtonText: "Cancel Task",
+      cancelButtonText: "Keep Running",
+      type: "warning",
+    });
+  } catch {
+    return;
+  }
+  taskActionBusyId.value = task.id;
+  try {
+    await api.cancelTask(task.id, "Cancelled from project task panel.", idempotencyKey("cancel", task.id));
+    await store.refreshProjectDetail();
+    startPolling();
+    ElMessage.success("Cancel requested");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "Cancel failed");
+  } finally {
+    taskActionBusyId.value = null;
+  }
+}
+
+async function retryTask(task: GenerationTask) {
+  taskActionBusyId.value = task.id;
+  try {
+    await api.retryTask(task.id, "Manual retry from project task panel.", idempotencyKey("retry", task.id));
+    await store.refreshProjectDetail();
+    startPolling();
+    ElMessage.success("Retry queued");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "Retry failed");
+  } finally {
+    taskActionBusyId.value = null;
+  }
 }
 </script>
 
@@ -358,6 +411,49 @@ function toggleLog(logId: number, event: MouseEvent) {
             <h2>任务日志</h2>
             <el-button native-type="button" :icon="CaretRight" text @click="refreshProjectDetail">同步</el-button>
           </div>
+          <div class="task-list">
+            <div v-for="task in selectedTasks" :key="task.id" class="task-row">
+              <div class="task-main">
+                <strong>#{{ task.id }} {{ task.task_type }}</strong>
+                <el-tag size="small" :type="taskType(task)">{{ task.status }}</el-tag>
+              </div>
+              <div class="task-meta">
+                attempt {{ task.attempt_number }} / retries {{ task.retry_count }}/{{ task.max_attempts }}
+                <span v-if="task.next_retry_at">next retry {{ task.next_retry_at }}</span>
+                <span v-if="task.next_poll_at">next poll {{ task.next_poll_at }}</span>
+                <span v-if="task.job_deadline_at">job deadline {{ task.job_deadline_at }}</span>
+                <span v-if="task.cancellation_deadline_at">cancel deadline {{ task.cancellation_deadline_at }}</span>
+              </div>
+              <div v-if="task.error_code || task.error_message" class="task-error">
+                {{ task.error_code ?? "ERROR" }}: {{ task.error_message ?? "" }}
+              </div>
+              <div class="task-actions">
+                <el-button
+                  v-if="task.can_cancel"
+                  native-type="button"
+                  size="small"
+                  :icon="Close"
+                  :loading="taskActionBusyId === task.id"
+                  :disabled="taskActionBusyId !== null"
+                  @click="cancelTask(task)"
+                >
+                  Cancel
+                </el-button>
+                <el-button
+                  v-if="task.can_retry"
+                  native-type="button"
+                  size="small"
+                  type="primary"
+                  :icon="RefreshRight"
+                  :loading="taskActionBusyId === task.id"
+                  :disabled="taskActionBusyId !== null"
+                  @click="retryTask(task)"
+                >
+                  Retry
+                </el-button>
+              </div>
+            </div>
+          </div>
           <el-timeline>
             <el-timeline-item v-for="log in store.logsForSelected" :key="log.id" :timestamp="log.created_at">
               <button type="button" class="log-row" @click="toggleLog(log.id, $event)">
@@ -374,3 +470,46 @@ function toggleLog(logId: number, event: MouseEvent) {
     </section>
   </main>
 </template>
+
+<style scoped>
+.task-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.task-row {
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.task-main,
+.task-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.task-meta {
+  color: var(--el-text-color-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.task-error {
+  color: var(--el-color-danger);
+  font-size: 12px;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.task-actions {
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+</style>

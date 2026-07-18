@@ -1,13 +1,14 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlmodel import Session
 
+from app.domain.retry_policy import RetryPolicyConfig, decide_error
 from app.models.entities import GenerationRequest, GenerationTask, ReliableTaskStatus, TaskErrorCode
 from app.providers.async_base import AsyncGenerationProvider
-from app.providers.exceptions import ProviderError
+from app.providers.exceptions import ProviderCancellationError, ProviderError
 from app.providers.models import (
     ImageGenerationRequest,
     ProviderJobResult,
@@ -49,11 +50,13 @@ class ProviderExecutionService:
             return await self.poll_task_once(task_id, now=now)
         if status == ReliableTaskStatus.RETRY_WAIT:
             return await self.recover_retry_once(task_id, now=now)
+        if status == ReliableTaskStatus.CANCELLING:
+            return await self.cancel_task_once(task_id, now=now)
         return False
 
     async def submit_task_once(self, task_id: int, *, now: datetime | None = None) -> bool:
         with self.session_factory() as session:
-            task = task_service.transition_task(
+            task_service.transition_task(
                 session,
                 task_id,
                 ReliableTaskStatus.SUBMITTING,
@@ -61,7 +64,13 @@ class ProviderExecutionService:
                 reason_code="worker_submit",
                 now=now,
             )
-        return await self._submit_existing_task(task.id or task_id, now=now)
+            refreshed = task_service.get_task(session, task_id)
+            refreshed.submission_deadline_at = task_service.db_time(now) + timedelta(
+                seconds=self.settings.submission_timeout_seconds
+            )
+            session.add(refreshed)
+            session.commit()
+        return await self._submit_existing_task(task_id, now=now)
 
     async def recover_submitting_once(self, task_id: int, *, now: datetime | None = None) -> bool:
         with self.session_factory() as session:
@@ -71,6 +80,15 @@ class ProviderExecutionService:
                     session,
                     task_id,
                     poll_delay_seconds=self.settings.poll_interval_seconds,
+                    now=now,
+                )
+                return True
+            if task.submission_deadline_at and task.submission_deadline_at <= task_service.db_time(now):
+                self._record_task_error(
+                    task_id,
+                    TaskErrorCode.REQUEST_TIMEOUT,
+                    "Submission timed out before remote_job_id was stored.",
+                    retryable=True,
                     now=now,
                 )
                 return True
@@ -102,6 +120,32 @@ class ProviderExecutionService:
     async def poll_task_once(self, task_id: int, *, now: datetime | None = None) -> bool:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
+            if task.job_deadline_at and task.job_deadline_at <= task_service.db_time(now):
+                if provider := self.registry.get(task.provider_id):
+                    if provider.get_capabilities().supports_cancel:
+                        task_service.request_task_cancel(
+                            session,
+                            task_id,
+                            reason="Remote job timeout.",
+                            cancellation_timeout_seconds=self.settings.cancellation_timeout_seconds,
+                            now=now,
+                        )
+                        task_service.record_task_error(
+                            session,
+                            task_id,
+                            error_code=TaskErrorCode.JOB_TIMEOUT,
+                            error_message="Remote job exceeded configured timeout; cancellation requested.",
+                            now=now,
+                        )
+                        return True
+                task_service.mark_task_failed(
+                    session,
+                    task_id,
+                    error_code=TaskErrorCode.JOB_TIMEOUT,
+                    error_message="Remote job exceeded configured timeout.",
+                    now=now,
+                )
+                return True
             if not task.remote_job_id:
                 task_service.mark_task_failed(
                     session,
@@ -118,11 +162,96 @@ class ProviderExecutionService:
         try:
             result = await provider.get_job(remote_job_id)
         except ProviderError as exc:
-            self._record_provider_error(task_id, exc, now=now)
+            self._record_cancel_provider_error(task_id, exc, now=now)
             return True
         if not self._lease_owned(task_id, now=now):
             return False
         self._apply_poll_result(task_id, result, now=now)
+        return True
+
+    async def cancel_task_once(self, task_id: int, *, now: datetime | None = None) -> bool:
+        with self.session_factory() as session:
+            task = task_service.get_task(session, task_id)
+            if task.cancellation_deadline_at and task.cancellation_deadline_at <= task_service.db_time(now):
+                task_service.mark_task_failed(
+                    session,
+                    task_id,
+                    error_code=TaskErrorCode.REQUEST_TIMEOUT,
+                    error_message="Cancellation deadline elapsed without remote confirmation.",
+                    now=now,
+                )
+                return True
+            provider = self._provider_or_fail(session, task)
+            remote_job_id = task.remote_job_id
+            needs_submit_lookup = remote_job_id is None
+            if needs_submit_lookup:
+                request = self._build_provider_request(session, task, provider)
+        if not self._lease_owned(task_id, now=now):
+            return False
+        if needs_submit_lookup:
+            try:
+                if isinstance(request, ImageGenerationRequest):
+                    submit = await provider.submit_image(request)
+                else:
+                    submit = await provider.submit_video(request)
+            except ProviderError as exc:
+                self._record_provider_error(task_id, exc, now=now)
+                return True
+            remote_job_id = submit.remote_job_id
+            with self.session_factory() as session:
+                task_service.store_cancelling_remote_job(
+                    session,
+                    task_id,
+                    remote_job_id=submit.remote_job_id,
+                    remote_status=submit.remote_status.value,
+                    response_summary=submit.raw_response_summary,
+                    now=now,
+                )
+        try:
+            cancel_result = await provider.cancel_job(remote_job_id or "")
+        except ProviderCancellationError as exc:
+            with self.session_factory() as session:
+                task_service.record_task_error(
+                    session,
+                    task_id,
+                    error_code=TaskErrorCode.CANCELLED,
+                    error_message=f"Provider does not support remote cancellation: {exc.message}",
+                    error_details=exc.as_details(),
+                    now=now,
+                )
+                task_service.mark_task_cancelled(session, task_id, now=now)
+            return True
+        except ProviderError as exc:
+            self._record_provider_error(task_id, exc, now=now)
+            return True
+        with self.session_factory() as session:
+            if cancel_result.remote_status == RemoteJobStatus.CANCELLED:
+                task_service.record_task_error(
+                    session,
+                    task_id,
+                    error_code=TaskErrorCode.CANCELLED,
+                    error_message="Task cancelled.",
+                    now=now,
+                )
+                task_service.mark_task_cancelled(session, task_id, now=now)
+            elif cancel_result.remote_status == RemoteJobStatus.SUCCEEDED:
+                task_service.transition_task(
+                    session,
+                    task_id,
+                    ReliableTaskStatus.RUNNING,
+                    expected_current=ReliableTaskStatus.CANCELLING,
+                    reason_code="cancel_late_remote_succeeded",
+                    now=now,
+                )
+            else:
+                task_service.record_cancel_pending(
+                    session,
+                    task_id,
+                    remote_status=cancel_result.remote_status.value,
+                    response_summary=cancel_result.raw_response_summary,
+                    poll_delay_seconds=self.settings.poll_interval_seconds,
+                    now=now,
+                )
         return True
 
     async def _submit_existing_task(self, task_id: int, *, now: datetime | None = None) -> bool:
@@ -150,6 +279,7 @@ class ProviderExecutionService:
                 remote_status=result.remote_status.value,
                 response_summary=result.raw_response_summary,
                 poll_delay_seconds=self.settings.poll_interval_seconds,
+                job_timeout_seconds=self.settings.job_timeout_seconds,
                 now=now,
             )
         return True
@@ -180,13 +310,40 @@ class ProviderExecutionService:
 
     def _record_provider_error(self, task_id: int, exc: ProviderError, *, now: datetime | None = None) -> None:
         with self.session_factory() as session:
-            if exc.retryable:
-                task_service.schedule_retry(
+            task = task_service.get_task(session, task_id)
+            if task.status == ReliableTaskStatus.CANCELLING:
+                self._record_cancel_provider_error(task_id, exc, now=now)
+                return
+        self._record_task_error(
+            task_id,
+            exc.to_task_error_code(),
+            exc.message,
+            retryable=exc.retryable,
+            details=exc.as_details(),
+            now=now,
+        )
+
+    def _record_cancel_provider_error(self, task_id: int, exc: ProviderError, *, now: datetime | None = None) -> None:
+        with self.session_factory() as session:
+            task = task_service.get_task(session, task_id)
+            decision = decide_error(
+                exc.to_task_error_code(),
+                retry_count=task.retry_count,
+                now=now,
+                config=RetryPolicyConfig(
+                    base_seconds=self.settings.retry_base_seconds,
+                    max_seconds=self.settings.retry_max_seconds,
+                    jitter_ratio=self.settings.retry_jitter_ratio,
+                ),
+            )
+            if exc.retryable and decision.retryable:
+                task_service.schedule_cancel_retry(
                     session,
                     task_id,
-                    delay_seconds=self.settings.retry_delay_seconds,
+                    delay_seconds=decision.retry_after_seconds or self.settings.retry_base_seconds,
                     error_code=exc.to_task_error_code(),
                     error_message=exc.message,
+                    error_details=exc.as_details(),
                     now=now,
                 )
             else:
@@ -196,6 +353,47 @@ class ProviderExecutionService:
                     error_code=exc.to_task_error_code(),
                     error_message=exc.message,
                     error_details=exc.as_details(),
+                    now=now,
+                )
+
+    def _record_task_error(
+        self,
+        task_id: int,
+        error_code: TaskErrorCode | str,
+        message: str,
+        *,
+        retryable: bool,
+        details: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        with self.session_factory() as session:
+            task = task_service.get_task(session, task_id)
+            decision = decide_error(
+                error_code,
+                retry_count=task.retry_count,
+                now=now,
+                config=RetryPolicyConfig(
+                    base_seconds=self.settings.retry_base_seconds,
+                    max_seconds=self.settings.retry_max_seconds,
+                    jitter_ratio=self.settings.retry_jitter_ratio,
+                ),
+            )
+            if retryable and decision.retryable:
+                task_service.schedule_retry(
+                    session,
+                    task_id,
+                    delay_seconds=decision.retry_after_seconds or self.settings.retry_base_seconds,
+                    error_code=error_code,
+                    error_message=message,
+                    now=now,
+                )
+            else:
+                task_service.mark_task_failed(
+                    session,
+                    task_id,
+                    error_code=error_code,
+                    error_message=message,
+                    error_details=details,
                     now=now,
                 )
 

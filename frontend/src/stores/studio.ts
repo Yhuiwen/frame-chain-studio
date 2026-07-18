@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 
-import { api, type Asset, type Project, type ProjectDetail, type Shot, type TaskLog } from "@/api/client";
+import { api, type Asset, type GenerationTask, type Project, type ProjectDetail, type Shot, type TaskLog } from "@/api/client";
 
 interface StudioState {
   projects: Project[];
@@ -10,7 +10,16 @@ interface StudioState {
   refreshing: boolean;
 }
 
-export const ACTIVE_TASK_STATUSES = new Set(["QUEUED", "SUBMITTING", "GENERATING", "PENDING", "RUNNING", "PROCESSING"]);
+export const ACTIVE_TASK_STATUSES = new Set([
+  "QUEUED",
+  "SUBMITTING",
+  "GENERATING",
+  "PENDING",
+  "RUNNING",
+  "PROCESSING",
+  "RETRY_WAIT",
+  "CANCELLING",
+]);
 
 export const useStudioStore = defineStore("studio", {
   state: (): StudioState => ({
@@ -31,8 +40,13 @@ export const useStudioStore = defineStore("studio", {
       const shotId = state.selectedShotId ?? state.current?.shots[0]?.id;
       return (state.current?.logs ?? []).filter((log) => !shotId || log.shot_id === shotId);
     },
+    tasksForSelected: (state): GenerationTask[] => {
+      const shotId = state.selectedShotId ?? state.current?.shots[0]?.id;
+      return (state.current?.tasks ?? []).filter((task) => !shotId || task.shot_id === shotId);
+    },
     hasActiveTasks: (state): boolean =>
-      (state.current?.requests ?? []).some((request) => ACTIVE_TASK_STATUSES.has(request.status)),
+      (state.current?.requests ?? []).some((request) => ACTIVE_TASK_STATUSES.has(request.status)) ||
+      (state.current?.tasks ?? []).some((task) => ACTIVE_TASK_STATUSES.has(task.status)),
   },
   actions: {
     async loadProjects() {

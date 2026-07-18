@@ -7,16 +7,18 @@ from app.models.entities import GenerationTask, ReliableTaskStatus
 from app.services.task_service import db_time
 
 WORKER_CANDIDATE_STATUSES = {
+    ReliableTaskStatus.CANCELLING,
     ReliableTaskStatus.SUBMITTING,
     ReliableTaskStatus.RUNNING,
     ReliableTaskStatus.RETRY_WAIT,
     ReliableTaskStatus.QUEUED,
 }
 TASK_PRIORITY = {
-    ReliableTaskStatus.SUBMITTING: 0,
-    ReliableTaskStatus.RUNNING: 1,
-    ReliableTaskStatus.RETRY_WAIT: 2,
-    ReliableTaskStatus.QUEUED: 3,
+    ReliableTaskStatus.CANCELLING: 0,
+    ReliableTaskStatus.SUBMITTING: 1,
+    ReliableTaskStatus.RUNNING: 2,
+    ReliableTaskStatus.RETRY_WAIT: 3,
+    ReliableTaskStatus.QUEUED: 4,
 }
 
 

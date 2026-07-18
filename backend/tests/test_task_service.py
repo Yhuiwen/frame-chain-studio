@@ -1,8 +1,11 @@
 from datetime import timedelta
 
 import pytest
-from sqlmodel import Session, create_engine, select
+from fastapi.testclient import TestClient
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.db import get_session
+from app.main import app
 from app.core.errors import AppError
 from app.models.entities import (
     GenerationKind,
@@ -10,6 +13,8 @@ from app.models.entities import (
     Project,
     ReliableTaskStatus,
     Shot,
+    TaskCommand,
+    TaskCommandType,
     TaskStateChange,
     utcnow,
 )
@@ -136,6 +141,7 @@ def test_schedule_retry_and_retry_limit(session: Session) -> None:
     failed = task_service.schedule_retry(session, task.id or 0, delay_seconds=30, now=now)
     assert failed.status == ReliableTaskStatus.FAILED
     assert failed.retry_count == 2
+    assert failed.next_retry_at is None
 
 
 def test_non_retryable_status_rejects_retry(session: Session) -> None:
@@ -145,6 +151,204 @@ def test_non_retryable_status_rejects_retry(session: Session) -> None:
     with pytest.raises(AppError) as exc:
         task_service.schedule_retry(session, task.id or 0, delay_seconds=1)
     assert exc.value.code == "TASK_NOT_RETRYABLE"
+
+
+def test_request_cancel_records_intent_and_local_terminal_states(session: Session) -> None:
+    now = utcnow()
+    request = logical_request(session)
+    queued = task_service.create_task_attempt(session, generation_request=request)
+
+    cancelled = task_service.request_task_cancel(
+        session,
+        queued.id or 0,
+        reason="no longer needed",
+        requested_by="tester",
+        now=now,
+    )
+    assert cancelled.status == ReliableTaskStatus.CANCELLED
+    assert cancelled.cancel_reason == "no longer needed"
+    assert cancelled.cancel_requested_by == "tester"
+    assert cancelled.cancel_requested_at == now.replace(tzinfo=None)
+    assert cancelled.cancelled_at == now.replace(tzinfo=None)
+
+    repeated = task_service.request_task_cancel(session, queued.id or 0, reason="again", now=now)
+    assert repeated.status == ReliableTaskStatus.CANCELLED
+    assert repeated.cancel_reason == "no longer needed"
+
+
+def test_request_cancel_running_enters_cancelling_with_deadline(session: Session) -> None:
+    now = utcnow()
+    request = logical_request(session)
+    task = task_service.create_task_attempt(session, generation_request=request)
+    task_service.mark_task_remote_submitted(
+        session,
+        task.id or 0,
+        remote_job_id="remote-1",
+        remote_status="running",
+        response_summary="{}",
+        poll_delay_seconds=10,
+        now=now,
+    )
+
+    cancelling = task_service.request_task_cancel(
+        session,
+        task.id or 0,
+        reason="stop",
+        cancellation_timeout_seconds=60,
+        now=now,
+    )
+
+    assert cancelling.status == ReliableTaskStatus.CANCELLING
+    assert cancelling.next_poll_at is None
+    assert cancelling.cancellation_deadline_at == (now + timedelta(seconds=60)).replace(tzinfo=None)
+
+
+def test_manual_retry_failed_task_is_idempotent_and_audited(session: Session) -> None:
+    request = logical_request(session)
+    first = task_service.create_task_attempt(session, generation_request=request)
+    task_service.mark_task_running(session, first.id or 0)
+    task_service.mark_task_failed(session, first.id or 0, error_message="failed")
+
+    retry = task_service.manual_retry_task(session, first.id or 0, idempotency_key="retry-once", reason="try again")
+    repeated = task_service.manual_retry_task(session, first.id or 0, idempotency_key="retry-once", reason="try again")
+
+    assert retry.id == repeated.id
+    assert retry.status == ReliableTaskStatus.QUEUED
+    assert retry.retry_of_task_id == first.id
+    assert retry.root_task_id == first.id
+    command = session.exec(select(TaskCommand).where(TaskCommand.command_type == TaskCommandType.MANUAL_RETRY)).one()
+    assert command.result_task_id == retry.id
+    assert command.reason == "try again"
+
+
+def test_manual_retry_rejects_active_and_result_ready_tasks(session: Session) -> None:
+    request = logical_request(session)
+    task = task_service.create_task_attempt(session, generation_request=request)
+
+    with pytest.raises(AppError) as exc:
+        task_service.manual_retry_task(session, task.id or 0, idempotency_key="too-soon")
+    assert exc.value.code == "TASK_NOT_RETRYABLE_MANUALLY"
+
+    task_service.mark_task_remote_submitted(
+        session,
+        task.id or 0,
+        remote_job_id="remote-1",
+        remote_status="running",
+        response_summary="{}",
+        poll_delay_seconds=0,
+    )
+    task_service.mark_task_result_ready(
+        session,
+        task.id or 0,
+        remote_status="succeeded",
+        result_urls=[{"url": "http://127.0.0.1/result.png"}],
+        response_summary="{}",
+    )
+    with pytest.raises(AppError) as exc:
+        task_service.manual_retry_task(session, task.id or 0, idempotency_key="result-ready")
+    assert exc.value.code == "TASK_NOT_RETRYABLE_MANUALLY"
+
+
+def test_task_cancel_and_retry_api_are_idempotent(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'task-api.db'}", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        request = logical_request(session)
+        task = task_service.create_task_attempt(session, generation_request=request)
+        task_service.mark_task_remote_submitted(
+            session,
+            task.id or 0,
+            remote_job_id="remote-1",
+            remote_status="running",
+            response_summary="{}",
+            poll_delay_seconds=0,
+        )
+
+        def override_session():
+            yield session
+
+        app.dependency_overrides[get_session] = override_session
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    f"/api/tasks/{task.id}/cancel",
+                    json={"reason": "api cancel"},
+                    headers={"Idempotency-Key": "cancel-key"},
+                )
+                assert response.status_code == 200
+                assert response.json()["status"] == ReliableTaskStatus.CANCELLING.value
+
+                repeated = client.post(
+                    f"/api/tasks/{task.id}/cancel",
+                    json={"reason": "api cancel"},
+                    headers={"Idempotency-Key": "cancel-key"},
+                )
+                assert repeated.status_code == 200
+                assert repeated.json()["status"] == ReliableTaskStatus.CANCELLING.value
+        finally:
+            app.dependency_overrides.clear()
+
+        task_service.mark_task_cancelled(session, task.id or 0)
+        app.dependency_overrides[get_session] = override_session
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    f"/api/tasks/{task.id}/retry",
+                    json={"reason": "api retry"},
+                    headers={"Idempotency-Key": "retry-key"},
+                )
+                repeated = client.post(
+                    f"/api/tasks/{task.id}/retry",
+                    json={"reason": "api retry"},
+                    headers={"Idempotency-Key": "retry-key"},
+                )
+                assert response.status_code == 200
+                assert repeated.status_code == 200
+                assert repeated.json()["id"] == response.json()["id"]
+                assert response.json()["retry_of_task_id"] == task.id
+        finally:
+            app.dependency_overrides.clear()
+
+
+def test_task_retry_api_returns_uniform_error_for_result_ready(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'task-api-error.db'}", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        request = logical_request(session)
+        task = task_service.create_task_attempt(session, generation_request=request)
+        task_service.mark_task_remote_submitted(
+            session,
+            task.id or 0,
+            remote_job_id="remote-1",
+            remote_status="running",
+            response_summary="{}",
+            poll_delay_seconds=0,
+        )
+        task_service.mark_task_result_ready(
+            session,
+            task.id or 0,
+            remote_status="succeeded",
+            result_urls=[{"url": "http://127.0.0.1/result.png"}],
+            response_summary="{}",
+        )
+
+        def override_session():
+            yield session
+
+        app.dependency_overrides[get_session] = override_session
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    f"/api/tasks/{task.id}/retry",
+                    json={"reason": "too early"},
+                    headers={"Idempotency-Key": "retry-result-ready"},
+                )
+                payload = response.json()
+                assert response.status_code == 409
+                assert payload["error"]["code"] == "TASK_NOT_RETRYABLE_MANUALLY"
+                assert "message" in payload["error"]
+        finally:
+            app.dependency_overrides.clear()
 
 
 def test_lease_acquire_renew_release_and_expiry(session: Session) -> None:

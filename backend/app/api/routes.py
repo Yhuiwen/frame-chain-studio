@@ -1,13 +1,14 @@
 from pathlib import Path
+from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Response
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
-from app.models.entities import Asset, GenerationRequest, Project, Shot
+from app.models.entities import Asset, GenerationRequest, Project, Shot, TaskCommandType
 from app.models.schemas import (
     GenerationRequestRead,
     ProjectCreate,
@@ -18,12 +19,15 @@ from app.models.schemas import (
     ShotCreate,
     ShotRead,
     ShotUpdate,
+    TaskCancelRequest,
+    TaskRetryRequest,
+    GenerationTaskRead,
 )
 from app.providers.config_loader import load_registry_from_env
 from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
-from app.services import studio
+from app.services import studio, task_service
 
 router = APIRouter()
 provider = MockGenerationProvider()
@@ -56,6 +60,45 @@ def list_providers() -> list[ProviderInfo]:
                 configuration_error=exc.message,
             )
         ]
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=GenerationTaskRead)
+def cancel_task(
+    task_id: int,
+    payload: TaskCancelRequest | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    task_service.create_or_get_command(
+        session,
+        task_id=task_id,
+        command_type=TaskCommandType.CANCEL,
+        idempotency_key=idempotency_key or f"cancel:{task_id}",
+        reason=payload.reason if payload else "",
+    )
+    task = task_service.request_task_cancel(
+        session,
+        task_id,
+        reason=payload.reason if payload else "",
+        cancellation_timeout_seconds=120,
+    )
+    return studio.task_payload(task)
+
+
+@router.post("/tasks/{task_id}/retry", response_model=GenerationTaskRead)
+def retry_task(
+    task_id: int,
+    payload: TaskRetryRequest | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    retry = task_service.manual_retry_task(
+        session,
+        task_id,
+        idempotency_key=idempotency_key or f"retry:{task_id}:{datetime.now().timestamp()}",
+        reason=payload.reason if payload else "",
+    )
+    return studio.task_payload(retry)
 
 
 @router.get("/media/{asset_id}")

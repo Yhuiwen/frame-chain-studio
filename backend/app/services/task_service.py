@@ -18,6 +18,9 @@ from app.models.entities import (
     GenerationTask,
     GenerationTaskType,
     ReliableTaskStatus,
+    TaskCommand,
+    TaskCommandStatus,
+    TaskCommandType,
     TaskErrorCode,
     TaskStateChange,
     utcnow,
@@ -199,6 +202,56 @@ def create_task_attempt(
     return task
 
 
+def create_or_get_command(
+    session: Session,
+    *,
+    task_id: int,
+    command_type: TaskCommandType,
+    idempotency_key: str,
+    reason: str = "",
+) -> TaskCommand:
+    existing = session.exec(
+        select(TaskCommand).where(
+            TaskCommand.command_type == command_type,
+            TaskCommand.idempotency_key == idempotency_key,
+        )
+    ).first()
+    if existing is not None:
+        if existing.task_id != task_id:
+            raise AppError("COMMAND_IDEMPOTENCY_CONFLICT", "Idempotency key was used for another task.", 409)
+        return existing
+    command = TaskCommand(
+        task_id=task_id,
+        command_type=command_type,
+        idempotency_key=idempotency_key,
+        reason=reason,
+    )
+    session.add(command)
+    session.commit()
+    session.refresh(command)
+    return command
+
+
+def complete_command(
+    session: Session,
+    command: TaskCommand,
+    *,
+    result_task_id: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    now: datetime | None = None,
+) -> TaskCommand:
+    command.status = TaskCommandStatus.FAILED if error_code else TaskCommandStatus.SUCCEEDED
+    command.completed_at = db_time(now)
+    command.result_task_id = result_task_id
+    command.error_code = error_code
+    command.error_message = error_message
+    session.add(command)
+    session.commit()
+    session.refresh(command)
+    return command
+
+
 def transition_task(
     session: Session,
     task_id: int,
@@ -240,6 +293,8 @@ def transition_task(
                 "lock_acquired_at": None,
             }
         )
+    if target == ReliableTaskStatus.CANCELLED:
+        values["cancelled_at"] = task.cancelled_at or current_time
     statement = (
         update(GenerationTask)
         .where(col(GenerationTask.id) == task_id, col(GenerationTask.status) == previous.value)
@@ -295,6 +350,7 @@ def mark_task_remote_submitted(
     remote_status: str,
     response_summary: str,
     poll_delay_seconds: int,
+    job_timeout_seconds: int | None = None,
     now: datetime | None = None,
 ) -> GenerationTask:
     current_time = db_time(now)
@@ -313,6 +369,9 @@ def mark_task_remote_submitted(
     task.remote_job_id = remote_job_id
     task.remote_status = remote_status
     task.submitted_at = task.submitted_at or current_time
+    if job_timeout_seconds is not None:
+        task.job_deadline_at = current_time + timedelta(seconds=job_timeout_seconds)
+    task.submission_deadline_at = None
     task.response_summary_json = dumps_sanitized({"submit": response_summary})
     task.next_poll_at = current_time + timedelta(seconds=poll_delay_seconds)
     task.updated_at = current_time
@@ -326,6 +385,54 @@ def mark_task_remote_submitted(
         reason_code="remote_submit_succeeded",
         now=current_time,
     )
+
+
+def store_cancelling_remote_job(
+    session: Session,
+    task_id: int,
+    *,
+    remote_job_id: str,
+    remote_status: str,
+    response_summary: str,
+    now: datetime | None = None,
+) -> GenerationTask:
+    task = get_task(session, task_id)
+    if task.status != ReliableTaskStatus.CANCELLING:
+        raise AppError("TASK_NOT_CANCELLING", "Task must be CANCELLING to store cancellation remote job.", 409)
+    current_time = db_time(now)
+    task.remote_job_id = remote_job_id
+    task.remote_status = remote_status
+    task.response_summary_json = dumps_sanitized({"submit_for_cancel": response_summary})
+    task.submitted_at = task.submitted_at or current_time
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
+
+
+def record_cancel_pending(
+    session: Session,
+    task_id: int,
+    *,
+    remote_status: str,
+    response_summary: str,
+    poll_delay_seconds: int,
+    now: datetime | None = None,
+) -> GenerationTask:
+    task = get_task(session, task_id)
+    if task.status != ReliableTaskStatus.CANCELLING:
+        raise AppError("TASK_NOT_CANCELLING", "Task must be CANCELLING to record cancel pending.", 409)
+    current_time = db_time(now)
+    task.remote_status = remote_status
+    task.response_summary_json = dumps_sanitized({"cancel": response_summary})
+    task.last_polled_at = current_time
+    task.next_poll_at = current_time + timedelta(seconds=poll_delay_seconds)
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return task
 
 
 def repair_submitting_with_remote_job(
@@ -461,7 +568,7 @@ def schedule_retry(
     session: Session,
     task_id: int,
     *,
-    delay_seconds: int,
+    delay_seconds: float,
     error_code: TaskErrorCode | str = TaskErrorCode.UNKNOWN_ERROR,
     error_message: str = "",
     now: datetime | None = None,
@@ -485,6 +592,8 @@ def schedule_retry(
     next_retry_count = task.retry_count + 1
     if next_retry_count >= task.max_attempts:
         task.retry_count = next_retry_count
+        task.next_retry_at = None
+        task.last_retry_delay_seconds = None
         session.add(task)
         session.commit()
         return transition_task(
@@ -496,6 +605,7 @@ def schedule_retry(
         )
     task.retry_count = next_retry_count
     task.next_retry_at = current_time + timedelta(seconds=delay_seconds)
+    task.last_retry_delay_seconds = delay_seconds
     task.updated_at = current_time
     session.add(task)
     session.commit()
@@ -506,6 +616,52 @@ def schedule_retry(
         reason_code="retry_scheduled",
         now=current_time,
     )
+
+
+def schedule_cancel_retry(
+    session: Session,
+    task_id: int,
+    *,
+    delay_seconds: float,
+    error_code: TaskErrorCode | str = TaskErrorCode.UNKNOWN_ERROR,
+    error_message: str = "",
+    error_details: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> GenerationTask:
+    current_time = db_time(now)
+    task = get_task(session, task_id)
+    if task.status != ReliableTaskStatus.CANCELLING:
+        raise AppError("TASK_NOT_CANCELLING", "Task must be CANCELLING to schedule a cancel retry.", 409)
+    record_task_error(
+        session,
+        task_id,
+        error_code=error_code,
+        error_message=error_message,
+        error_details=error_details,
+        now=current_time,
+    )
+    task = get_task(session, task_id)
+    next_retry_count = task.retry_count + 1
+    if next_retry_count >= task.max_attempts:
+        task.retry_count = next_retry_count
+        task.next_poll_at = None
+        task.last_retry_delay_seconds = None
+        session.add(task)
+        session.commit()
+        return transition_task(
+            session,
+            task_id,
+            ReliableTaskStatus.FAILED,
+            reason_code="cancel_retry_limit_exceeded",
+            now=current_time,
+        )
+    task.retry_count = next_retry_count
+    task.next_poll_at = current_time + timedelta(seconds=delay_seconds)
+    task.last_retry_delay_seconds = delay_seconds
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    return task
 
 
 def mark_task_succeeded(
@@ -565,11 +721,43 @@ def mark_remote_cancelled(session: Session, task_id: int, *, now: datetime | Non
     return transition_task(session, task_id, ReliableTaskStatus.CANCELLED, reason_code="remote_cancelled", now=now)
 
 
-def request_task_cancel(session: Session, task_id: int, *, now: datetime | None = None) -> GenerationTask:
+def request_task_cancel(
+    session: Session,
+    task_id: int,
+    *,
+    reason: str = "",
+    requested_by: str = "local-user",
+    cancellation_timeout_seconds: int | None = None,
+    now: datetime | None = None,
+) -> GenerationTask:
     task = get_task(session, task_id)
+    current_time = db_time(now)
+    if task.status == ReliableTaskStatus.SUCCEEDED:
+        raise AppError("TASK_NOT_CANCELLABLE", "Succeeded tasks cannot be cancelled.", 409)
+    if task.status in {ReliableTaskStatus.FAILED, ReliableTaskStatus.CANCELLED}:
+        return task
+    task.cancel_requested_at = task.cancel_requested_at or current_time
+    task.cancel_reason = reason
+    task.cancel_requested_by = requested_by
+    task.next_retry_at = None
+    task.next_poll_at = None
+    if cancellation_timeout_seconds is not None and task.status not in {
+        ReliableTaskStatus.QUEUED,
+        ReliableTaskStatus.RETRY_WAIT,
+        ReliableTaskStatus.RESULT_READY,
+    }:
+        task.cancellation_deadline_at = current_time + timedelta(seconds=cancellation_timeout_seconds)
+    session.add(task)
+    session.commit()
     if task.status == ReliableTaskStatus.QUEUED:
-        return transition_task(session, task_id, ReliableTaskStatus.CANCELLED, reason_code="cancelled_before_start", now=now)
-    return transition_task(session, task_id, ReliableTaskStatus.CANCELLING, reason_code="cancel_requested", now=now)
+        return transition_task(
+            session, task_id, ReliableTaskStatus.CANCELLED, reason_code="cancelled_before_start", now=current_time
+        )
+    if task.status in {ReliableTaskStatus.RETRY_WAIT, ReliableTaskStatus.RESULT_READY}:
+        return transition_task(session, task_id, ReliableTaskStatus.CANCELLED, reason_code="cancelled_local", now=current_time)
+    if task.status == ReliableTaskStatus.CANCELLING:
+        return task
+    return transition_task(session, task_id, ReliableTaskStatus.CANCELLING, reason_code="cancel_requested", now=current_time)
 
 
 def mark_task_cancelled(session: Session, task_id: int, *, now: datetime | None = None) -> GenerationTask:
@@ -579,6 +767,44 @@ def mark_task_cancelled(session: Session, task_id: int, *, now: datetime | None 
     if task.status != ReliableTaskStatus.CANCELLING:
         raise AppError("TASK_NOT_CANCELLING", "Task must be cancelling before it can be cancelled.", 409)
     return transition_task(session, task_id, ReliableTaskStatus.CANCELLED, reason_code="task_cancelled", now=now)
+
+
+def manual_retry_task(
+    session: Session,
+    task_id: int,
+    *,
+    idempotency_key: str,
+    reason: str = "",
+    now: datetime | None = None,
+) -> GenerationTask:
+    source = get_task(session, task_id)
+    if source.status not in {ReliableTaskStatus.FAILED, ReliableTaskStatus.CANCELLED}:
+        raise AppError("TASK_NOT_RETRYABLE_MANUALLY", f"Task in {source.status.value} cannot be manually retried.", 409)
+    command = create_or_get_command(
+        session,
+        task_id=task_id,
+        command_type=TaskCommandType.MANUAL_RETRY,
+        idempotency_key=idempotency_key,
+        reason=reason,
+    )
+    if command.result_task_id is not None:
+        return get_task(session, command.result_task_id)
+    request = session.get(GenerationRequest, source.generation_request_id)
+    if request is None:
+        raise AppError("GENERATION_REQUEST_NOT_FOUND", "Generation request for retry was not found.", 404)
+    retry_task = create_task_attempt(
+        session,
+        generation_request=request,
+        task_type=source.task_type,
+        provider_id=source.provider_id,
+        retry_of_task_id=source.id,
+        max_attempts=source.max_attempts,
+        request_payload=loads_json_object(source.request_payload_json),
+        provider_config_snapshot=loads_json_object(source.provider_config_snapshot_json),
+        idempotency_key=f"manual-retry:{task_id}:{idempotency_key}",
+    )
+    complete_command(session, command, result_task_id=retry_task.id, now=now)
+    return retry_task
 
 
 def mark_task_running_after_cancel_failed(

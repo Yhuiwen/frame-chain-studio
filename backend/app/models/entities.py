@@ -76,6 +76,17 @@ class TaskErrorCode(str, Enum):
     UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
 
+class TaskCommandType(str, Enum):
+    CANCEL = "CANCEL"
+    MANUAL_RETRY = "MANUAL_RETRY"
+
+
+class TaskCommandStatus(str, Enum):
+    PENDING = "PENDING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 class ProjectBase(SQLModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
@@ -149,6 +160,9 @@ class GenerationTask(SQLModel, table=True):
         Index("ix_generationtask_status_next_retry", "status", "next_retry_at"),
         Index("ix_generationtask_status_next_poll", "status", "next_poll_at"),
         Index("ix_generationtask_status_locked_until", "status", "locked_until"),
+        Index("ix_generationtask_status_submission_deadline", "status", "submission_deadline_at"),
+        Index("ix_generationtask_status_job_deadline", "status", "job_deadline_at"),
+        Index("ix_generationtask_status_cancellation_deadline", "status", "cancellation_deadline_at"),
         Index("ix_generationtask_project_created", "project_id", "created_at"),
         Index("ix_generationtask_shot_type_created", "shot_id", "task_type", "created_at"),
     )
@@ -174,6 +188,14 @@ class GenerationTask(SQLModel, table=True):
     max_attempts: int = Field(default=3)
     retry_count: int = Field(default=0)
     next_retry_at: datetime | None = Field(default=None, index=True)
+    last_retry_delay_seconds: float | None = None
+    submission_deadline_at: datetime | None = Field(default=None, index=True)
+    job_deadline_at: datetime | None = Field(default=None, index=True)
+    cancellation_deadline_at: datetime | None = Field(default=None, index=True)
+    cancel_requested_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    cancel_reason: str | None = None
+    cancel_requested_by: str | None = None
     retry_of_task_id: int | None = Field(default=None, foreign_key="generationtask.id")
     root_task_id: int | None = Field(default=None, foreign_key="generationtask.id")
     request_payload_json: str = Field(default="{}")
@@ -190,6 +212,25 @@ class GenerationTask(SQLModel, table=True):
     lock_version: int = Field(default=0)
     idempotency_key: str = Field(index=True)
     result_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+
+
+class TaskCommand(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("command_type", "idempotency_key", name="uq_taskcommand_type_idempotency"),
+        Index("ix_taskcommand_task_type_created", "task_id", "command_type", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    task_id: int = Field(foreign_key="generationtask.id", index=True)
+    command_type: TaskCommandType = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    status: TaskCommandStatus = Field(default=TaskCommandStatus.PENDING, index=True)
+    reason: str = ""
+    created_at: datetime = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+    result_task_id: int | None = Field(default=None, foreign_key="generationtask.id")
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 class TaskStateChange(SQLModel, table=True):
