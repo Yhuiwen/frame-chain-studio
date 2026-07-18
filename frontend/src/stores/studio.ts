@@ -64,7 +64,10 @@ export const useStudioStore = defineStore("studio", {
     },
     hasActiveTasks: (state): boolean =>
       (state.current?.requests ?? []).some((request) => ACTIVE_TASK_STATUSES.has(request.status)) ||
-      (state.current?.tasks ?? []).some((task) => ACTIVE_TASK_STATUSES.has(task.status)),
+      (state.current?.tasks ?? []).some((task) => ACTIVE_TASK_STATUSES.has(task.status)) ||
+      (state.current?.renders ?? []).some((render) =>
+        ["QUEUED", "PREPARING", "NORMALIZING", "CONCATENATING", "VALIDATING", "FINALIZING"].includes(render.status),
+      ),
   },
   actions: {
     async loadProjects() {

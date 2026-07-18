@@ -1,14 +1,20 @@
 from pathlib import Path
 from datetime import datetime
+import tempfile
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Response
-from fastapi.responses import FileResponse
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
+from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import text
 from sqlmodel import Session
 
-from app.core.config import get_settings
+from app.core.config import BACKEND_ROOT, get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
-from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, Shot, ShotStatus, TaskCommandType
+from app.media.ffmpeg import require_binary
+from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, ProjectRender, Shot, ShotStatus, TaskCommandType
 from app.models.schemas import (
     GenerationStartRequest,
     GenerationRequestRead,
@@ -23,6 +29,8 @@ from app.models.schemas import (
     TaskCancelRequest,
     TaskRetryRequest,
     GenerationTaskRead,
+    ProjectRenderCreate,
+    ProjectRenderRead,
     WorkersStatusRead,
 )
 from app.providers.config_loader import load_registry_from_env
@@ -30,6 +38,7 @@ from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
 from app.services import provider_resolution, studio, task_service, worker_status
+from app.workers import render_service
 
 router = APIRouter()
 provider = MockGenerationProvider()
@@ -43,6 +52,57 @@ def run_request_in_background(request_id: int) -> None:
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/ready")
+def ready() -> dict[str, object]:
+    settings = get_settings()
+    checks: dict[str, object] = {}
+    status = "ready"
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            current = MigrationContext.configure(connection).get_current_revision()
+        head = _alembic_head_revision()
+        checks["database"] = "ok"
+        checks["migration"] = {"current": current, "head": head, "ok": current == head}
+        if current != head:
+            status = "not_ready"
+    except Exception as exc:
+        checks["database"] = f"failed:{exc.__class__.__name__}"
+        status = "not_ready"
+    try:
+        settings.storage_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=settings.storage_dir, delete=True) as handle:
+            handle.write(b"ok")
+        checks["storage"] = "ok"
+    except Exception as exc:
+        checks["storage"] = f"failed:{exc.__class__.__name__}"
+        status = "not_ready"
+    for binary in ("ffmpeg", "ffprobe"):
+        try:
+            require_binary(binary)
+            checks[binary] = "ok"
+        except Exception as exc:
+            checks[binary] = f"failed:{exc.__class__.__name__}"
+            status = "not_ready"
+    try:
+        providers = provider_resolution.list_public_providers(load_registry_from_env())
+        checks["providers"] = {
+            "configured": [provider.provider_id for provider in providers if provider.configured],
+            "errors": [provider.provider_id for provider in providers if not provider.configured],
+        }
+    except Exception as exc:
+        checks["providers"] = f"failed:{exc.__class__.__name__}"
+        status = "not_ready"
+    return {"status": status, "checks": checks, "config": settings.safe_summary()}
+
+
+def _alembic_head_revision() -> str | None:
+    alembic_ini = BACKEND_ROOT / "alembic.ini"
+    config = Config(str(alembic_ini))
+    config.set_main_option("script_location", str(BACKEND_ROOT / "migrations"))
+    return ScriptDirectory.from_config(config).get_current_head()
 
 
 @router.get("/providers", response_model=list[ProviderInfo])
@@ -109,8 +169,42 @@ def retry_task(
     return studio.task_payload(session, retry)
 
 
-@router.get("/media/{asset_id}")
-def read_asset(asset_id: int, session: Session = Depends(get_session)) -> FileResponse:
+@router.get("/projects/{project_id}/renders", response_model=list[ProjectRenderRead])
+def list_project_renders(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    studio.get_project_or_404(session, project_id)
+    return [studio.render_payload(render) for render in studio.list_project_renders(session, project_id)]
+
+
+@router.post("/projects/{project_id}/renders", response_model=ProjectRenderRead, status_code=202)
+def create_project_render(
+    project_id: int,
+    payload: ProjectRenderCreate | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    render = render_service.create_project_render(
+        session,
+        project_id=project_id,
+        idempotency_key=idempotency_key or f"project-render:{project_id}:{datetime.now().timestamp()}",
+        allow_partial_render=payload.allow_partial_render if payload else False,
+    )
+    return studio.render_payload(render)
+
+
+@router.get("/renders/{render_id}", response_model=ProjectRenderRead)
+def read_project_render(render_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    render = session.get(ProjectRender, render_id)
+    if render is None:
+        raise AppError("RENDER_NOT_FOUND", f"Render {render_id} was not found.", 404)
+    return studio.render_payload(render)
+
+
+@router.get("/media/{asset_id}", response_model=None)
+def read_asset(asset_id: int, request: Request, session: Session = Depends(get_session)) -> Response:
+    return asset_response(asset_id, session=session, range_header=request.headers.get("range"))
+
+
+def asset_response(asset_id: int, *, session: Session, range_header: str | None = None) -> Response:
     asset = session.get(Asset, asset_id)
     if asset is None:
         raise AppError("ASSET_NOT_FOUND", f"Asset {asset_id} was not found.", 404)
@@ -121,7 +215,69 @@ def read_asset(asset_id: int, session: Session = Depends(get_session)) -> FileRe
         raise AppError("ASSET_ACCESS_DENIED", "Asset file is outside the configured storage directory.", 403)
     if not asset_path.exists() or not asset_path.is_file():
         raise AppError("ASSET_FILE_NOT_FOUND", f"Asset file for {asset_id} was not found.", 404)
+    if range_header:
+        return _range_response(asset_path, asset.mime_type, range_header)
     return FileResponse(asset_path, media_type=asset.mime_type)
+
+
+def _range_response(path: Path, mime_type: str, range_header: str) -> StreamingResponse:
+    size = path.stat().st_size
+    parsed = _parse_range(range_header, size)
+    if parsed is None:
+        return StreamingResponse(
+            iter(()),
+            status_code=416,
+            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+            media_type=mime_type,
+        )
+    start, end = parsed
+    length = end - start + 1
+
+    def iterator():
+        with path.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(
+        iterator(),
+        status_code=206,
+        media_type=mime_type,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+        },
+    )
+
+
+def _parse_range(value: str, size: int) -> tuple[int, int] | None:
+    if not value.startswith("bytes=") or "," in value:
+        return None
+    spec = value.removeprefix("bytes=").strip()
+    if "-" not in spec or size <= 0:
+        return None
+    start_text, end_text = spec.split("-", 1)
+    try:
+        if start_text == "":
+            suffix = int(end_text)
+            if suffix <= 0:
+                return None
+            start = max(size - suffix, 0)
+            end = size - 1
+        else:
+            start = int(start_text)
+            end = int(end_text) if end_text else size - 1
+    except ValueError:
+        return None
+    if start < 0 or end < start or start >= size:
+        return None
+    return start, min(end, size - 1)
 
 
 @router.get("/projects", response_model=list[ProjectRead])
@@ -136,13 +292,15 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def project_detail(project_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
-    project, shots, assets, requests, tasks, logs = studio.project_detail(session, project_id)
+    project, shots, assets, requests, tasks, renders, completion, logs = studio.project_detail(session, project_id)
     return {
         **ProjectRead.model_validate(project).model_dump(),
         "shots": shots,
         "assets": assets,
         "requests": requests,
         "tasks": tasks,
+        "renders": renders,
+        "completion": completion,
         "logs": logs,
     }
 

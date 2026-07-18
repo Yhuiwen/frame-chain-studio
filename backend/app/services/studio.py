@@ -15,6 +15,7 @@ from app.models.entities import (
     GenerationRequest,
     GenerationTaskStatus,
     GenerationTask,
+    ProjectRender,
     Project,
     ReliableTaskStatus,
     Shot,
@@ -524,6 +525,8 @@ def project_detail(
     list[dict[str, object]],
     list[GenerationRequest],
     list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, object],
     list[TaskLog],
 ]:
     project = get_project_or_404(session, project_id)
@@ -539,6 +542,7 @@ def project_detail(
         ).all()
     )
     tasks = [task_payload(session, task) for task in task_service.list_project_tasks(session, project_id)]
+    renders = [render_payload(render) for render in list_project_renders(session, project_id)]
     shot_ids = [shot.id for shot in shots if shot.id is not None]
     logs = list(
         session.exec(
@@ -549,7 +553,58 @@ def project_detail(
     )
     serialized_assets = [asset_payload(asset) for asset in assets]
     serialized_shots = [shot_payload(session, shot) for shot in shots]
-    return project, serialized_shots, serialized_assets, requests, tasks, logs
+    return project, serialized_shots, serialized_assets, requests, tasks, renders, project_completion(shots, assets), logs
+
+
+def list_project_renders(session: Session, project_id: int) -> list[ProjectRender]:
+    return list(
+        session.exec(
+            select(ProjectRender).where(ProjectRender.project_id == project_id).order_by(col(ProjectRender.created_at))
+        ).all()
+    )
+
+
+def render_payload(render: ProjectRender) -> dict[str, object]:
+    return {
+        "id": render.id,
+        "project_id": render.project_id,
+        "status": render.status,
+        "render_version": render.render_version,
+        "requested_at": render.requested_at,
+        "started_at": render.started_at,
+        "completed_at": render.completed_at,
+        "progress": render.progress,
+        "current_stage": render.current_stage,
+        "output_asset_id": render.output_asset_id,
+        "output_url": asset_url(render.output_asset_id) if render.output_asset_id else None,
+        "error_code": render.error_code,
+        "error_message": render.error_message,
+        "created_at": render.created_at,
+        "updated_at": render.updated_at,
+    }
+
+
+def project_completion(shots: list[Shot], assets: list[Asset]) -> dict[str, object]:
+    video_by_shot = {asset.shot_id: asset for asset in assets if asset.type == AssetType.VIDEO and asset.shot_id}
+    missing = [shot.id or 0 for shot in shots if shot.status != ShotStatus.COMPLETED or shot.id not in video_by_shot]
+    estimated = 0.0
+    for shot in shots:
+        if shot.id is None:
+            continue
+        video = video_by_shot.get(shot.id)
+        if video is not None:
+            estimated += video.duration_seconds or shot.duration_seconds
+    reason = None
+    if missing:
+        reason = f"Missing approved video for Shot {missing[0]}"
+    return {
+        "total_shots": len(shots),
+        "completed_shots": len(shots) - len(missing),
+        "missing_shot_ids": missing,
+        "estimated_duration_seconds": estimated,
+        "can_render": len(shots) > 0 and not missing,
+        "render_disabled_reason": reason,
+    }
 
 
 def task_payload(session: Session, task: GenerationTask) -> dict[str, object]:

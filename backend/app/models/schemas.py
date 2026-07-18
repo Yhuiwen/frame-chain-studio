@@ -6,6 +6,7 @@ from app.models.entities import (
     AssetType,
     GenerationKind,
     GenerationMode,
+    ProjectRenderStatus,
     GenerationTaskStatus,
     GenerationTaskType,
     ReliableTaskStatus,
@@ -117,6 +118,15 @@ class AssetRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProjectCompletionRead(BaseModel):
+    total_shots: int
+    completed_shots: int
+    missing_shot_ids: list[int]
+    estimated_duration_seconds: float
+    can_render: bool
+    render_disabled_reason: str | None = None
+
+
 class GenerationRequestRead(BaseModel):
     id: int
     project_id: int
@@ -225,6 +235,7 @@ class WorkersStatusRead(BaseModel):
     stale_after_seconds: int
     generation: WorkerTypeStatus
     result: WorkerTypeStatus
+    render: WorkerTypeStatus
 
 
 class TaskLogRead(BaseModel):
@@ -246,9 +257,34 @@ class TaskRetryRequest(BaseModel):
     reason: str = ""
 
 
+class ProjectRenderCreate(BaseModel):
+    allow_partial_render: bool = False
+
+
+class ProjectRenderRead(BaseModel):
+    id: int
+    project_id: int
+    status: ProjectRenderStatus
+    render_version: int
+    requested_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    progress: float
+    current_stage: str
+    output_asset_id: int | None
+    output_url: str | None = None
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ProjectDetail(ProjectRead):
     shots: list[ShotRead]
     assets: list[AssetRead]
     requests: list[GenerationRequestRead]
     tasks: list[GenerationTaskRead]
+    renders: list[ProjectRenderRead] = []
+    completion: ProjectCompletionRead
     logs: list[TaskLogRead]

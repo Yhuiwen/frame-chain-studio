@@ -108,6 +108,17 @@ def test_result_url_mapping_variants() -> None:
         {"result": {"files": {"download_url": "http://bad"}}},
         ResponseMappingConfig(remote_job_id_path="id", status_path="status", result_urls_path="result.files"),
     ) == []
+    assert [
+        item.url
+        for item in extract_result_urls(
+            {"data": {"output": {"video_url": "http://video"}}},
+            ResponseMappingConfig(
+                remote_job_id_path="id",
+                status_path="status",
+                result_urls_path=["data.output.image_url", "data.output.video_url"],
+            ),
+        )
+    ] == ["http://video"]
 
 
 def test_capability_validation() -> None:

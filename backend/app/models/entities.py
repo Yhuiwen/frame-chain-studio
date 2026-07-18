@@ -26,6 +26,7 @@ class AssetType(str, Enum):
     VIDEO = "VIDEO"
     TAIL_FRAME = "TAIL_FRAME"
     START_FRAME = "START_FRAME"
+    PROJECT_RENDER = "PROJECT_RENDER"
 
 
 class GenerationKind(str, Enum):
@@ -115,6 +116,7 @@ class GenerationMode(str, Enum):
 class WorkerType(str, Enum):
     GENERATION = "GENERATION"
     RESULT = "RESULT"
+    RENDER = "RENDER"
 
 
 class WorkerStatus(str, Enum):
@@ -124,6 +126,18 @@ class WorkerStatus(str, Enum):
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
     ERROR = "ERROR"
+
+
+class ProjectRenderStatus(str, Enum):
+    QUEUED = "QUEUED"
+    PREPARING = "PREPARING"
+    NORMALIZING = "NORMALIZING"
+    CONCATENATING = "CONCATENATING"
+    VALIDATING = "VALIDATING"
+    FINALIZING = "FINALIZING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class ProjectBase(SQLModel):
@@ -306,6 +320,37 @@ class WorkerHeartbeat(SQLModel, table=True):
     last_error_code: str | None = None
     last_error_message: str | None = None
     metadata_json: str = Field(default="{}")
+
+
+class ProjectRender(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_projectrender_idempotency_key"),
+        Index("ix_projectrender_project_status", "project_id", "status"),
+        Index("ix_projectrender_status_locked_until", "status", "locked_until"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    status: ProjectRenderStatus = Field(default=ProjectRenderStatus.QUEUED, index=True)
+    render_version: int = Field(default=1, index=True)
+    idempotency_key: str = Field(index=True)
+    requested_at: datetime = Field(default_factory=utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    locked_by: str | None = Field(default=None, index=True)
+    locked_until: datetime | None = Field(default=None, index=True)
+    input_manifest_json: str = Field(default="[]")
+    settings_json: str = Field(default="{}")
+    progress: float = Field(default=0)
+    current_stage: str = ""
+    output_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    temporary_relative_path: str | None = None
+    final_relative_path: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    error_details_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class GenerationTaskResult(SQLModel, table=True):

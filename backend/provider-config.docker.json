@@ -3,7 +3,7 @@
     {
       "provider_id": "fake-http",
       "display_name": "Fake HTTP Provider",
-      "base_url": "http://127.0.0.1:8090",
+      "base_url": "http://fake-provider:8090",
       "api_key": null,
       "auth_header_name": "Authorization",
       "auth_prefix": "Bearer ",
@@ -12,6 +12,10 @@
       "video_submit_path": "/fake/v1/videos/generations",
       "job_status_path_template": "/fake/v1/jobs/{remote_job_id}",
       "job_cancel_path_template": "/fake/v1/jobs/{remote_job_id}/cancel",
+      "default_image_model": "fake-image",
+      "default_video_model": "fake-video",
+      "default_aspect_ratio": "16:9",
+      "default_duration_seconds": 4,
       "request_timeout_seconds": 10,
       "verify_tls": true,
       "capabilities": {
@@ -29,10 +33,7 @@
         "supported_output_types": ["png", "mp4"]
       },
       "mapping": {
-        "submit_response": {
-          "remote_job_id_path": "data.task_id",
-          "status_path": "data.status"
-        },
+        "submit_response": { "remote_job_id_path": "data.task_id", "status_path": "data.status" },
         "job_response": {
           "remote_job_id_path": "data.task_id",
           "status_path": "data.status",
@@ -40,10 +41,7 @@
           "error_code_path": "data.error.code",
           "error_message_path": "data.error.message"
         },
-        "cancel_response": {
-          "remote_job_id_path": "data.task_id",
-          "status_path": "data.status"
-        },
+        "cancel_response": { "remote_job_id_path": "data.task_id", "status_path": "data.status" },
         "image_request": {
           "fields": {
             "prompt": "input.text",
@@ -53,9 +51,7 @@
             "seed": "parameters.seed",
             "client_request_id": "client_request_id"
           },
-          "fixed_fields": {
-            "parameters.output_format": "png"
-          }
+          "fixed_fields": { "parameters.output_format": "png" }
         },
         "video_request": {
           "fields": {
@@ -68,9 +64,7 @@
             "seed": "parameters.seed",
             "client_request_id": "client_request_id"
           },
-          "fixed_fields": {
-            "parameters.output_format": "mp4"
-          }
+          "fixed_fields": { "parameters.output_format": "mp4" }
         }
       }
     }

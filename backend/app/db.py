@@ -5,7 +5,7 @@ from alembic import command
 from alembic.config import Config
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.core.config import get_settings
+from app.core.config import BACKEND_ROOT, get_settings
 
 
 settings = get_settings()
@@ -21,6 +21,7 @@ def init_db() -> None:
     if alembic_ini.exists():
         alembic_config = Config(str(alembic_ini))
         alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
+        alembic_config.set_main_option("script_location", str(BACKEND_ROOT / "migrations"))
         command.upgrade(alembic_config, "head")
     else:
         SQLModel.metadata.create_all(engine)

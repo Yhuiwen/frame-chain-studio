@@ -235,6 +235,7 @@ Endpoints:
 - `POST /fake/v1/videos/generations`
 - `GET /fake/v1/jobs/{job_id}`
 - `POST /fake/v1/jobs/{job_id}/cancel`
+- `GET /fake/v1/ready`
 - `GET /fake/v1/results/{job_id}.mp4`
 - `GET /fake/v1/results/{job_id}.png`
 
@@ -242,7 +243,7 @@ Scenarios are selected with test headers such as `X-Fake-Scenario`, `X-Fake-Form
 
 The Fake Provider supports three response formats:
 
-- Format A: `data.task_id`, `data.status`, `data.output.video_url`
+- Format A: `data.task_id`, `data.status`, `data.output.image_url` or `data.output.video_url`
 - Format B: `job.id`, `job.state`, `job.outputs[].url`
 - Format C: `id`, numeric `status_code`, `result.files[].download_url`
 
@@ -257,8 +258,66 @@ backend/provider-config.example.json
 Runtime loading uses:
 
 ```powershell
-$env:FCS_PROVIDER_CONFIG_FILE="D:\AIProjects\frame-chain-studio\backend\provider-config.example.json"
+$env:FCS_PROVIDER_CONFIG_FILE="provider-config.example.json"
 ```
+
+Relative database, storage, fixture, log, and Provider config paths are resolved from `backend/`, even when API and Worker processes are launched from different current directories. This prevents API, GenerationWorker, ResultWorker, and RenderWorker from silently using different SQLite files or Provider configs.
+
+## Phase 2G Startup And Rendering
+
+The stable local development path starts the Fake Provider, API, GenerationWorker, ResultWorker, RenderWorker, and frontend with one shared environment:
+
+```powershell
+.\scripts\dev-start.ps1
+.\scripts\dev-status.ps1
+.\scripts\dev-logs.ps1
+.\scripts\dev-stop.ps1
+```
+
+Use alternate ports when an existing manual server is already running:
+
+```powershell
+.\scripts\dev-start.ps1 -BackendPort 8100 -FrontendPort 5174 -FakeProviderPort 8091
+```
+
+`GET /api/ready` verifies SQLite connectivity, Alembic head status, storage writability, FFmpeg/FFprobe availability, and Provider registry loading. It returns only safe configuration labels and never exposes absolute storage paths or secrets. API responses include `X-Request-ID`; unified error payloads include the same request ID for log correlation.
+
+Final project export is queued through `POST /api/projects/{project_id}/renders` and processed by RenderWorker. A render is allowed only when every Shot is `COMPLETED` and has a validated video asset. The worker builds an immutable manifest, normalizes each Shot video to the configured render dimensions and FPS, strips audio in this stage, concatenates with FFmpeg, validates the output with FFprobe, registers a `PROJECT_RENDER` Asset, and makes it available through the existing media endpoint. Media serving supports HTTP Range requests for video preview and download.
+
+Useful render and media settings:
+
+```text
+FCS_RENDER_WIDTH=1920
+FCS_RENDER_HEIGHT=1080
+FCS_RENDER_FPS=24
+FCS_RENDER_VIDEO_CODEC=libx264
+FCS_RENDER_AUDIO_CODEC=aac
+FCS_RESULT_ALLOWED_PRIVATE_HOSTS=127.0.0.1,fake-provider
+```
+
+Docker Compose includes explicit migration and Worker services:
+
+```powershell
+docker compose config
+docker compose --profile development --profile worker up --build
+```
+
+The default `migrate` service runs Alembic once before API/Workers start. The `development` profile starts the local Fake Provider, and the `worker` profile starts GenerationWorker, ResultWorker, and RenderWorker.
+
+Backup and restore scripts operate on the configured SQLite database:
+
+```powershell
+.\scripts\backup.ps1
+.\scripts\restore.ps1 -BackupPath .\backups\frame-chain-YYYYmmdd-HHMMSS.db
+```
+
+Restore refuses to run while the local dev PID file exists unless `-Force` is passed. It verifies SQLite `quick_check`, creates a pre-restore copy, and runs Alembic upgrade after replacement.
+
+## CI And Release Candidate
+
+GitHub Actions runs backend tests, ruff, mypy, frontend Vitest, frontend typecheck/build, and Docker Compose configuration/build checks. The current release-candidate notes are in `CHANGELOG.md`; the manual gate is in `docs/RELEASE_CHECKLIST.md`; operational failure modes are in `docs/TROUBLESHOOTING.md`.
+
+Vite may still print non-blocking warnings from third-party package annotations. The frontend build splits Vue and Element Plus vendor chunks to keep app bundles stable, but dependency-origin warning text should be treated as informational unless it becomes a build failure.
 
 Provider config may contain `api_key`, but it is modeled as a secret and must not appear in logs, repr output, response summaries, or database snapshots. The current frontend does not edit Provider configuration.
 

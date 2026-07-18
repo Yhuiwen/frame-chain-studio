@@ -114,7 +114,12 @@ def normalize_remote_status(value: Any, config: ResponseMappingConfig) -> Remote
 def extract_result_urls(raw: Any, config: ResponseMappingConfig) -> list[ProviderResultUrl]:
     if not config.result_urls_path:
         return []
-    value = get_by_path(raw, config.result_urls_path, None)
+    paths = [config.result_urls_path] if isinstance(config.result_urls_path, str) else config.result_urls_path
+    value = None
+    for path in paths:
+        value = get_by_path(raw, path, None)
+        if value not in (None, ""):
+            break
     if value in (None, ""):
         return []
     if isinstance(value, str):

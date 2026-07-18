@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from app.core.config import get_settings, resolve_backend_path
 from app.providers.exceptions import ProviderConfigurationError
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import MappedHttpProviderConfig
@@ -36,8 +37,12 @@ def load_provider_configs_from_file(path: Path) -> list[MappedHttpProviderConfig
 
 def load_registry_from_env() -> ProviderRegistry:
     registry = ProviderRegistry()
-    config_file = os.getenv(PROVIDER_CONFIG_ENV)
-    if not config_file:
+    settings = get_settings()
+    config_file = settings.provider_config_file
+    if config_file is None:
+        raw_env = os.getenv(PROVIDER_CONFIG_ENV)
+        config_file = resolve_backend_path(raw_env) if raw_env else None
+    if config_file is None:
         return registry
     for config in load_provider_configs_from_file(Path(config_file)):
         registry.register(MappedAsyncHttpProvider(config))

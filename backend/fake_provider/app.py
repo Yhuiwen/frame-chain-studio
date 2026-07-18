@@ -109,6 +109,11 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "fake-provider"}
 
 
+@app.get("/fake/v1/ready")
+def ready() -> dict[str, object]:
+    return {"status": "ready", "service": "fake-provider", "checks": {"routes": "ok"}}
+
+
 @app.get("/fake/v1/test/stats")
 def test_stats() -> dict[str, object]:
     return {

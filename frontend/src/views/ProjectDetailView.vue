@@ -26,6 +26,7 @@ const deletingShotId = ref<number | null>(null);
 const actionBusy = ref(false);
 const taskActionBusyId = ref<number | null>(null);
 const settingsBusy = ref(false);
+const renderBusy = ref(false);
 const expandedLogIds = ref<Set<number>>(new Set());
 const projectId = computed(() => Number(route.params.id));
 const selected = computed(() => store.selectedShot);
@@ -51,6 +52,7 @@ const selectedTaskGroups = computed(() => {
     request: requests.get(task.generation_request_id) ?? null,
   }));
 });
+const latestRender = computed(() => [...(store.current?.renders ?? [])].reverse()[0] ?? null);
 const generationWorkerOnline = computed(() => (store.workerStatus?.generation.online_count ?? 0) > 0);
 const resultWorkerOnline = computed(() => (store.workerStatus?.result.online_count ?? 0) > 0);
 
@@ -258,6 +260,21 @@ async function retryTask(task: GenerationTask) {
     ElMessage.error(error instanceof Error ? error.message : "Retry failed");
   } finally {
     taskActionBusyId.value = null;
+  }
+}
+
+async function createRender() {
+  if (!store.current) return;
+  renderBusy.value = true;
+  try {
+    await api.createProjectRender(store.current.id, idempotencyKey("render", store.current.id));
+    await store.refreshProjectDetail();
+    startPolling();
+    ElMessage.success("Render queued");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "Render failed");
+  } finally {
+    renderBusy.value = false;
   }
 }
 </script>
@@ -657,6 +674,41 @@ async function retryTask(task: GenerationTask) {
             </el-timeline-item>
           </el-timeline>
         </div>
+
+        <div class="render-panel">
+          <div class="panel-title">
+            <h2>Final Render</h2>
+            <el-button
+              native-type="button"
+              type="primary"
+              :loading="renderBusy"
+              :disabled="renderBusy || !store.current?.completion.can_render"
+              @click="createRender"
+            >
+              Export
+            </el-button>
+          </div>
+          <div class="render-summary">
+            <span>{{ store.current?.completion.completed_shots ?? 0 }}/{{ store.current?.completion.total_shots ?? 0 }} shots complete</span>
+            <span>{{ Math.round(store.current?.completion.estimated_duration_seconds ?? 0) }}s estimated</span>
+            <span v-if="store.current?.completion.render_disabled_reason">{{ store.current.completion.render_disabled_reason }}</span>
+          </div>
+          <div v-if="latestRender" class="render-card">
+            <div class="task-main">
+              <strong>Render #{{ latestRender.id }} v{{ latestRender.render_version }}</strong>
+              <el-tag size="small" :type="latestRender.status === 'SUCCEEDED' ? 'success' : latestRender.status === 'FAILED' ? 'danger' : 'primary'">
+                {{ latestRender.status }}
+              </el-tag>
+            </div>
+            <div class="task-meta">
+              <span>{{ latestRender.current_stage }}</span>
+              <span>{{ Math.round(latestRender.progress * 100) }}%</span>
+              <span v-if="latestRender.error_code">{{ latestRender.error_code }}: {{ latestRender.error_message }}</span>
+            </div>
+            <video v-if="latestRender.output_url" controls :src="latestRender.output_url" />
+            <a v-if="latestRender.output_url" :href="latestRender.output_url" download>Download final video</a>
+          </div>
+        </div>
       </section>
     </section>
   </main>
@@ -724,6 +776,28 @@ async function retryTask(task: GenerationTask) {
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
   padding: 10px;
+}
+
+.render-panel {
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  grid-column: 1 / -1;
+  padding: 14px;
+}
+
+.render-summary {
+  color: var(--el-text-color-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.render-card video {
+  display: block;
+  margin-top: 10px;
+  max-height: 360px;
+  width: 100%;
 }
 
 .task-main,

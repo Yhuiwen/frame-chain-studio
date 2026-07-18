@@ -46,6 +46,15 @@ describe("studio store", () => {
       assets: [],
       requests: [],
       tasks: [],
+      renders: [],
+      completion: {
+        total_shots: 1,
+        completed_shots: 0,
+        missing_shot_ids: [2],
+        estimated_duration_seconds: 0,
+        can_render: false,
+        render_disabled_reason: null,
+      },
       logs: [],
       shots: [
         {
@@ -84,6 +93,15 @@ describe("studio store", () => {
       assets: [],
       requests: [],
       tasks: [],
+      renders: [],
+      completion: {
+        total_shots: 0,
+        completed_shots: 0,
+        missing_shot_ids: [],
+        estimated_duration_seconds: 0,
+        can_render: false,
+        render_disabled_reason: null,
+      },
       logs: [],
       shots: [],
     };

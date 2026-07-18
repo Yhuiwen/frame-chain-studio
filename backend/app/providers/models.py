@@ -142,7 +142,7 @@ class ResponseMappingConfig(BaseModel):
     remote_job_id_path: str
     status_path: str
     progress_path: str | None = None
-    result_urls_path: str | None = None
+    result_urls_path: str | list[str] | None = None
     error_code_path: str | None = None
     error_message_path: str | None = None
     result_url_item_paths: list[str] = Field(default_factory=lambda: ["url", "download_url", "file.url"])

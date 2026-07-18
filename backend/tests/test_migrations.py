@@ -179,7 +179,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260718_0005"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260718_0006"
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
     assert "job_deadline_at" in columns(db_path, "generationtask")
@@ -192,3 +192,4 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
     assert "generation_mode" in columns(db_path, "generationrequest")
     assert "remote_progress" in columns(db_path, "generationtask")
     assert "workerheartbeat" in table_names(db_path)
+    assert "projectrender" in table_names(db_path)

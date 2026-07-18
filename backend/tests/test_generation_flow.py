@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from app.api.routes import read_asset
+from app.api.routes import asset_response
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db import get_session
@@ -189,7 +189,7 @@ def test_project_detail_returns_start_frame_source_and_readable_url(session: Ses
     first, second = create_two_shot_project(session)
     complete_first_shot(session, first)
 
-    _, shots, _, _, _, _ = studio.project_detail(session, first.project_id)
+    _, shots, _, _, _, _, _, _ = studio.project_detail(session, first.project_id)
     second_payload = next(shot for shot in shots if shot["id"] == second.id)
     start_frame = second_payload["start_frame"]
     assert isinstance(start_frame, dict)
@@ -227,11 +227,11 @@ def test_asset_read_rejects_outside_storage_and_missing_asset(session: Session, 
     session.refresh(asset)
 
     with pytest.raises(AppError) as denied:
-        read_asset(asset.id or 0, session)
+        asset_response(asset.id or 0, session=session)
     assert denied.value.code == "ASSET_ACCESS_DENIED"
 
     with pytest.raises(AppError) as missing:
-        read_asset(999999, session)
+        asset_response(999999, session=session)
     assert missing.value.code == "ASSET_NOT_FOUND"
 
 

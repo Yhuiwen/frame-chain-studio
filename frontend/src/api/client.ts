@@ -61,7 +61,7 @@ export interface Asset {
   id: number;
   project_id: number;
   shot_id: number | null;
-  type: "KEYFRAME" | "VIDEO" | "TAIL_FRAME" | "START_FRAME";
+  type: "KEYFRAME" | "VIDEO" | "TAIL_FRAME" | "START_FRAME" | "PROJECT_RENDER";
   url: string;
   file_name: string;
   mime_type: string;
@@ -167,7 +167,36 @@ export interface ProjectDetail extends Project {
   assets: Asset[];
   requests: GenerationRequest[];
   tasks: GenerationTask[];
+  renders: ProjectRender[];
+  completion: ProjectCompletion;
   logs: TaskLog[];
+}
+
+export interface ProjectCompletion {
+  total_shots: number;
+  completed_shots: number;
+  missing_shot_ids: number[];
+  estimated_duration_seconds: number;
+  can_render: boolean;
+  render_disabled_reason: string | null;
+}
+
+export interface ProjectRender {
+  id: number;
+  project_id: number;
+  status: "QUEUED" | "PREPARING" | "NORMALIZING" | "CONCATENATING" | "VALIDATING" | "FINALIZING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  render_version: number;
+  requested_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  progress: number;
+  current_stage: string;
+  output_asset_id: number | null;
+  output_url: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ProviderCapabilities {
@@ -214,7 +243,7 @@ export interface GenerationStartOptions {
 
 export interface WorkerHeartbeat {
   worker_id: string;
-  worker_type: "GENERATION" | "RESULT";
+  worker_type: "GENERATION" | "RESULT" | "RENDER";
   status: "STARTING" | "IDLE" | "BUSY" | "STOPPING" | "STOPPED" | "ERROR";
   online: boolean;
   started_at: string;
@@ -226,7 +255,7 @@ export interface WorkerHeartbeat {
 }
 
 export interface WorkerTypeStatus {
-  worker_type: "GENERATION" | "RESULT";
+  worker_type: "GENERATION" | "RESULT" | "RENDER";
   online_count: number;
   total_count: number;
   stale_after_seconds: number;
@@ -237,6 +266,7 @@ export interface WorkersStatus {
   stale_after_seconds: number;
   generation: WorkerTypeStatus;
   result: WorkerTypeStatus;
+  render: WorkerTypeStatus;
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -299,5 +329,11 @@ export const api = {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({ reason }),
+    }),
+  createProjectRender: (projectId: number, idempotencyKey: string, body: { allow_partial_render?: boolean } = {}) =>
+    request<ProjectRender>(`/api/projects/${projectId}/renders`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(body),
     }),
 };

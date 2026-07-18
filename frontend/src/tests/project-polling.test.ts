@@ -46,6 +46,15 @@ describe("useProjectPolling", () => {
       assets: [],
       logs: [],
       tasks: [],
+      renders: [],
+      completion: {
+        total_shots: 0,
+        completed_shots: 0,
+        missing_shot_ids: [],
+        estimated_duration_seconds: 0,
+        can_render: false,
+        render_disabled_reason: null,
+      },
       requests: [{
         id: 1,
         project_id: 1,
@@ -99,6 +108,15 @@ describe("useProjectPolling", () => {
       assets: [],
       logs: [],
       tasks: [],
+      renders: [],
+      completion: {
+        total_shots: 0,
+        completed_shots: 0,
+        missing_shot_ids: [],
+        estimated_duration_seconds: 0,
+        can_render: false,
+        render_disabled_reason: null,
+      },
       requests: [{
         id: 1,
         project_id: 1,

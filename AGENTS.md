@@ -16,6 +16,8 @@
 - `frontend/src/views`: routed Vue views.
 - `frontend/src/components`: reusable Vue components.
 - `scripts`: local start and verification helpers.
+- `.github/workflows`: CI checks for backend, frontend, and Docker Compose.
+- `docs`: release checklist and troubleshooting notes.
 
 ## Code Standards
 
@@ -74,6 +76,15 @@
 - Worker heartbeats are best-effort status signals. Heartbeat failures must be logged and ignored so task processing can continue.
 - Worker status APIs may expose online state, current task ID, processed count, and sanitized errors, but not local paths, raw Provider config, secrets, or raw result URLs.
 - Frontend task views should group attempts by `GenerationRequest`, show actual backend `generation_mode`, and avoid duplicating the full Shot state machine.
+- Relative runtime paths must be normalized through backend settings, not process current working directories. API and all Worker processes must share the same database, storage root, fixture root, log root, and Provider config.
+- FastAPI startup should use lifespan handlers. Do not add new `@app.on_event` startup hooks.
+- `GET /api/ready` must remain safe to expose: no secrets, absolute local paths, Provider API keys, raw Provider config, or storage roots.
+- API errors must include the request ID, and responses should return `X-Request-ID`.
+- RenderWorker owns `ProjectRender` processing. It must acquire a render lease, run FFmpeg/FFprobe outside database transactions, register a `PROJECT_RENDER` asset, and keep render failures persisted.
+- Final project rendering currently strips audio. Do not imply audio mixing, subtitles, watermarking, or timeline effects exist until implemented.
+- Media serving must keep path traversal checks and support Range requests for video preview/download.
+- Local orchestration scripts may stop only PIDs recorded in `.run/dev-processes.json`; never kill unrelated user processes on common ports.
+- Runtime `.run/` and `backups/` output must stay ignored by Git.
 
 ## Phase Two Order
 
@@ -90,6 +101,32 @@ When phase two begins, develop in this order:
 ```
 
 Do not modify Worker, Provider, download safety, and frontend task surfaces together without focused tests.
+
+## Local Dev Orchestration
+
+Preferred local stack:
+
+```powershell
+.\scripts\dev-start.ps1
+.\scripts\dev-status.ps1
+.\scripts\dev-logs.ps1
+.\scripts\dev-stop.ps1
+```
+
+Use alternate ports if another manual API or frontend is already running:
+
+```powershell
+.\scripts\dev-start.ps1 -BackendPort 8100 -FrontendPort 5174 -FakeProviderPort 8091
+```
+
+The dev script writes logs and PIDs under `.run/`, generates a local Provider config from `backend/provider-config.example.json`, runs Alembic, and waits for Fake Provider, backend readiness, frontend, and Worker heartbeat status before reporting success.
+
+Back up or restore local SQLite data with:
+
+```powershell
+.\scripts\backup.ps1
+.\scripts\restore.ps1 -BackupPath .\backups\frame-chain-YYYYmmdd-HHMMSS.db
+```
 
 ## Test Commands
 
@@ -117,6 +154,13 @@ All checks:
 .\scripts\check.ps1
 ```
 
+Docker configuration checks:
+
+```powershell
+docker compose config --quiet
+docker compose --profile development --profile worker config --quiet
+```
+
 ```bash
 ./scripts/test.sh
 ```
@@ -135,3 +179,12 @@ Run the full test script and verify that no unrelated generated files are includ
 git status --short
 ./scripts/test.sh
 ```
+
+Also run:
+
+```powershell
+.\scripts\check.ps1
+docker compose --profile development --profile worker config --quiet
+```
+
+Do not auto-commit, push, tag, or publish a release unless the user explicitly asks for that operation.

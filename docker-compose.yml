@@ -1,4 +1,30 @@
 services:
+  migrate:
+    build:
+      context: ./backend
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment:
+      FCS_DATABASE_URL: sqlite:///./data/frame_chain.db
+      FCS_STORAGE_DIR: ./data/storage
+      FCS_FIXTURE_DIR: ./tests/fixtures
+    volumes:
+      - backend-data:/app/data
+
+  fake-provider:
+    build:
+      context: ./backend
+    command: ["python", "-m", "uvicorn", "fake_provider.app:app", "--host", "0.0.0.0", "--port", "8090"]
+    profiles:
+      - development
+      - worker
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/fake/v1/ready', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -9,12 +35,16 @@ services:
       FCS_CORS_ORIGINS: '["http://localhost:5173"]'
       FCS_DEFAULT_IMAGE_PROVIDER_ID: mock
       FCS_DEFAULT_VIDEO_PROVIDER_ID: mock
+      FCS_PROVIDER_CONFIG_FILE: provider-config.docker.json
     ports:
       - "8000:8000"
     volumes:
       - backend-data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=2).read()"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -46,12 +76,17 @@ services:
       FCS_DATABASE_URL: sqlite:///./data/frame_chain.db
       FCS_STORAGE_DIR: ./data/storage
       FCS_FIXTURE_DIR: ./tests/fixtures
-      FCS_PROVIDER_CONFIG_FILE: provider-config.example.json
+      FCS_PROVIDER_CONFIG_FILE: provider-config.docker.json
       FCS_WORKER_ID: compose-generation-worker
       FCS_WORKER_HEARTBEAT_SECONDS: 10
       FCS_WORKER_STALE_AFTER_SECONDS: 45
     volumes:
       - backend-data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      fake-provider:
+        condition: service_healthy
 
   result-worker:
     build:
@@ -70,6 +105,30 @@ services:
       FCS_WORKER_STALE_AFTER_SECONDS: 45
     volumes:
       - backend-data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      fake-provider:
+        condition: service_healthy
+
+  render-worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.workers.render_cli"]
+    profiles:
+      - worker
+    environment:
+      FCS_DATABASE_URL: sqlite:///./data/frame_chain.db
+      FCS_STORAGE_DIR: ./data/storage
+      FCS_FIXTURE_DIR: ./tests/fixtures
+      FCS_WORKER_ID: compose-render-worker
+      FCS_WORKER_HEARTBEAT_SECONDS: 10
+      FCS_WORKER_STALE_AFTER_SECONDS: 45
+    volumes:
+      - backend-data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   backend-data:

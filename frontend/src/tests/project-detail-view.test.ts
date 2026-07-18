@@ -33,6 +33,7 @@ describe("ProjectDetailView phase 2F", () => {
       stale_after_seconds: 45,
       generation: { worker_type: "GENERATION", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
       result: { worker_type: "RESULT", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
+      render: { worker_type: "RENDER", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
     });
   });
 
@@ -188,6 +189,7 @@ vi.mock("@/api/client", () => ({
     generateVideo: vi.fn(),
     approveVideo: vi.fn(),
     rejectVideo: vi.fn(),
+    createProjectRender: vi.fn(),
   },
 }));
 
@@ -208,6 +210,15 @@ function project(shots: ProjectDetail["shots"]): ProjectDetail {
     assets: [],
     requests: [],
     tasks: [],
+    renders: [],
+    completion: {
+      total_shots: shots.length,
+      completed_shots: 0,
+      missing_shot_ids: shots.map((item) => item.id),
+      estimated_duration_seconds: 0,
+      can_render: false,
+      render_disabled_reason: "Missing approved video",
+    },
     logs: [
       {
         id: 1,
@@ -285,6 +296,7 @@ async function mountView() {
     stale_after_seconds: 45,
     generation: { worker_type: "GENERATION", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
     result: { worker_type: "RESULT", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
+    render: { worker_type: "RENDER", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
   });
   const wrapper = mount(ProjectDetailView, {
     global: {
@@ -306,6 +318,7 @@ describe("ProjectDetailView", () => {
       stale_after_seconds: 45,
       generation: { worker_type: "GENERATION", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
       result: { worker_type: "RESULT", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
+      render: { worker_type: "RENDER", online_count: 0, total_count: 0, stale_after_seconds: 45, workers: [] },
     });
   });
 

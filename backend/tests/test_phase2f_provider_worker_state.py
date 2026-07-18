@@ -157,7 +157,7 @@ def test_project_detail_returns_shot_actions_for_many_shots(session: Session) ->
         session.add(Shot(project_id=project.id or 0, title=f"Shot {index + 1}", sort_order=index))
     session.commit()
 
-    _, shots, _, _, tasks, _ = studio.project_detail(session, project.id or 0)
+    _, shots, _, _, tasks, _, _, _ = studio.project_detail(session, project.id or 0)
 
     assert len(shots) == 20
     assert tasks == []

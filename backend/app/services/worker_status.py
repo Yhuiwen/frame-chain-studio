@@ -92,6 +92,7 @@ def status_summary(session: Session, *, stale_after_seconds: int, now: datetime 
         "stale_after_seconds": stale_after_seconds,
         "generation": _type_summary(rows, WorkerType.GENERATION, current_time, stale_after_seconds),
         "result": _type_summary(rows, WorkerType.RESULT, current_time, stale_after_seconds),
+        "render": _type_summary(rows, WorkerType.RENDER, current_time, stale_after_seconds),
     }
 
 
