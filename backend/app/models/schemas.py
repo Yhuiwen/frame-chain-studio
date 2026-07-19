@@ -1,43 +1,59 @@
+import re
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.entities import (
     AssetType,
     GenerationKind,
     GenerationMode,
-    ProjectRenderStatus,
     GenerationTaskStatus,
     GenerationTaskType,
+    ProjectRenderStatus,
     ReliableTaskStatus,
     ShotStatus,
     WorkerStatus,
     WorkerType,
 )
 
+PROVIDER_ID_MAX_LENGTH = 80
+MODEL_MAX_LENGTH = 120
+ASPECT_RATIO_PATTERN = re.compile(r"^[1-9][0-9]{0,2}:[1-9][0-9]{0,2}$")
+SEED_MIN = 0
+SEED_MAX = 2_147_483_647
 
-class ProjectCreate(BaseModel):
-    name: str
-    description: str = ""
-    image_provider_id: str | None = None
-    video_provider_id: str | None = None
-    image_model: str | None = None
-    video_model: str | None = None
+
+class ProjectSettingsValidationMixin(BaseModel):
+    image_provider_id: str | None = Field(default=None, max_length=PROVIDER_ID_MAX_LENGTH)
+    video_provider_id: str | None = Field(default=None, max_length=PROVIDER_ID_MAX_LENGTH)
+    image_model: str | None = Field(default=None, max_length=MODEL_MAX_LENGTH)
+    video_model: str | None = Field(default=None, max_length=MODEL_MAX_LENGTH)
     default_aspect_ratio: str | None = "16:9"
-    default_video_duration_seconds: float | None = None
-    default_seed: int | None = None
+    default_video_duration_seconds: float | None = Field(default=None, gt=0, le=60)
+    default_seed: int | None = Field(default=None, ge=SEED_MIN, le=SEED_MAX)
+
+    @field_validator("default_aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not ASPECT_RATIO_PATTERN.fullmatch(value):
+            raise ValueError("Aspect ratio must use WIDTH:HEIGHT, such as 16:9.")
+        width, height = [int(part) for part in value.split(":", 1)]
+        ratio = width / height
+        if ratio < 0.1 or ratio > 10:
+            raise ValueError("Aspect ratio is outside the supported range.")
+        return value
+
+class ProjectCreate(ProjectSettingsValidationMixin):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = ""
 
 
-class ProjectUpdate(BaseModel):
-    name: str | None = None
+class ProjectUpdate(ProjectSettingsValidationMixin):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = None
-    image_provider_id: str | None = None
-    video_provider_id: str | None = None
-    image_model: str | None = None
-    video_model: str | None = None
     default_aspect_ratio: str | None = None
-    default_video_duration_seconds: float | None = None
-    default_seed: int | None = None
 
 
 class ProjectRead(ProjectCreate):

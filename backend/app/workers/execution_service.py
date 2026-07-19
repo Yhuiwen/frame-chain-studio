@@ -1,15 +1,28 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
+import hashlib
+from pathlib import Path
 from typing import Any
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.domain.retry_policy import RetryPolicyConfig, decide_error
-from app.models.entities import GenerationRequest, GenerationTask, ReliableTaskStatus, TaskErrorCode
+from app.core.config import get_settings
+from app.models.entities import (
+    Asset,
+    GenerationRequest,
+    GenerationTask,
+    ProviderAssetCache,
+    ReliableTaskStatus,
+    TaskErrorCode,
+    WorkerStatus,
+    WorkerType,
+)
 from app.providers.async_base import AsyncGenerationProvider
-from app.providers.exceptions import ProviderCancellationError, ProviderError
+from app.providers.exceptions import ProviderCancellationError, ProviderError, ProviderUnsupportedCapabilityError
 from app.providers.models import (
+    AssetReference,
     ImageGenerationRequest,
     ProviderJobResult,
     ProviderResultUrl,
@@ -17,9 +30,10 @@ from app.providers.models import (
     VideoGenerationRequest,
 )
 from app.providers.registry import ProviderRegistry
-from app.services import task_service
+from app.services import task_service, worker_status
 from app.workers.request_factory import ProviderRequestFactory
 from app.workers.settings import WorkerSettings
+from app.workers.lease_guard import LeaseLostError, TaskLeaseGuard, TaskLeaseGuardConfig
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 
@@ -39,22 +53,39 @@ class ProviderExecutionService:
         self.request_factory = request_factory or ProviderRequestFactory()
 
     async def process_task_once(self, task_id: int, *, now: datetime | None = None) -> bool:
-        with self.session_factory() as session:
-            task = task_service.get_task(session, task_id)
-            status = task.status
-        if status == ReliableTaskStatus.QUEUED:
-            return await self.submit_task_once(task_id, now=now)
-        if status == ReliableTaskStatus.SUBMITTING:
-            return await self.recover_submitting_once(task_id, now=now)
-        if status == ReliableTaskStatus.RUNNING:
-            return await self.poll_task_once(task_id, now=now)
-        if status == ReliableTaskStatus.RETRY_WAIT:
-            return await self.recover_retry_once(task_id, now=now)
-        if status == ReliableTaskStatus.CANCELLING:
-            return await self.cancel_task_once(task_id, now=now)
-        return False
+        async with TaskLeaseGuard(
+            TaskLeaseGuardConfig(
+                task_id=task_id,
+                worker_id=self.settings.worker_id,
+                lease_seconds=self.settings.lease_seconds,
+                session_factory=self.session_factory,
+                heartbeat=lambda: worker_status.safe_heartbeat(
+                    self.session_factory,
+                    worker_id=self.settings.worker_id,
+                    worker_type=WorkerType.GENERATION,
+                    status=WorkerStatus.BUSY,
+                    current_task_id=task_id,
+                ),
+            )
+        ) as lease_guard:
+            with self.session_factory() as session:
+                task = task_service.get_task(session, task_id)
+                status = task.status
+            if status == ReliableTaskStatus.QUEUED:
+                return await self.submit_task_once(task_id, now=now, lease_guard=lease_guard)
+            if status == ReliableTaskStatus.SUBMITTING:
+                return await self.recover_submitting_once(task_id, now=now, lease_guard=lease_guard)
+            if status == ReliableTaskStatus.RUNNING:
+                return await self.poll_task_once(task_id, now=now, lease_guard=lease_guard)
+            if status == ReliableTaskStatus.RETRY_WAIT:
+                return await self.recover_retry_once(task_id, now=now, lease_guard=lease_guard)
+            if status == ReliableTaskStatus.CANCELLING:
+                return await self.cancel_task_once(task_id, now=now, lease_guard=lease_guard)
+            return False
 
-    async def submit_task_once(self, task_id: int, *, now: datetime | None = None) -> bool:
+    async def submit_task_once(
+        self, task_id: int, *, now: datetime | None = None, lease_guard: TaskLeaseGuard | None = None
+    ) -> bool:
         with self.session_factory() as session:
             task_service.transition_task(
                 session,
@@ -70,9 +101,11 @@ class ProviderExecutionService:
             )
             session.add(refreshed)
             session.commit()
-        return await self._submit_existing_task(task_id, now=now)
+        return await self._submit_existing_task(task_id, now=now, lease_guard=lease_guard)
 
-    async def recover_submitting_once(self, task_id: int, *, now: datetime | None = None) -> bool:
+    async def recover_submitting_once(
+        self, task_id: int, *, now: datetime | None = None, lease_guard: TaskLeaseGuard | None = None
+    ) -> bool:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
             if task.remote_job_id:
@@ -92,9 +125,11 @@ class ProviderExecutionService:
                     now=now,
                 )
                 return True
-        return await self._submit_existing_task(task_id, now=now)
+        return await self._submit_existing_task(task_id, now=now, lease_guard=lease_guard)
 
-    async def recover_retry_once(self, task_id: int, *, now: datetime | None = None) -> bool:
+    async def recover_retry_once(
+        self, task_id: int, *, now: datetime | None = None, lease_guard: TaskLeaseGuard | None = None
+    ) -> bool:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
             if task.remote_job_id:
@@ -115,9 +150,11 @@ class ProviderExecutionService:
                 reason_code="retry_submit_recovered",
                 now=now,
             )
-        return await self._submit_existing_task(task_id, now=now)
+        return await self._submit_existing_task(task_id, now=now, lease_guard=lease_guard)
 
-    async def poll_task_once(self, task_id: int, *, now: datetime | None = None) -> bool:
+    async def poll_task_once(
+        self, task_id: int, *, now: datetime | None = None, lease_guard: TaskLeaseGuard | None = None
+    ) -> bool:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
             if task.job_deadline_at and task.job_deadline_at <= task_service.db_time(now):
@@ -160,16 +197,22 @@ class ProviderExecutionService:
         if not self._lease_owned(task_id, now=now):
             return False
         try:
-            result = await provider.get_job(remote_job_id)
+            result = await (lease_guard.run_cancellable(provider.get_job(remote_job_id)) if lease_guard else provider.get_job(remote_job_id))
         except ProviderError as exc:
             self._record_cancel_provider_error(task_id, exc, now=now)
             return True
+        except LeaseLostError:
+            return False
         if not self._lease_owned(task_id, now=now):
             return False
+        if lease_guard:
+            lease_guard.ensure_owned()
         self._apply_poll_result(task_id, result, now=now)
         return True
 
-    async def cancel_task_once(self, task_id: int, *, now: datetime | None = None) -> bool:
+    async def cancel_task_once(
+        self, task_id: int, *, now: datetime | None = None, lease_guard: TaskLeaseGuard | None = None
+    ) -> bool:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
             if task.cancellation_deadline_at and task.cancellation_deadline_at <= task_service.db_time(now):
@@ -185,19 +228,31 @@ class ProviderExecutionService:
             remote_job_id = task.remote_job_id
             needs_submit_lookup = remote_job_id is None
             if needs_submit_lookup:
-                request = self._build_provider_request(session, task, provider)
+                request = await self._build_provider_request(session, task, provider)
         if not self._lease_owned(task_id, now=now):
             return False
         if needs_submit_lookup:
             try:
                 if isinstance(request, ImageGenerationRequest):
-                    submit = await provider.submit_image(request)
+                    submit = await (
+                        lease_guard.run_cancellable(provider.submit_image(request))
+                        if lease_guard
+                        else provider.submit_image(request)
+                    )
                 else:
-                    submit = await provider.submit_video(request)
+                    submit = await (
+                        lease_guard.run_cancellable(provider.submit_video(request))
+                        if lease_guard
+                        else provider.submit_video(request)
+                    )
             except ProviderError as exc:
                 self._record_provider_error(task_id, exc, now=now)
                 return True
+            except LeaseLostError:
+                return False
             remote_job_id = submit.remote_job_id
+            if lease_guard:
+                lease_guard.ensure_owned()
             with self.session_factory() as session:
                 task_service.store_cancelling_remote_job(
                     session,
@@ -208,7 +263,11 @@ class ProviderExecutionService:
                     now=now,
                 )
         try:
-            cancel_result = await provider.cancel_job(remote_job_id or "")
+            cancel_result = await (
+                lease_guard.run_cancellable(provider.cancel_job(remote_job_id or ""))
+                if lease_guard
+                else provider.cancel_job(remote_job_id or "")
+            )
         except ProviderCancellationError as exc:
             with self.session_factory() as session:
                 task_service.record_task_error(
@@ -224,6 +283,10 @@ class ProviderExecutionService:
         except ProviderError as exc:
             self._record_provider_error(task_id, exc, now=now)
             return True
+        except LeaseLostError:
+            return False
+        if lease_guard:
+            lease_guard.ensure_owned()
         with self.session_factory() as session:
             if cancel_result.remote_status == RemoteJobStatus.CANCELLED:
                 task_service.record_task_error(
@@ -254,23 +317,37 @@ class ProviderExecutionService:
                 )
         return True
 
-    async def _submit_existing_task(self, task_id: int, *, now: datetime | None = None) -> bool:
+    async def _submit_existing_task(
+        self, task_id: int, *, now: datetime | None = None, lease_guard: TaskLeaseGuard | None = None
+    ) -> bool:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
             provider = self._provider_or_fail(session, task)
-            request = self._build_provider_request(session, task, provider)
+            request = await self._build_provider_request(session, task, provider)
         if not self._lease_owned(task_id, now=now):
             return False
         try:
             if isinstance(request, ImageGenerationRequest):
-                result = await provider.submit_image(request)
+                result = await (
+                    lease_guard.run_cancellable(provider.submit_image(request))
+                    if lease_guard
+                    else provider.submit_image(request)
+                )
             else:
-                result = await provider.submit_video(request)
+                result = await (
+                    lease_guard.run_cancellable(provider.submit_video(request))
+                    if lease_guard
+                    else provider.submit_video(request)
+                )
         except ProviderError as exc:
             self._record_provider_error(task_id, exc, now=now)
             return True
+        except LeaseLostError:
+            return False
         if not self._lease_owned(task_id, now=now):
             return False
+        if lease_guard:
+            lease_guard.ensure_owned()
         with self.session_factory() as session:
             task_service.mark_task_remote_submitted(
                 session,
@@ -297,7 +374,7 @@ class ProviderExecutionService:
             )
             raise
 
-    def _build_provider_request(
+    async def _build_provider_request(
         self,
         session: Session,
         task: GenerationTask,
@@ -306,7 +383,78 @@ class ProviderExecutionService:
         generation_request = session.get(GenerationRequest, task.generation_request_id)
         if generation_request is None:
             raise ProviderError("Generation request was not found.")
-        return self.request_factory.build(generation_request, task, provider.get_capabilities())
+        prepared = await self._prepare_assets(session, task, provider)
+        return self.request_factory.build(generation_request, task, provider.get_capabilities(), prepared_assets=prepared)
+
+    async def _prepare_assets(
+        self,
+        session: Session,
+        task: GenerationTask,
+        provider: AsyncGenerationProvider,
+    ) -> dict[int, AssetReference]:
+        payload = task_service.loads_json_object(task.request_payload_json)
+        asset_ids = [item for item in payload.get("input_asset_ids", []) if isinstance(item, int)] if isinstance(payload.get("input_asset_ids"), list) else []
+        if task.provider_id == "mock" or not asset_ids:
+            return {}
+        upload = getattr(provider, "upload_asset", None)
+        if upload is None:
+            raise ProviderUnsupportedCapabilityError("PROVIDER_ASSET_UPLOAD_UNSUPPORTED")
+        settings = get_settings()
+        storage_root = settings.storage_dir.resolve()
+        prepared: dict[int, AssetReference] = {}
+        for asset_id in asset_ids:
+            asset = session.get(Asset, asset_id)
+            if asset is None:
+                raise ProviderError("Input asset was not found.", retryable=False)
+            path = Path(asset.path).resolve()
+            if path != storage_root and storage_root not in path.parents:
+                raise ProviderError("Input asset path is outside storage.", retryable=False)
+            if not path.exists() or not path.is_file():
+                raise ProviderError("Input asset file is missing.", retryable=False)
+            max_upload_bytes = (
+                settings.result_max_image_bytes
+                if str(asset.mime_type).lower().startswith("image/")
+                else settings.result_max_video_bytes
+            )
+            if path.stat().st_size > max_upload_bytes:
+                raise ProviderError("Input asset exceeds the provider upload size limit.", retryable=False)
+            sha256 = _sha256_file(path)
+            if asset.sha256 and asset.sha256 != sha256:
+                raise ProviderError("Input asset SHA-256 does not match the stored Asset metadata.", retryable=False)
+            cached = session.exec(
+                select(ProviderAssetCache).where(
+                    ProviderAssetCache.provider_id == task.provider_id,
+                    ProviderAssetCache.asset_id == asset_id,
+                    ProviderAssetCache.asset_sha256 == sha256,
+                )
+            ).first()
+            current_time = task_service.db_time()
+            if cached and (cached.expires_at is None or cached.expires_at > current_time):
+                prepared[asset_id] = AssetReference(asset_id=asset_id, url=cached.reference_value)
+                continue
+            result = await upload(path, client_request_id=f"{task.idempotency_key}:asset:{asset_id}")
+            if cached is None:
+                cache = ProviderAssetCache(
+                    provider_id=task.provider_id,
+                    asset_id=asset_id,
+                    asset_sha256=sha256,
+                    reference_kind=result.output_type or "url",
+                    reference_value=result.url,
+                )
+            else:
+                cache = cached
+            cache.reference_kind = result.output_type or "url"
+            cache.reference_value = result.url
+            cache.expires_at = (
+                current_time + timedelta(seconds=getattr(provider, "config").upload_expiry_seconds)
+                if getattr(getattr(provider, "config", None), "upload_expiry_seconds", None)
+                else None
+            )
+            cache.updated_at = current_time
+            session.add(cache)
+            session.commit()
+            prepared[asset_id] = AssetReference(asset_id=asset_id, url=result.url)
+        return prepared
 
     def _record_provider_error(self, task_id: int, exc: ProviderError, *, now: datetime | None = None) -> None:
         with self.session_factory() as session:
@@ -481,3 +629,11 @@ class ProviderExecutionService:
                 worker_id=self.settings.worker_id,
                 now=now,
             )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

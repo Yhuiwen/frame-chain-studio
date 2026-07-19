@@ -177,6 +177,14 @@ class MappedHttpProviderConfig(BaseModel):
     video_submit_path: str = "/fake/v1/videos/generations"
     job_status_path_template: str = "/fake/v1/jobs/{remote_job_id}"
     job_cancel_path_template: str = "/fake/v1/jobs/{remote_job_id}/cancel"
+    upload_endpoint: str | None = None
+    upload_method: str = "POST"
+    upload_file_field: str = "file"
+    upload_response_url_path: str | None = None
+    upload_response_file_id_path: str | None = None
+    upload_extra_fields: dict[str, str] = Field(default_factory=dict)
+    upload_timeout_seconds: float | None = Field(default=None, gt=0)
+    upload_expiry_seconds: int | None = Field(default=None, gt=0)
     request_timeout_seconds: float = Field(default=10.0, gt=0)
     verify_tls: bool = True
     default_image_model: str | None = None

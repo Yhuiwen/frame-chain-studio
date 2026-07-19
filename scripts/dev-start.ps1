@@ -57,6 +57,43 @@ function Wait-Http($Name, $Url) {
   Fail "$Name did not become ready at $Url"
 }
 
+function Wait-ReadyJson($Name, $Url) {
+  for ($i = 0; $i -lt 60; $i++) {
+    try {
+      $response = Invoke-RestMethod $Url -TimeoutSec 2
+      if ($response.status -eq "ready") { return }
+    } catch {
+      Start-Sleep -Milliseconds 500
+      continue
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  $stderr = Join-Path $LogRoot "backend.err.log"
+  if (Test-Path $stderr) {
+    Write-Host "Backend stderr tail:"
+    Get-Content $stderr -Tail 80
+  }
+  Fail "$Name did not report status=ready at $Url"
+}
+
+function Wait-WorkersReady($Url) {
+  for ($i = 0; $i -lt 60; $i++) {
+    try {
+      $workers = Invoke-RestMethod $Url -TimeoutSec 2
+      if (
+        $workers.generation.online_count -ge 1 -and
+        $workers.result.online_count -ge 1 -and
+        $workers.render.online_count -ge 1
+      ) { return }
+    } catch {
+      Start-Sleep -Milliseconds 500
+      continue
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  Fail "Workers did not all become online at $Url"
+}
+
 if (Test-Path $PidFile) {
   $existing = Get-Content $PidFile -Raw | ConvertFrom-Json
   $alive = @($existing | Where-Object { Get-Process -Id $_.pid -ErrorAction SilentlyContinue })
@@ -110,10 +147,11 @@ try {
   $processes += Start-ServiceProcess "fake-provider" $BackendRoot "$commonEnv; python -m uvicorn fake_provider.app:app --host 127.0.0.1 --port $FakeProviderPort"
   Wait-Http "fake-provider" "http://127.0.0.1:$FakeProviderPort/fake/v1/ready"
   $processes += Start-ServiceProcess "backend" $BackendRoot "$commonEnv; python -m uvicorn app.main:app --host 127.0.0.1 --port $BackendPort"
-  Wait-Http "backend" "http://127.0.0.1:$BackendPort/api/ready"
+  Wait-ReadyJson "backend" "http://127.0.0.1:$BackendPort/api/ready"
   $processes += Start-ServiceProcess "generation-worker" $BackendRoot "$commonEnv; `$env:FCS_WORKER_ID='dev-generation-worker'; python -m app.workers.cli"
-  $processes += Start-ServiceProcess "result-worker" $BackendRoot "$commonEnv; `$env:FCS_WORKER_ID='dev-result-worker'; python -m app.workers.result_cli"
+  $processes += Start-ServiceProcess "result-worker" $BackendRoot "$commonEnv; `$env:FCS_RESULT_WORKER_ID='dev-result-worker'; python -m app.workers.result_cli"
   $processes += Start-ServiceProcess "render-worker" $BackendRoot "$commonEnv; `$env:FCS_WORKER_ID='dev-render-worker'; python -m app.workers.render_cli"
+  Wait-WorkersReady "http://127.0.0.1:$BackendPort/api/workers/status"
   $processes += Start-ServiceProcess "frontend" $FrontendRoot "`$env:VITE_API_BASE_URL=''; `$env:VITE_API_PROXY_TARGET='http://127.0.0.1:$BackendPort'; npm.cmd run dev -- --host 127.0.0.1 --port $FrontendPort"
   Wait-Http "frontend" "http://127.0.0.1:$FrontendPort"
   $processes | ConvertTo-Json -Depth 4 | Set-Content -Path $PidFile -Encoding UTF8

@@ -179,11 +179,12 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260718_0006"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260719_0007"
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
     assert "job_deadline_at" in columns(db_path, "generationtask")
     assert "result_retry_count" in columns(db_path, "generationtask")
+    assert "raw_result_urls_json" in columns(db_path, "generationtask")
     assert "taskcommand" in table_names(db_path)
     assert "generationtaskresult" in table_names(db_path)
     assert "sha256" in columns(db_path, "asset")
@@ -193,3 +194,43 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
     assert "remote_progress" in columns(db_path, "generationtask")
     assert "workerheartbeat" in table_names(db_path)
     assert "projectrender" in table_names(db_path)
+    assert "lock_version" in columns(db_path, "projectrender")
+
+
+def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(tmp_path: Path) -> None:
+    db_path = tmp_path / "duplicate-sort.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260718_0006")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO project (id, name, description, created_at, updated_at)
+                VALUES (1, 'P', '', '2026-07-18 00:00:00', '2026-07-18 00:00:00')
+                """
+            )
+        )
+        for shot_id, title in [(1, "A"), (2, "B"), (3, "C")]:
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO shot (
+                        id, project_id, title, description, duration_seconds, prompt,
+                        negative_prompt, sort_order, status, start_frame_asset_id,
+                        created_at, updated_at
+                    )
+                    VALUES (:shot_id, 1, :title, '', 4.0, '', '', 0, 'DRAFT', NULL,
+                            '2026-07-18 00:00:00', '2026-07-18 00:00:00')
+                    """
+                ),
+                {"shot_id": shot_id, "title": title},
+            )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        orders = connection.execute(
+            sa.text("SELECT sort_order FROM shot WHERE project_id = 1 ORDER BY sort_order")
+        ).scalars().all()
+        assert orders == [0, 1, 2]

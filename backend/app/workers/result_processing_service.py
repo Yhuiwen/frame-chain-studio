@@ -1,6 +1,7 @@
 import os
 import secrets
 import socket
+import asyncio
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -20,8 +21,11 @@ from app.models.entities import (
     ReliableTaskStatus,
     ShotStatus,
     TaskErrorCode,
+    WorkerStatus,
+    WorkerType,
 )
-from app.services import task_service
+from app.services import task_service, worker_status
+from app.workers.lease_guard import LeaseLostError, TaskLeaseGuard, TaskLeaseGuardConfig
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 
@@ -87,6 +91,24 @@ class ResultProcessingService:
         self.downloader_resolver = downloader_resolver
 
     async def process_task_once(self, task_id: int) -> bool:
+        async with TaskLeaseGuard(
+            TaskLeaseGuardConfig(
+                task_id=task_id,
+                worker_id=self.settings.worker_id,
+                lease_seconds=self.settings.lease_seconds,
+                session_factory=self.session_factory,
+                heartbeat=lambda: worker_status.safe_heartbeat(
+                    self.session_factory,
+                    worker_id=self.settings.worker_id,
+                    worker_type=WorkerType.RESULT,
+                    status=WorkerStatus.BUSY,
+                    current_task_id=task_id,
+                ),
+            )
+        ) as lease_guard:
+            return await self._process_task_once_guarded(task_id, lease_guard=lease_guard)
+
+    async def _process_task_once_guarded(self, task_id: int, *, lease_guard: TaskLeaseGuard) -> bool:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
             if not task_service.task_is_latest_attempt(session, task_id):
@@ -148,7 +170,7 @@ class ResultProcessingService:
             transport=self.downloader_transport,
         )
         try:
-            downloaded = await downloader.download(source_url, result_id=primary.id or 0)
+            downloaded = await lease_guard.run_cancellable(downloader.download(source_url, result_id=primary.id or 0))
         except DownloadError as exc:
             self._record_result_error(
                 task_id,
@@ -159,6 +181,8 @@ class ResultProcessingService:
                 details={"download_error_code": exc.code, **exc.details},
             )
             return True
+        except LeaseLostError:
+            return False
         if not self._lease_owned(task_id):
             downloaded.absolute_path.unlink(missing_ok=True)
             return False
@@ -173,11 +197,14 @@ class ResultProcessingService:
                 file_name=downloaded.file_name,
             )
         try:
-            metadata = validate_media(
-                downloaded.absolute_path,
-                expected_kind=expected_kind,
-                max_image_pixels=self.settings.max_image_pixels,
-                ffprobe_timeout_seconds=self.settings.ffprobe_timeout_seconds,
+            metadata = await lease_guard.run_cancellable(
+                asyncio.to_thread(
+                    validate_media,
+                    downloaded.absolute_path,
+                    expected_kind=expected_kind,
+                    max_image_pixels=self.settings.max_image_pixels,
+                    ffprobe_timeout_seconds=self.settings.ffprobe_timeout_seconds,
+                )
             )
         except MediaValidationError as exc:
             downloaded.absolute_path.unlink(missing_ok=True)
@@ -190,6 +217,9 @@ class ResultProcessingService:
                 details={"validation_error_code": exc.code},
             )
             return True
+        except LeaseLostError:
+            downloaded.absolute_path.unlink(missing_ok=True)
+            return False
         if metadata.media_kind != expected_kind:
             downloaded.absolute_path.unlink(missing_ok=True)
             self._record_result_error(
@@ -225,11 +255,15 @@ class ResultProcessingService:
         )
         final_absolute_path = app_settings.storage_dir / final_relative_path
         final_absolute_path.parent.mkdir(parents=True, exist_ok=True)
+        lease_guard.ensure_owned()
         if final_absolute_path.exists():
             downloaded.absolute_path.unlink(missing_ok=True)
         else:
             os.replace(downloaded.absolute_path, final_absolute_path)
         with self.session_factory() as session:
+            if not task_service.task_lease_is_owned(session, task_id, worker_id=self.settings.worker_id):
+                final_absolute_path.unlink(missing_ok=True)
+                return False
             task_service.record_result_final_path(
                 session,
                 primary.id or 0,
@@ -257,16 +291,19 @@ class ResultProcessingService:
         retryable: bool,
         details: dict[str, object] | None = None,
     ) -> None:
-        decision = decide_error(
-            error_code,
-            retry_count=0,
-            config=RetryPolicyConfig(
-                base_seconds=self.settings.retry_base_seconds,
-                max_seconds=self.settings.retry_max_seconds,
-                jitter_ratio=self.settings.retry_jitter_ratio,
-            ),
-        )
         with self.session_factory() as session:
+            task = task_service.get_task(session, task_id)
+            result = session.get(task_service.GenerationTaskResult, result_id)
+            retry_count = max(task.result_retry_count, result.attempt_count if result is not None else 0)
+            decision = decide_error(
+                error_code,
+                retry_count=retry_count,
+                config=RetryPolicyConfig(
+                    base_seconds=self.settings.retry_base_seconds,
+                    max_seconds=self.settings.retry_max_seconds,
+                    jitter_ratio=self.settings.retry_jitter_ratio,
+                ),
+            )
             if retryable and decision.retryable:
                 task_service.schedule_result_retry(
                     session,

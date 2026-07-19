@@ -271,14 +271,40 @@ export interface WorkersStatus {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
+export class ApiError extends Error {
+  status: number;
+  code: string | null;
+  requestId: string | null;
+
+  constructor(
+    message: string,
+    options: { status: number; code?: string | null; requestId?: string | null },
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.status = options.status;
+    this.code = options.code ?? null;
+    this.requestId = options.requestId ?? null;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
   });
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
-    throw new Error(payload?.error?.message ?? `Request failed: ${response.status}`);
+    const payload = (await response.json().catch(() => null)) as {
+      error?: { code?: string; message?: string; request_id?: string };
+    } | null;
+    const requestId = payload?.error?.request_id ?? response.headers.get("X-Request-ID");
+    const message = payload?.error?.message ?? `Request failed: ${response.status}`;
+    const suffix = requestId ? ` (request id: ${requestId})` : "";
+    throw new ApiError(`${message}${suffix}`, {
+      status: response.status,
+      code: payload?.error?.code ?? null,
+      requestId,
+    });
   }
   if (response.status === 204) {
     return undefined as T;

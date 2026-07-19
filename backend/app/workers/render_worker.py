@@ -56,7 +56,11 @@ class RenderWorker:
         )
         try:
             logger.info("render worker claim render_id=%s worker_id=%s", render.id, self.worker_id)
-            did_work = self.processing_service.process_render_once(render.id)
+            did_work = self.processing_service.process_render_once(
+                render.id,
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+            )
             return 1 if did_work else 0
         except Exception as exc:
             logger.warning("render worker failed render_id=%s worker_id=%s error=%s", render.id, self.worker_id, exc)

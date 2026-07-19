@@ -6,7 +6,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -14,7 +14,7 @@ from app.core.config import BACKEND_ROOT, get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
 from app.media.ffmpeg import require_binary
-from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, ProjectRender, Shot, ShotStatus, TaskCommandType
+from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, ProjectRender, Shot, TaskCommandType
 from app.models.schemas import (
     GenerationStartRequest,
     GenerationRequestRead,
@@ -55,7 +55,7 @@ def health() -> dict[str, str]:
 
 
 @router.get("/ready")
-def ready() -> dict[str, object]:
+def ready() -> JSONResponse:
     settings = get_settings()
     checks: dict[str, object] = {}
     status = "ready"
@@ -95,7 +95,10 @@ def ready() -> dict[str, object]:
     except Exception as exc:
         checks["providers"] = f"failed:{exc.__class__.__name__}"
         status = "not_ready"
-    return {"status": status, "checks": checks, "config": settings.safe_summary()}
+    return JSONResponse(
+        status_code=200 if status == "ready" else 503,
+        content={"status": status, "checks": checks, "config": settings.safe_summary()},
+    )
 
 
 def _alembic_head_revision() -> str | None:
@@ -365,24 +368,11 @@ def generate_keyframe(
         registry=load_registry_from_env(),
         system_default_provider_id=settings.default_image_provider_id,
     )
-    studio.transition_shot(session, shot, ShotStatus.KEYFRAME_GENERATING, "keyframe_generation_started")
-    request = studio.create_generation_request(
+    request = studio.start_keyframe_generation_atomic(
         session,
-        shot,
-        GenerationKind.KEYFRAME,
-        input_asset_ids=resolved.input_asset_ids,
-        provider_id=resolved.provider_id,
-        model=resolved.model,
-        generation_mode=resolved.generation_mode.value,
-        aspect_ratio=resolved.aspect_ratio,
-        seed=resolved.seed,
-        duration_seconds=resolved.duration_seconds,
-        allow_capability_fallback=resolved.allow_capability_fallback,
+        shot=shot,
+        resolved=resolved,
         request_payload=resolved.request_payload(shot),
-        provider_config_snapshot={
-            "provider_id": resolved.provider_id,
-            "configured": resolved.provider_info.configured if resolved.provider_info else True,
-        },
     )
     if resolved.provider_id == provider_resolution.MOCK_PROVIDER_ID:
         background_tasks.add_task(run_request_in_background, request.id or 0)
@@ -407,8 +397,6 @@ def generate_video(
     session: Session = Depends(get_session),
 ) -> GenerationRequest:
     shot = studio.get_shot_or_404(session, shot_id)
-    if shot.status != ShotStatus.KEYFRAME_APPROVED:
-        raise AppError("KEYFRAME_NOT_APPROVED", "Video generation requires an approved keyframe.", 409)
     project = studio.get_project_or_404(session, shot.project_id)
     settings = get_settings()
     resolved = provider_resolution.resolve_generation(
@@ -420,24 +408,11 @@ def generate_video(
         registry=load_registry_from_env(),
         system_default_provider_id=settings.default_video_provider_id,
     )
-    studio.transition_shot(session, shot, ShotStatus.VIDEO_GENERATING, "video_generation_started")
-    request = studio.create_generation_request(
+    request = studio.start_video_generation_atomic(
         session,
-        shot,
-        GenerationKind.VIDEO,
-        input_asset_ids=resolved.input_asset_ids,
-        provider_id=resolved.provider_id,
-        model=resolved.model,
-        generation_mode=resolved.generation_mode.value,
-        aspect_ratio=resolved.aspect_ratio,
-        seed=resolved.seed,
-        duration_seconds=resolved.duration_seconds,
-        allow_capability_fallback=resolved.allow_capability_fallback,
+        shot=shot,
+        resolved=resolved,
         request_payload=resolved.request_payload(shot),
-        provider_config_snapshot={
-            "provider_id": resolved.provider_id,
-            "configured": resolved.provider_info.configured if resolved.provider_info else True,
-        },
     )
     if resolved.provider_id == provider_resolution.MOCK_PROVIDER_ID:
         background_tasks.add_task(run_request_in_background, request.id or 0)

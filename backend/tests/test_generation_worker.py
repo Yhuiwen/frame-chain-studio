@@ -1,24 +1,46 @@
+import asyncio
 from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models.entities import Asset, GenerationKind, GenerationTask, Project, ReliableTaskStatus, Shot, TaskErrorCode
+from app.core.config import get_settings
+from app.models.entities import (
+    Asset,
+    AssetType,
+    GenerationKind,
+    GenerationTask,
+    Project,
+    ProviderAssetCache,
+    ReliableTaskStatus,
+    Shot,
+    TaskErrorCode,
+    WorkerHeartbeat,
+)
+from app.providers.async_base import AsyncGenerationProvider
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import (
     MappedHttpProviderConfig,
+    ImageGenerationRequest,
     ProviderCapabilities,
+    ProviderCancelResult,
+    ProviderJobResult,
+    ProviderResultUrl,
+    ProviderSubmitResult,
     ProviderMappingConfig,
+    RemoteJobStatus,
     RequestFieldMapping,
     ResponseMappingConfig,
+    VideoGenerationRequest,
 )
 from app.providers.registry import ProviderRegistry
 from app.services import task_service
 from app.workers.generation_worker import GenerationWorker
+from app.workers.execution_service import ProviderExecutionService
 from app.workers.settings import WorkerSettings
 from fake_provider.app import app
 
@@ -124,6 +146,95 @@ def create_task(session: Session, *, status: ReliableTaskStatus = ReliableTaskSt
     return task_service.get_task(session, task.id or 0)
 
 
+class UploadProvider(AsyncGenerationProvider):
+    def __init__(self) -> None:
+        self.upload_calls = 0
+        self.video_requests: list[VideoGenerationRequest] = []
+
+    def get_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="upload-provider",
+            display_name="Upload Provider",
+            image_to_video=True,
+            max_reference_images=1,
+        )
+
+    async def upload_asset(self, path: Path, *, client_request_id: str) -> ProviderResultUrl:
+        assert path.exists()
+        self.upload_calls += 1
+        return ProviderResultUrl(url=f"https://assets.example.test/{client_request_id}")
+
+    async def submit_image(self, request: ImageGenerationRequest) -> ProviderSubmitResult:
+        raise AssertionError("image submit should not be called")
+
+    async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
+        self.video_requests.append(request)
+        return ProviderSubmitResult(
+            remote_job_id=f"job-{self.upload_calls}",
+            remote_status=RemoteJobStatus.RUNNING,
+        )
+
+    async def get_job(self, remote_job_id: str) -> ProviderJobResult:
+        raise AssertionError("poll should not be called")
+
+    async def cancel_job(self, remote_job_id: str) -> ProviderCancelResult:
+        raise AssertionError("cancel should not be called")
+
+
+class SlowSubmitProvider(AsyncGenerationProvider):
+    def __init__(self, *, delay_seconds: float = 5, provider_id: str = "slow-provider") -> None:
+        self.delay_seconds = delay_seconds
+        self.provider_id = provider_id
+        self.submit_calls = 0
+
+    def get_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(provider_id=self.provider_id, display_name="Slow Provider", text_to_image=True)
+
+    async def submit_image(self, request: ImageGenerationRequest) -> ProviderSubmitResult:
+        self.submit_calls += 1
+        await asyncio.sleep(self.delay_seconds)
+        return ProviderSubmitResult(remote_job_id="late-job", remote_status=RemoteJobStatus.RUNNING)
+
+    async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
+        raise AssertionError("video submit should not be called")
+
+    async def get_job(self, remote_job_id: str) -> ProviderJobResult:
+        raise AssertionError("poll should not be called")
+
+    async def cancel_job(self, remote_job_id: str) -> ProviderCancelResult:
+        raise AssertionError("cancel should not be called")
+
+
+class SlowPollProvider(AsyncGenerationProvider):
+    def __init__(self, *, delay_seconds: float = 2.2) -> None:
+        self.delay_seconds = delay_seconds
+        self.submit_calls = 0
+        self.poll_calls = 0
+
+    def get_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(provider_id="slow-poll-provider", display_name="Slow Poll Provider", text_to_image=True)
+
+    async def submit_image(self, request: ImageGenerationRequest) -> ProviderSubmitResult:
+        self.submit_calls += 1
+        return ProviderSubmitResult(remote_job_id="existing-job", remote_status=RemoteJobStatus.RUNNING)
+
+    async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
+        raise AssertionError("video submit should not be called")
+
+    async def get_job(self, remote_job_id: str) -> ProviderJobResult:
+        self.poll_calls += 1
+        await asyncio.sleep(self.delay_seconds)
+        return ProviderJobResult(
+            remote_job_id=remote_job_id,
+            remote_status="succeeded",
+            normalized_status=RemoteJobStatus.SUCCEEDED,
+            result_urls=[ProviderResultUrl(url="https://cdn.example.test/result.png?token=secret")],
+        )
+
+    async def cancel_job(self, remote_job_id: str) -> ProviderCancelResult:
+        raise AssertionError("cancel should not be called")
+
+
 @pytest.mark.anyio
 async def test_worker_submits_queued_task_and_polls_to_result_ready(tmp_path: Path) -> None:
     registry = await make_registry()
@@ -157,6 +268,262 @@ async def test_worker_submits_queued_task_and_polls_to_result_ready(tmp_path: Pa
             assert ready.status == ReliableTaskStatus.RESULT_READY
             assert task_service.loads_json_list(ready.result_urls_json)
             assert session.exec(select(Asset)).all() == []
+
+
+@pytest.mark.anyio
+async def test_execution_service_uploads_remote_input_assets_and_reuses_cache(tmp_path: Path) -> None:
+    settings = get_settings()
+    settings.storage_dir = tmp_path / "storage"
+    settings.storage_dir.mkdir(parents=True, exist_ok=True)
+    provider = UploadProvider()
+    registry = ProviderRegistry()
+    registry.register(provider)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="Upload", description="")
+            session.add(project)
+            session.commit()
+            session.refresh(project)
+            shot = Shot(project_id=project.id or 0, title="Shot 1")
+            session.add(shot)
+            session.commit()
+            asset_path = settings.storage_dir / "project-1" / "shot-1" / "keyframe.png"
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            asset_path.write_bytes(b"asset-bytes")
+            asset = Asset(
+                project_id=project.id or 0,
+                shot_id=shot.id,
+                type=AssetType.KEYFRAME,
+                path=str(asset_path),
+                mime_type="image/png",
+            )
+            session.add(asset)
+            session.commit()
+            session.refresh(asset)
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.VIDEO,
+                provider_name="upload-provider",
+                input_asset_ids=[asset.id or 0],
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="upload-provider",
+                request_payload={"input_asset_ids": [asset.id or 0], "duration_seconds": 2, "prompt": "prompt"},
+            )
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=30)
+
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+        )
+
+        assert await service.process_task_once(task.id or 0)
+        with factory() as session:
+            submitted = task_service.get_task(session, task.id or 0)
+            assert submitted.status == ReliableTaskStatus.RUNNING
+            assert session.exec(select(ProviderAssetCache)).one().reference_value.startswith(
+                "https://assets.example.test/"
+            )
+            request_again = await service._build_provider_request(session, submitted, provider)
+
+        assert provider.upload_calls == 1
+        assert provider.video_requests
+        assert isinstance(request_again, VideoGenerationRequest)
+        assert provider.video_requests[0].start_frame is not None
+        assert provider.video_requests[0].start_frame.url.startswith("https://assets.example.test/")
+        assert request_again.start_frame is not None
+        assert request_again.start_frame.url == provider.video_requests[0].start_frame.url
+
+
+@pytest.mark.anyio
+async def test_execution_service_stops_long_submit_when_lease_is_lost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SlowSubmitProvider()
+    registry = ProviderRegistry()
+    registry.register(provider)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="Slow", description="")
+            session.add(project)
+            session.commit()
+            session.refresh(project)
+            shot = Shot(project_id=project.id or 0, title="Shot 1")
+            session.add(shot)
+            session.commit()
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.KEYFRAME,
+                provider_name="slow-provider",
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="slow-provider",
+                request_payload={"prompt": "prompt"},
+            )
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=1)
+
+        monkeypatch.setattr(task_service, "renew_task_lease", lambda *_args, **_kwargs: None)
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", lease_seconds=2, poll_interval_seconds=0),
+        )
+
+        assert not await service.process_task_once(task.id or 0)
+        with factory() as session:
+            current = task_service.get_task(session, task.id or 0)
+            assert current.status == ReliableTaskStatus.SUBMITTING
+            assert current.remote_job_id is None
+
+
+@pytest.mark.anyio
+async def test_generation_worker_long_submit_renews_lease_and_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SlowSubmitProvider(delay_seconds=2.2, provider_id="slow-submit-provider")
+    registry = ProviderRegistry()
+    registry.register(provider)
+    renew_count = 0
+    real_renew = task_service.renew_task_lease
+
+    def counting_renew(
+        session: Session,
+        task_id: int,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> object:
+        nonlocal renew_count
+        renew_count += 1
+        return real_renew(session, task_id, worker_id=worker_id, lease_seconds=lease_seconds, now=now)
+
+    monkeypatch.setattr(task_service, "renew_task_lease", counting_renew)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="Slow Submit", description="")
+            session.add(project)
+            session.commit()
+            shot = Shot(project_id=project.id or 0, title="Shot 1")
+            session.add(shot)
+            session.commit()
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.KEYFRAME,
+                provider_name="slow-submit-provider",
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="slow-submit-provider",
+                request_payload={"prompt": "prompt"},
+            )
+        worker = GenerationWorker(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", lease_seconds=2, poll_interval_seconds=0),
+        )
+
+        assert await worker.run_once() == 1
+
+        with factory() as session:
+            current = task_service.get_task(session, task.id or 0)
+            heartbeat = session.exec(select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id == "worker-a")).one()
+            assert current.status == ReliableTaskStatus.RUNNING
+            assert current.remote_job_id == "late-job"
+            assert current.locked_by is None
+            assert heartbeat.current_task_id is None
+        assert provider.submit_calls == 1
+        assert renew_count >= 2
+
+
+@pytest.mark.anyio
+async def test_generation_worker_long_poll_renews_lease_and_records_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SlowPollProvider(delay_seconds=2.2)
+    registry = ProviderRegistry()
+    registry.register(provider)
+    renew_count = 0
+    real_renew = task_service.renew_task_lease
+
+    def counting_renew(
+        session: Session,
+        task_id: int,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> object:
+        nonlocal renew_count
+        renew_count += 1
+        return real_renew(session, task_id, worker_id=worker_id, lease_seconds=lease_seconds, now=now)
+
+    monkeypatch.setattr(task_service, "renew_task_lease", counting_renew)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="Slow Poll", description="")
+            session.add(project)
+            session.commit()
+            shot = Shot(project_id=project.id or 0, title="Shot 1")
+            session.add(shot)
+            session.commit()
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.KEYFRAME,
+                provider_name="slow-poll-provider",
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="slow-poll-provider",
+                request_payload={"prompt": "prompt"},
+            )
+            task_service.mark_task_remote_submitted(
+                session,
+                task.id or 0,
+                remote_job_id="existing-job",
+                remote_status="running",
+                response_summary="{}",
+                poll_delay_seconds=0,
+            )
+        worker = GenerationWorker(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", lease_seconds=2, poll_interval_seconds=0),
+        )
+
+        assert await worker.run_once() == 1
+
+        with factory() as session:
+            current = task_service.get_task(session, task.id or 0)
+            assert current.status == ReliableTaskStatus.RESULT_READY
+            assert current.locked_by is None
+            assert task_service.loads_json_list(current.raw_result_urls_json)
+            assert "token=secret" not in current.result_urls_json
+        assert provider.submit_calls == 0
+        assert provider.poll_calls == 1
+        assert renew_count >= 2
 
 
 @pytest.mark.anyio

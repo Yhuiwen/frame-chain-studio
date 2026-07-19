@@ -1,5 +1,7 @@
+import asyncio
 from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -8,6 +10,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import fake_provider.app as fake_provider_app
 from app.core.config import get_settings
+from app.media.result_downloader import DownloadedFile
 from app.models.entities import (
     Asset,
     AssetType,
@@ -18,6 +21,7 @@ from app.models.entities import (
     ReliableTaskStatus,
     Shot,
     ShotStatus,
+    WorkerHeartbeat,
 )
 from app.models.schemas import ProjectCreate, ShotCreate
 from app.services import studio, task_service
@@ -255,3 +259,105 @@ async def test_result_worker_retries_transient_download_error_without_polluting_
         await worker.run_until_idle()
         with factory() as session:
             assert task_service.get_task(session, task.id or 0).status == ReliableTaskStatus.SUCCEEDED
+
+
+@pytest.mark.anyio
+async def test_result_worker_stops_download_when_lease_is_lost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            task = create_result_ready_task(session, url=add_fake_job("slow-image", kind="image"))
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="result-worker", lease_seconds=1)
+
+        async def slow_download(*_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(5)
+            raise AssertionError("download should be cancelled after lease loss")
+
+        monkeypatch.setattr(task_service, "renew_task_lease", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("app.workers.result_processing_service.ResultDownloader.download", slow_download)
+        service = ResultProcessingService(
+            session_factory=factory,
+            settings=ResultWorkerSettings(worker_id="result-worker", lease_seconds=1, retry_jitter_ratio=0),
+            downloader_transport=httpx.ASGITransport(app=fake_provider_app.app),
+            downloader_resolver=resolver,
+        )
+
+        assert not await service.process_task_once(task.id or 0)
+        with factory() as session:
+            current = task_service.get_task(session, task.id or 0)
+            assert current.status == ReliableTaskStatus.PROCESSING_RESULT
+            assert session.exec(select(Asset)).all() == []
+
+
+@pytest.mark.anyio
+async def test_result_worker_long_download_renews_lease_and_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renew_count = 0
+    real_renew = task_service.renew_task_lease
+
+    def counting_renew(
+        session: Session,
+        task_id: int,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> object:
+        nonlocal renew_count
+        renew_count += 1
+        return real_renew(session, task_id, worker_id=worker_id, lease_seconds=lease_seconds, now=now)
+
+    async def slow_download(_self: object, _url: str, *, result_id: int) -> DownloadedFile:
+        await asyncio.sleep(2.2)
+        storage_dir = get_settings().storage_dir
+        relative = Path("temp") / "results" / f"slow-{result_id}.part"
+        absolute = storage_dir / relative
+        absolute.parent.mkdir(parents=True, exist_ok=True)
+        data = Path("tests/fixtures/mock-keyframe.png").read_bytes()
+        absolute.write_bytes(data)
+        import hashlib
+
+        return DownloadedFile(
+            absolute_path=absolute,
+            relative_path=relative.as_posix(),
+            file_size=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            mime_type="image/png",
+            file_name=None,
+        )
+
+    monkeypatch.setattr(task_service, "renew_task_lease", counting_renew)
+    monkeypatch.setattr("app.workers.result_processing_service.ResultDownloader.download", slow_download)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            task = create_result_ready_task(session, url=add_fake_job("slow-success-image", kind="image"))
+
+        settings = ResultWorkerSettings(worker_id="result-worker", lease_seconds=2, retry_jitter_ratio=0)
+        worker = ResultWorker(
+            session_factory=factory,
+            settings=settings,
+            processing_service=ResultProcessingService(
+                session_factory=factory,
+                settings=settings,
+                downloader_transport=httpx.ASGITransport(app=fake_provider_app.app),
+                downloader_resolver=resolver,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        with factory() as session:
+            completed = task_service.get_task(session, task.id or 0)
+            shot = session.get(Shot, completed.shot_id)
+            assets = session.exec(select(Asset)).all()
+            heartbeat = session.exec(select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id == "result-worker")).one()
+            assert completed.status == ReliableTaskStatus.SUCCEEDED
+            assert completed.locked_by is None
+            assert shot and shot.status == ShotStatus.KEYFRAME_REVIEW
+            assert len(assets) == 1
+            assert heartbeat.current_task_id is None
+        assert renew_count >= 2
+        assert not list((get_settings().storage_dir / "temp" / "results").glob("*.part"))

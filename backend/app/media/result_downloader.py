@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import os
 import socket
+import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,9 +53,11 @@ class DownloadConfig:
 @dataclass(frozen=True)
 class SafeUrlInfo:
     url: str
+    connect_url: str
     scheme: str
     host: str
     port: int | None
+    validated_addresses: tuple[str, ...]
     path_summary: str
     url_hash: str
 
@@ -117,12 +120,24 @@ def safe_url_info(url: str, *, resolver: Resolver | None = None, config: UrlSafe
     normalized = normalize_url(url)
     return SafeUrlInfo(
         url=normalized,
+        connect_url=_pinned_connect_url(normalized, addresses[0]) if parsed.scheme.lower() == "http" else normalized,
         scheme=parsed.scheme.lower(),
         host=host,
         port=port,
+        validated_addresses=tuple(addresses),
         path_summary=_path_summary(parsed.path),
         url_hash=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
     )
+
+
+def _pinned_connect_url(normalized_url: str, address: str) -> str:
+    parsed = urlsplit(normalized_url)
+    netloc = address
+    if ":" in address and not address.startswith("["):
+        netloc = f"[{address}]"
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, ""))
 
 
 def _resolve_host(host: str, port: int | None, *, resolver: Resolver | None = None) -> list[str]:
@@ -186,10 +201,12 @@ class ResultDownloader:
         *,
         resolver: Resolver | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.config = config
         self.resolver = resolver
         self.transport = transport
+        self.ssl_context = ssl_context
 
     async def download(self, url: str, *, result_id: int) -> DownloadedFile:
         start = asyncio.get_running_loop().time()
@@ -228,27 +245,42 @@ class ResultDownloader:
                         raise DownloadError("DOWNLOAD_REDIRECT_ERROR", "HTTPS to HTTP result redirect is not allowed.")
                     previous_scheme = info.scheme
                     try:
-                        async with client.stream("GET", info.url, headers={"Accept": "*/*"}) as response:
-                            if response.status_code in {301, 302, 303, 307, 308}:
+                        headers = {"Accept": "*/*", "Host": info.host}
+                        if info.port is not None:
+                            headers["Host"] = f"{info.host}:{info.port}"
+                        if info.scheme == "https" and self.transport is None:
+                            pinned = await self._request_https_pinned(info, headers=headers)
+                            status_code = pinned.status_code
+                            response_headers = pinned.headers
+                            body_iter = pinned.iter_bytes(self.config.chunk_bytes)
+                        else:
+                            response = client.stream("GET", info.connect_url, headers=headers)
+                            stream_context = response
+                            httpx_response = await stream_context.__aenter__()
+                            status_code = httpx_response.status_code
+                            response_headers = dict(httpx_response.headers)
+                            body_iter = httpx_response.aiter_bytes(chunk_size=self.config.chunk_bytes)
+                        try:
+                            if status_code in {301, 302, 303, 307, 308}:
                                 if redirect_index >= self.config.max_redirects:
                                     raise DownloadError("DOWNLOAD_REDIRECT_ERROR", "Too many result URL redirects.")
-                                location = response.headers.get("location")
+                                location = response_headers.get("location")
                                 if not location:
                                     raise DownloadError("DOWNLOAD_REDIRECT_ERROR", "Redirect response missing Location.")
                                 current_url = urljoin(info.url, location)
                                 continue
-                            if response.status_code >= 400:
+                            if status_code >= 400:
                                 raise DownloadError(
                                     "DOWNLOAD_HTTP_ERROR",
-                                    f"Result download failed with HTTP {response.status_code}.",
-                                    retryable=response.status_code in {408, 429, 500, 502, 503, 504},
-                                    details={"status_code": response.status_code},
+                                    f"Result download failed with HTTP {status_code}.",
+                                    retryable=status_code in {408, 429, 500, 502, 503, 504},
+                                    details={"status_code": status_code},
                                 )
-                            content_length = response.headers.get("content-length")
+                            content_length = response_headers.get("content-length")
                             if content_length and int(content_length) > self.config.max_bytes:
                                 raise DownloadError("DOWNLOAD_TOO_LARGE", "Result file exceeds configured size limit.")
                             with absolute_path.open("wb") as handle:
-                                async for chunk in response.aiter_bytes(chunk_size=self.config.chunk_bytes):
+                                async for chunk in body_iter:
                                     if asyncio.get_running_loop().time() - start > self.config.total_timeout_seconds:
                                         raise DownloadError("DOWNLOAD_TIMEOUT", "Result download exceeded total timeout.", retryable=True)
                                     if not chunk:
@@ -267,9 +299,14 @@ class ResultDownloader:
                                 relative_path=relative_path.as_posix(),
                                 file_size=size,
                                 sha256=sha256.hexdigest(),
-                                mime_type=response.headers.get("content-type"),
+                                mime_type=response_headers.get("content-type"),
                                 file_name=None,
                             )
+                        finally:
+                            if info.scheme == "https" and self.transport is None:
+                                pinned.close()
+                            else:
+                                await stream_context.__aexit__(None, None, None)
                     except httpx.TimeoutException as exc:
                         raise DownloadError("DOWNLOAD_TIMEOUT", "Result download timed out.", retryable=True) from exc
                     except httpx.HTTPError as exc:
@@ -279,3 +316,164 @@ class ResultDownloader:
             if absolute_path.exists():
                 absolute_path.unlink(missing_ok=True)
             raise
+
+    async def _request_https_pinned(self, info: SafeUrlInfo, *, headers: dict[str, str]) -> "PinnedResponse":
+        last_error: Exception | None = None
+        for address in info.validated_addresses:
+            try:
+                return await _open_https_pinned(
+                    info,
+                    address=address,
+                    headers=headers,
+                    connect_timeout=self.config.connect_timeout_seconds,
+                    read_timeout=self.config.read_timeout_seconds,
+                    ssl_context=self.ssl_context,
+                )
+            except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
+                last_error = exc
+                continue
+        raise DownloadError(
+            "DOWNLOAD_NETWORK_ERROR",
+            "Result HTTPS download failed for all validated addresses.",
+            retryable=True,
+        ) from last_error
+
+
+class PinnedResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        headers: dict[str, str],
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        initial_body: bytes,
+        content_length: int | None,
+        chunked: bool,
+        read_timeout: float,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers
+        self.reader = reader
+        self.writer = writer
+        self.initial_body = initial_body
+        self.content_length = content_length
+        self.chunked = chunked
+        self.read_timeout = read_timeout
+
+    async def iter_bytes(self, chunk_size: int):
+        if self.chunked:
+            async for chunk in self._iter_chunked():
+                yield chunk
+            return
+        remaining = self.content_length
+        if self.initial_body:
+            chunk = self.initial_body if len(self.initial_body) <= chunk_size else self.initial_body[:chunk_size]
+            yield chunk
+            extra = self.initial_body[len(chunk):]
+            if extra:
+                for offset in range(0, len(extra), chunk_size):
+                    yield extra[offset : offset + chunk_size]
+            if remaining is not None:
+                remaining -= len(self.initial_body)
+        while remaining is None or remaining > 0:
+            limit = chunk_size if remaining is None else min(chunk_size, remaining)
+            chunk = await asyncio.wait_for(self.reader.read(limit), timeout=self.read_timeout)
+            if not chunk:
+                return
+            yield chunk
+            if remaining is not None:
+                remaining -= len(chunk)
+
+    async def _iter_chunked(self):
+        pending = self.initial_body
+        while True:
+            line, pending = await _read_line(self.reader, pending, self.read_timeout)
+            size_text = line.split(b";", 1)[0].strip()
+            size = int(size_text, 16)
+            if size == 0:
+                return
+            chunk, pending = await _read_exact(self.reader, pending, size + 2, self.read_timeout)
+            yield chunk[:-2]
+
+    def close(self) -> None:
+        self.writer.close()
+
+
+async def _open_https_pinned(
+    info: SafeUrlInfo,
+    *,
+    address: str,
+    headers: dict[str, str],
+    connect_timeout: float,
+    read_timeout: float,
+    ssl_context: ssl.SSLContext | None,
+) -> PinnedResponse:
+    parsed = urlsplit(info.url)
+    port = info.port or 443
+    context = ssl_context or ssl.create_default_context()
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(
+            host=address,
+            port=port,
+            ssl=context,
+            server_hostname=info.host,
+        ),
+        timeout=connect_timeout,
+    )
+    path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    request_headers = {
+        "Host": headers["Host"],
+        "Accept": headers.get("Accept", "*/*"),
+        "User-Agent": "frame-chain-studio-result-downloader/0.1",
+        "Connection": "close",
+    }
+    raw = f"GET {path} HTTP/1.1\r\n" + "".join(f"{key}: {value}\r\n" for key, value in request_headers.items()) + "\r\n"
+    writer.write(raw.encode("ascii"))
+    await writer.drain()
+    header_bytes = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=read_timeout)
+    head, initial_body = header_bytes.split(b"\r\n\r\n", 1)
+    lines = head.split(b"\r\n")
+    status_parts = lines[0].decode("iso-8859-1").split(" ", 2)
+    if len(status_parts) < 2 or not status_parts[1].isdigit():
+        raise DownloadError("DOWNLOAD_NETWORK_ERROR", "Invalid HTTPS response status line.", retryable=True)
+    response_headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if b":" not in line:
+            continue
+        key, value = line.split(b":", 1)
+        response_headers[key.decode("iso-8859-1").lower()] = value.strip().decode("iso-8859-1")
+    transfer_encoding = response_headers.get("transfer-encoding", "").lower()
+    content_length = response_headers.get("content-length")
+    return PinnedResponse(
+        status_code=int(status_parts[1]),
+        headers=response_headers,
+        reader=reader,
+        writer=writer,
+        initial_body=initial_body,
+        content_length=int(content_length) if content_length and content_length.isdigit() else None,
+        chunked="chunked" in transfer_encoding,
+        read_timeout=read_timeout,
+    )
+
+
+async def _read_line(
+    reader: asyncio.StreamReader,
+    pending: bytes,
+    read_timeout: float,
+) -> tuple[bytes, bytes]:
+    while b"\r\n" not in pending:
+        pending += await asyncio.wait_for(reader.read(4096), timeout=read_timeout)
+    line, pending = pending.split(b"\r\n", 1)
+    return line, pending
+
+
+async def _read_exact(
+    reader: asyncio.StreamReader,
+    pending: bytes,
+    size: int,
+    read_timeout: float,
+) -> tuple[bytes, bytes]:
+    while len(pending) < size:
+        pending += await asyncio.wait_for(reader.read(size - len(pending)), timeout=read_timeout)
+    return pending[:size], pending[size:]

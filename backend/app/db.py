@@ -3,6 +3,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import BACKEND_ROOT, get_settings
@@ -11,6 +12,22 @@ from app.core.config import BACKEND_ROOT, get_settings
 settings = get_settings()
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, echo=False, connect_args=connect_args)
+
+
+@event.listens_for(engine, "connect")
+def configure_sqlite_connection(dbapi_connection, connection_record) -> None:  # type: ignore[no-untyped-def]
+    del connection_record
+    if not settings.database_url.startswith("sqlite"):
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        if settings.database_url != "sqlite://":
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
 
 
 def init_db() -> None:

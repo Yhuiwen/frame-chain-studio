@@ -168,6 +168,8 @@ class ShotBase(SQLModel):
 
 
 class Shot(ShotBase, table=True):
+    __table_args__ = (UniqueConstraint("project_id", "sort_order", name="uq_shot_project_sort_order"),)
+
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
     sort_order: int = Field(default=0, index=True)
@@ -289,6 +291,7 @@ class GenerationTask(SQLModel, table=True):
     request_payload_json: str = Field(default="{}")
     response_summary_json: str = Field(default="{}")
     result_urls_json: str = Field(default="[]")
+    raw_result_urls_json: str = Field(default="[]")
     provider_config_snapshot_json: str = Field(default="{}")
     error_code: str | None = None
     error_message: str | None = None
@@ -322,6 +325,23 @@ class WorkerHeartbeat(SQLModel, table=True):
     metadata_json: str = Field(default="{}")
 
 
+class ProviderAssetCache(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("provider_id", "asset_id", "asset_sha256", name="uq_providerassetcache_provider_asset_sha"),
+        Index("ix_providerassetcache_provider_asset", "provider_id", "asset_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    provider_id: str = Field(index=True)
+    asset_id: int = Field(foreign_key="asset.id", index=True)
+    asset_sha256: str = Field(index=True)
+    reference_kind: str
+    reference_value: str = Field(repr=False)
+    expires_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class ProjectRender(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_projectrender_idempotency_key"),
@@ -339,6 +359,7 @@ class ProjectRender(SQLModel, table=True):
     completed_at: datetime | None = None
     locked_by: str | None = Field(default=None, index=True)
     locked_until: datetime | None = Field(default=None, index=True)
+    lock_version: int = Field(default=0)
     input_manifest_json: str = Field(default="[]")
     settings_json: str = Field(default="{}")
     progress: float = Field(default=0)

@@ -1,5 +1,6 @@
 from typing import Any
 from urllib.parse import quote
+from pathlib import Path
 
 import httpx
 
@@ -13,6 +14,7 @@ from app.providers.exceptions import (
     ProviderRateLimitError,
     ProviderRemoteServerError,
     ProviderTimeoutError,
+    ProviderUnsupportedCapabilityError,
 )
 from app.providers.mapping import (
     apply_request_mapping,
@@ -29,6 +31,7 @@ from app.providers.models import (
     ProviderCapabilities,
     ProviderJobResult,
     ProviderSubmitResult,
+    ProviderResultUrl,
     RemoteJobStatus,
     ResponseMappingConfig,
     VideoGenerationRequest,
@@ -121,6 +124,45 @@ class MappedAsyncHttpProvider(AsyncGenerationProvider):
             message=str(status_value),
             raw_response_summary=summarize_response(raw),
         )
+
+    async def upload_asset(self, path: Path, *, client_request_id: str) -> ProviderResultUrl:
+        if not self.config.upload_endpoint:
+            raise ProviderUnsupportedCapabilityError("PROVIDER_ASSET_UPLOAD_UNSUPPORTED")
+        headers = self._headers(client_request_id=client_request_id)
+        timeout = httpx.Timeout(self.config.upload_timeout_seconds or self.config.request_timeout_seconds)
+        safe_name = f"asset-{client_request_id[:32]}.bin"
+        try:
+            with path.open("rb") as handle:
+                response = await self._client.request(
+                    self.config.upload_method,
+                    self._build_url(self.config.upload_endpoint),
+                    data=self.config.upload_extra_fields,
+                    files={self.config.upload_file_field: (safe_name, handle, "application/octet-stream")},
+                    headers=headers,
+                    timeout=timeout,
+                    follow_redirects=False,
+                )
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+            raise ProviderTimeoutError("Provider asset upload timed out.", details={"error": str(exc)}) from exc
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.NetworkError) as exc:
+            raise ProviderNetworkError("Provider asset upload failed.", details={"error": str(exc)}) from exc
+        if response.status_code >= 400:
+            self._raise_for_status(response)
+        try:
+            raw = response.json()
+        except ValueError as exc:
+            raise ProviderInvalidResponseError("Provider upload returned non-JSON response.") from exc
+        url = None
+        if self.config.upload_response_url_path:
+            value = get_by_path(raw, self.config.upload_response_url_path, None)
+            url = value if isinstance(value, str) and value else None
+        file_id = None
+        if self.config.upload_response_file_id_path:
+            value = get_by_path(raw, self.config.upload_response_file_id_path, None)
+            file_id = value if isinstance(value, str) and value else None
+        if not url and not file_id:
+            raise ProviderInvalidResponseError("Provider upload response did not include a usable reference.")
+        return ProviderResultUrl(url=url or file_id or "", output_type="url" if url else "file_id")
 
     def _build_url(self, path: str) -> str:
         return f"{self.config.base_url.rstrip('/')}/{path.lstrip('/')}"

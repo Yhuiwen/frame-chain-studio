@@ -1,10 +1,11 @@
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { defineComponent } from "vue";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useProjectPolling } from "@/composables/useProjectPolling";
 import { useStudioStore } from "@/stores/studio";
+import { ElMessage } from "element-plus";
 
 vi.mock("element-plus", async () => {
   const actual = await vi.importActual<typeof import("element-plus")>("element-plus");
@@ -25,6 +26,11 @@ describe("useProjectPolling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("continues while active tasks exist and stops after terminal state", async () => {
@@ -147,5 +153,60 @@ describe("useProjectPolling", () => {
     expect(vi.getTimerCount()).toBe(1);
     wrapper.unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps retrying with exponential backoff and announces recovery once", async () => {
+    const store = useStudioStore();
+    store.current = {
+      id: 1,
+      name: "Demo",
+      description: "",
+      image_provider_id: null,
+      video_provider_id: null,
+      image_model: null,
+      video_model: null,
+      default_aspect_ratio: "16:9",
+      default_video_duration_seconds: null,
+      default_seed: null,
+      created_at: "",
+      updated_at: "",
+      shots: [],
+      assets: [],
+      logs: [],
+      tasks: [{ status: "RUNNING" } as never],
+      renders: [],
+      completion: {
+        total_shots: 0,
+        completed_shots: 0,
+        missing_shot_ids: [],
+        estimated_duration_seconds: 0,
+        can_render: false,
+        render_disabled_reason: null,
+      },
+      requests: [],
+    };
+    const refresh = vi
+      .spyOn(store, "refreshProjectDetail")
+      .mockRejectedValueOnce(new Error("network"))
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValue(undefined);
+    vi.spyOn(store, "refreshWorkers").mockResolvedValue(undefined);
+    const wrapper = mount(Harness);
+
+    await wrapper.find("button").trigger("click");
+    await vi.advanceTimersByTimeAsync(1800);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(ElMessage.warning).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(ElMessage.warning).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(ElMessage.success).toHaveBeenCalledWith("连接已恢复");
+    wrapper.unmount();
   });
 });

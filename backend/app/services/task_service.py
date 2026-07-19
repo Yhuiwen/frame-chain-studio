@@ -2,6 +2,7 @@ import json
 import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, or_, true, update
 from sqlmodel import Session, col, select
@@ -87,6 +88,7 @@ def create_generation_request(
     prompt_snapshot: str = "",
     negative_prompt_snapshot: str = "",
     input_asset_ids: list[int] | None = None,
+    commit: bool = True,
 ) -> GenerationRequest:
     request = GenerationRequest(
         project_id=project_id,
@@ -105,8 +107,11 @@ def create_generation_request(
         input_asset_ids=json.dumps(input_asset_ids or []),
     )
     session.add(request)
-    session.commit()
-    session.refresh(request)
+    if commit:
+        session.commit()
+        session.refresh(request)
+    else:
+        session.flush()
     return request
 
 
@@ -178,6 +183,7 @@ def create_task_attempt(
     request_payload: dict[str, Any] | None = None,
     provider_config_snapshot: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    commit: bool = True,
 ) -> GenerationTask:
     resolved_type = task_type or task_type_from_generation_kind(generation_request.kind)
     base_key = idempotency_key or (
@@ -225,13 +231,19 @@ def create_task_attempt(
         provider_config_snapshot_json=dumps_sanitized(provider_config_snapshot or {"provider_id": provider_id}),
     )
     session.add(task)
-    session.commit()
-    session.refresh(task)
+    if commit:
+        session.commit()
+        session.refresh(task)
+    else:
+        session.flush()
     if task.root_task_id is None:
         task.root_task_id = task.id
         session.add(task)
-        session.commit()
-        session.refresh(task)
+        if commit:
+            session.commit()
+            session.refresh(task)
+        else:
+            session.flush()
     session.add(
         TaskStateChange(
             task_id=task.id or 0,
@@ -241,8 +253,11 @@ def create_task_attempt(
             reason="Task attempt created.",
         )
     )
-    session.commit()
-    session.refresh(task)
+    if commit:
+        session.commit()
+        session.refresh(task)
+    else:
+        session.flush()
     return task
 
 
@@ -337,6 +352,8 @@ def transition_task(
                 "lock_acquired_at": None,
             }
         )
+        if target in {ReliableTaskStatus.SUCCEEDED, ReliableTaskStatus.FAILED, ReliableTaskStatus.CANCELLED}:
+            values["raw_result_urls_json"] = "[]"
     if target == ReliableTaskStatus.CANCELLED:
         values["cancelled_at"] = task.cancelled_at or current_time
     statement = (
@@ -359,6 +376,13 @@ def transition_task(
             created_at=current_time,
         )
     )
+    if target in {ReliableTaskStatus.SUCCEEDED, ReliableTaskStatus.FAILED, ReliableTaskStatus.CANCELLED}:
+        session.execute(
+            update(GenerationTaskResult)
+            .where(col(GenerationTaskResult.generation_task_id) == task_id)
+            .values(source_url="", updated_at=current_time)
+            .execution_options(synchronize_session=False)
+        )
     session.commit()
     return get_task(session, task_id)
 
@@ -546,7 +570,7 @@ def mark_task_result_ready(
 ) -> GenerationTask:
     if not result_urls:
         raise AppError("TASK_RESULT_URLS_REQUIRED", "At least one result URL is required.", 409)
-    sanitized_urls: list[dict[str, Any]] = []
+    raw_urls: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in result_urls:
         url = str(item.get("url", ""))
@@ -555,18 +579,22 @@ def mark_task_result_ready(
         if len(url) > 8 and url[1:3] == ":\\":
             continue
         seen.add(url)
-        sanitized_urls.append(redact_sensitive(item))
-    if not sanitized_urls:
+        raw_urls.append(dict(item))
+    if not raw_urls:
         raise AppError("TASK_RESULT_URLS_REQUIRED", "At least one valid result URL is required.", 409)
     current_time = db_time(now)
     task = get_task(session, task_id)
-    existing_urls = loads_json_list(task.result_urls_json)
-    existing_by_url = {
-        str(item.get("url")): item for item in existing_urls if isinstance(item, dict) and item.get("url")
+    existing_raw = [item for item in loads_json_list(task.raw_result_urls_json) if isinstance(item, dict)]
+    existing_by_hash = {
+        source_url_hash(str(item.get("url"))): item for item in existing_raw if isinstance(item.get("url"), str)
     }
-    for item in sanitized_urls:
-        existing_by_url[str(item["url"])] = item
-    task.result_urls_json = dumps_sanitized(list(existing_by_url.values()))
+    for item in raw_urls:
+        existing_by_hash[source_url_hash(str(item["url"]))] = item
+    raw_values = list(existing_by_hash.values())
+    task.raw_result_urls_json = dumps_sanitized(raw_values)
+    task.result_urls_json = dumps_sanitized(
+        [result_url_summary(item, is_primary=index == 0) for index, item in enumerate(raw_values)]
+    )
     task.remote_status = remote_status
     task.remote_progress = remote_progress
     task.processing_stage = "result_ready"
@@ -626,6 +654,22 @@ def source_url_hash(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+def result_url_summary(item: dict[str, Any], *, is_primary: bool = False) -> dict[str, Any]:
+    url = str(item.get("url", ""))
+    parsed = urlsplit(url)
+    name = parsed.path.rsplit("/", 1)[-1] if parsed.path else ""
+    if len(name) > 80:
+        name = name[:77] + "..."
+    return {
+        "url_hash": source_url_hash(url),
+        "host": parsed.hostname or "",
+        "path_summary": f"/.../{name}" if name and parsed.path.count("/") > 1 else parsed.path or "/",
+        "mime_type": item.get("mime_type") if isinstance(item.get("mime_type"), str) else None,
+        "output_type": item.get("output_type") if isinstance(item.get("output_type"), str) else None,
+        "is_primary": is_primary,
+    }
+
+
 def initialize_task_results(
     session: Session,
     task_id: int,
@@ -634,7 +678,9 @@ def initialize_task_results(
     now: datetime | None = None,
 ) -> list[GenerationTaskResult]:
     task = get_task(session, task_id)
-    urls = [item for item in loads_json_list(task.result_urls_json) if isinstance(item, dict) and item.get("url")]
+    urls = [item for item in loads_json_list(task.raw_result_urls_json) if isinstance(item, dict) and item.get("url")]
+    if not urls:
+        urls = [item for item in loads_json_list(task.result_urls_json) if isinstance(item, dict) and item.get("url")]
     if not urls:
         raise AppError("TASK_RESULT_URLS_REQUIRED", "Task has no result URLs to process.", 409)
     expected = expected_media_kind_for_task(task)

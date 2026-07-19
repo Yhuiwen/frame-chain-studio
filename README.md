@@ -488,6 +488,8 @@ Result downloads use a dedicated `httpx.AsyncClient` with `trust_env=False`, no 
 
 Only `http` and `https` URLs are accepted. The downloader rejects credentials, empty hosts, invalid ports, fragments, overlong URLs, unsupported schemes, localhost variants, loopback, private, link-local, multicast, unspecified, reserved, and metadata-service addresses. DNS is resolved before download, and every resolved address must pass the same IP checks.
 
+HTTPS result downloads use DNS-pinned TCP connections. The downloader validates the URL and resolved addresses first, then connects the TLS socket to one of those validated IP addresses while preserving the original hostname for TLS SNI, certificate hostname verification, and the HTTP Host header. The downloader does not use system proxies or Provider Authorization/Cookie/API-key headers for result URLs.
+
 Redirects are handled manually. Each `Location` is normalized, resolved, and checked again. HTTPS to HTTP downgrade is rejected; HTTP to HTTPS is allowed. Redirect loops and redirects beyond `FCS_RESULT_MAX_REDIRECTS` fail.
 
 Fake Provider results live on private/local addresses, so tests and local development may opt in:
@@ -587,6 +589,17 @@ Worker status variables:
 - `FCS_DEFAULT_VIDEO_PROVIDER_ID`: system fallback for video generation, default unset; local mock remains available.
 
 The project detail page now shows Provider settings, Worker online/offline hints, request-level Provider/model/mode details, and task attempts with remote status, shortened remote job ID, retry state, deadlines, result processing state, and Cancel/Retry commands. It does not expose raw result URLs, local storage paths, Provider secrets, or runnable UI commands beyond fixed copyable process commands.
+
+Provider upload cache rows may contain short-lived access references returned by remote Providers. Normal project, Asset, Provider, and debug API responses do not expose these values, and cleanup logs include only hashes and safe URL summaries. The SQLite database file and backups must still be protected as sensitive data.
+
+Clean expired Provider upload cache rows with:
+
+```powershell
+cd backend
+python -m app.workers.provider_asset_cache_cli cleanup --batch-size 500
+python -m app.workers.provider_asset_cache_cli cleanup --dry-run
+python -m app.workers.provider_asset_cache_cli cleanup --older-than 168
+```
 
 ## Database Migrations
 

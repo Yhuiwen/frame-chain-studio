@@ -1,7 +1,11 @@
 import json
+import logging
+import os
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import uuid4
 
+from PIL import Image, UnidentifiedImageError
 from sqlmodel import Session, col, select
 
 from app.core.config import get_settings
@@ -15,18 +19,35 @@ from app.models.entities import (
     GenerationRequest,
     GenerationTaskStatus,
     GenerationTask,
-    ProjectRender,
+    GenerationTaskResult,
     Project,
+    ProjectRender,
+    ProviderAssetCache,
     ReliableTaskStatus,
     Shot,
     ShotStateChange,
     ShotStatus,
+    TaskCommand,
     TaskLog,
+    TaskStateChange,
+    WorkerHeartbeat,
     utcnow,
 )
 from app.models.schemas import ProjectCreate, ProjectUpdate, ReorderShot, ShotCreate, ShotUpdate
 from app.providers.base import GenerationProvider
 from app.services import task_service
+
+ACTIVE_GENERATION_STATUSES = task_service.ACTIVE_TASK_STATUSES
+ACTIVE_RENDER_STATUSES = {
+    "QUEUED",
+    "PREPARING",
+    "NORMALIZING",
+    "CONCATENATING",
+    "VALIDATING",
+    "FINALIZING",
+}
+
+logger = logging.getLogger(__name__)
 
 
 def get_project_or_404(session: Session, project_id: int) -> Project:
@@ -44,7 +65,14 @@ def get_shot_or_404(session: Session, shot_id: int) -> Shot:
 
 
 def create_project(session: Session, payload: ProjectCreate) -> Project:
-    project = Project(name=payload.name, description=payload.description)
+    if hasattr(payload, "model_dump"):
+        data = payload.model_dump()
+    else:
+        data = {
+            "name": getattr(payload, "name"),
+            "description": getattr(payload, "description", ""),
+        }
+    project = Project(**data)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -65,8 +93,44 @@ def update_project(session: Session, project_id: int, payload: ProjectUpdate) ->
 
 def delete_project(session: Session, project_id: int) -> None:
     project = get_project_or_404(session, project_id)
-    session.delete(project)
-    session.commit()
+    _ensure_project_deletable(session, project_id)
+    paths = _asset_paths_for_project(session, project_id)
+    try:
+        task_ids = [
+            task.id or 0
+            for task in session.exec(select(GenerationTask).where(GenerationTask.project_id == project_id)).all()
+        ]
+        _delete_task_records(session, task_ids)
+        for log in session.exec(select(TaskLog).where(col(TaskLog.shot_id).in_(_shot_ids(session, project_id)))).all():
+            session.delete(log)
+        for change in session.exec(
+            select(ShotStateChange).where(col(ShotStateChange.shot_id).in_(_shot_ids(session, project_id)))
+        ).all():
+            session.delete(change)
+        for render in session.exec(select(ProjectRender).where(ProjectRender.project_id == project_id)).all():
+            session.delete(render)
+        for request in session.exec(select(GenerationRequest).where(GenerationRequest.project_id == project_id)).all():
+            session.delete(request)
+        for shot in session.exec(select(Shot).where(Shot.project_id == project_id)).all():
+            shot.start_frame_asset_id = None
+            session.add(shot)
+        session.flush()
+        for asset in session.exec(select(Asset).where(Asset.project_id == project_id)).all():
+            asset.source_asset_id = None
+            session.add(asset)
+        session.flush()
+        assets_to_delete = list(session.exec(select(Asset).where(Asset.project_id == project_id)).all())
+        _delete_provider_asset_caches(session, [asset.id for asset in assets_to_delete if asset.id is not None])
+        for asset in assets_to_delete:
+            session.delete(asset)
+        for shot in session.exec(select(Shot).where(Shot.project_id == project_id)).all():
+            session.delete(shot)
+        session.delete(project)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    _cleanup_unreferenced_paths(session, paths)
 
 
 def list_projects(session: Session) -> list[Project]:
@@ -104,6 +168,7 @@ def update_shot(session: Session, shot_id: int, payload: ShotUpdate) -> Shot:
 def delete_shot(session: Session, shot_id: int) -> None:
     shot = get_shot_or_404(session, shot_id)
     project_id = shot.project_id
+    _ensure_shot_deletable(session, shot)
     deleted_order = shot.sort_order
     next_shot = session.exec(
         select(Shot)
@@ -115,10 +180,15 @@ def delete_shot(session: Session, shot_id: int) -> None:
         .where(Shot.project_id == project_id, Shot.sort_order < deleted_order)
         .order_by(col(Shot.sort_order).desc())
     ).first()
+    paths = _asset_paths_for_shot(session, shot_id)
     try:
         if next_shot is not None:
             relink_start_frame_after_delete(session, previous_shot, next_shot)
 
+        task_ids = [
+            task.id or 0 for task in session.exec(select(GenerationTask).where(GenerationTask.shot_id == shot_id)).all()
+        ]
+        _delete_task_records(session, task_ids)
         for state_change in session.exec(select(ShotStateChange).where(ShotStateChange.shot_id == shot_id)).all():
             session.delete(state_change)
         for log in session.exec(select(TaskLog).where(TaskLog.shot_id == shot_id)).all():
@@ -127,11 +197,26 @@ def delete_shot(session: Session, shot_id: int) -> None:
             session.delete(request)
         assets_to_delete = list(session.exec(select(Asset).where(Asset.shot_id == shot_id)).all())
         asset_ids_to_delete = {asset.id for asset in assets_to_delete if asset.id is not None}
+        for other_shot in session.exec(select(Shot).where(col(Shot.start_frame_asset_id).in_(asset_ids_to_delete))).all():
+            other_shot.start_frame_asset_id = None
+            other_shot.updated_at = utcnow()
+            session.add(other_shot)
+        for task in session.exec(select(GenerationTask).where(col(GenerationTask.result_asset_id).in_(asset_ids_to_delete))).all():
+            task.result_asset_id = None
+            session.add(task)
+        for result in session.exec(select(GenerationTaskResult).where(col(GenerationTaskResult.asset_id).in_(asset_ids_to_delete))).all():
+            result.asset_id = None
+            session.add(result)
+        _delete_provider_asset_caches(session, list(asset_ids_to_delete))
+        session.flush()
         for asset in assets_to_delete:
             references = session.exec(select(Asset).where(Asset.source_asset_id == asset.id)).all()
             external_references = [reference for reference in references if reference.id not in asset_ids_to_delete]
             if not external_references:
                 session.delete(asset)
+            else:
+                asset.shot_id = None
+                session.add(asset)
 
         session.delete(shot)
         remaining = list(
@@ -145,6 +230,126 @@ def delete_shot(session: Session, shot_id: int) -> None:
     except Exception:
         session.rollback()
         raise
+    _cleanup_unreferenced_paths(session, paths)
+
+
+def _shot_ids(session: Session, project_id: int) -> list[int]:
+    return [
+        shot_id
+        for shot_id in session.exec(select(Shot.id).where(Shot.project_id == project_id)).all()
+        if shot_id is not None
+    ]
+
+
+def _ensure_shot_deletable(session: Session, shot: Shot) -> None:
+    active = session.exec(
+        select(GenerationTask).where(
+            GenerationTask.shot_id == shot.id,
+            col(GenerationTask.status).in_([status.value for status in ACTIVE_GENERATION_STATUSES]),
+        )
+    ).first()
+    if active:
+        raise AppError("SHOT_HAS_ACTIVE_TASKS", "Shot has active generation tasks.", 409)
+    active_render = session.exec(
+        select(ProjectRender).where(
+            ProjectRender.project_id == shot.project_id,
+            col(ProjectRender.status).in_(list(ACTIVE_RENDER_STATUSES)),
+        )
+    ).first()
+    if active_render:
+        raise AppError("PROJECT_HAS_ACTIVE_RENDER", "Project has an active render.", 409)
+
+
+def _ensure_project_deletable(session: Session, project_id: int) -> None:
+    active = session.exec(
+        select(GenerationTask).where(
+            GenerationTask.project_id == project_id,
+            col(GenerationTask.status).in_([status.value for status in ACTIVE_GENERATION_STATUSES]),
+        )
+    ).first()
+    if active:
+        raise AppError("PROJECT_HAS_ACTIVE_TASKS", "Project has active generation tasks.", 409)
+    active_render = session.exec(
+        select(ProjectRender).where(
+            ProjectRender.project_id == project_id,
+            col(ProjectRender.status).in_(list(ACTIVE_RENDER_STATUSES)),
+        )
+    ).first()
+    if active_render:
+        raise AppError("PROJECT_HAS_ACTIVE_RENDER", "Project has an active render.", 409)
+
+
+def _delete_task_records(session: Session, task_ids: list[int]) -> None:
+    if not task_ids:
+        return
+    for heartbeat in session.exec(select(WorkerHeartbeat).where(col(WorkerHeartbeat.current_task_id).in_(task_ids))).all():
+        heartbeat.current_task_id = None
+        session.add(heartbeat)
+    for change in session.exec(select(TaskStateChange).where(col(TaskStateChange.task_id).in_(task_ids))).all():
+        session.delete(change)
+    for command in session.exec(
+        select(TaskCommand).where(
+            col(TaskCommand.task_id).in_(task_ids) | col(TaskCommand.result_task_id).in_(task_ids)
+        )
+    ).all():
+        session.delete(command)
+    for result in session.exec(select(GenerationTaskResult).where(col(GenerationTaskResult.generation_task_id).in_(task_ids))).all():
+        session.delete(result)
+    for log in session.exec(select(TaskLog).where(col(TaskLog.task_id).in_(task_ids))).all():
+        session.delete(log)
+    for task in session.exec(select(GenerationTask).where(col(GenerationTask.id).in_(task_ids))).all():
+        session.delete(task)
+
+
+def _delete_provider_asset_caches(session: Session, asset_ids: list[int]) -> None:
+    if not asset_ids:
+        return
+    for cache in session.exec(select(ProviderAssetCache).where(col(ProviderAssetCache.asset_id).in_(asset_ids))).all():
+        session.delete(cache)
+
+
+def _asset_paths_for_shot(session: Session, shot_id: int) -> list[Path]:
+    return [Path(asset.path) for asset in session.exec(select(Asset).where(Asset.shot_id == shot_id)).all()]
+
+
+def _asset_paths_for_project(session: Session, project_id: int) -> list[Path]:
+    return [Path(asset.path) for asset in session.exec(select(Asset).where(Asset.project_id == project_id)).all()]
+
+
+def _cleanup_unreferenced_paths(session: Session, paths: list[Path]) -> None:
+    settings = get_settings()
+    storage_root = settings.storage_dir.resolve()
+    remaining_paths = {str(Path(asset.path).resolve()) for asset in session.exec(select(Asset)).all()}
+    remaining_raw_paths = {str(Path(asset.path).absolute()) for asset in session.exec(select(Asset)).all()}
+    for path in paths:
+        try:
+            raw_path = Path(path)
+            absolute_path = raw_path if raw_path.is_absolute() else settings.storage_dir / raw_path
+            if absolute_path.is_symlink():
+                if str(absolute_path.absolute()) in remaining_raw_paths:
+                    continue
+                parent = absolute_path.parent.resolve()
+                if parent == storage_root or storage_root in parent.parents:
+                    absolute_path.unlink(missing_ok=True)
+                continue
+            resolved = path.resolve()
+            if resolved == storage_root or storage_root not in resolved.parents:
+                continue
+            if str(resolved) in remaining_paths:
+                continue
+            if resolved.is_file():
+                resolved.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("failed to cleanup asset file path=%s error=%s", _safe_storage_path(path), exc.__class__.__name__)
+            continue
+
+
+def _safe_storage_path(path: Path) -> str:
+    settings = get_settings()
+    try:
+        return Path(path).resolve().relative_to(settings.storage_dir.resolve()).as_posix()
+    except ValueError:
+        return Path(path).name
 
 
 def relink_start_frame_after_delete(
@@ -192,9 +397,25 @@ def list_project_shots(session: Session, project_id: int) -> list[Shot]:
 
 def reorder_shots(session: Session, project_id: int, items: list[ReorderShot]) -> list[Shot]:
     shots = {shot.id: shot for shot in list_project_shots(session, project_id)}
-    requested_ids = {item.id for item in items}
+    if len(items) != len(shots):
+        raise AppError("INVALID_SHOT_ORDER", "Reorder payload must include every shot in the project.", 400)
+    ids = [item.id for item in items]
+    if len(set(ids)) != len(ids):
+        raise AppError("INVALID_SHOT_ORDER", "Reorder payload contains duplicate shot IDs.", 400)
+    requested_ids = set(ids)
     if requested_ids != set(shots):
         raise AppError("INVALID_SHOT_ORDER", "Reorder payload must include every shot in the project.", 400)
+    orders = [item.sort_order for item in items]
+    if len(set(orders)) != len(orders):
+        raise AppError("INVALID_SHOT_ORDER", "Reorder payload contains duplicate sort orders.", 400)
+    if sorted(orders) != list(range(len(shots))):
+        raise AppError("INVALID_SHOT_ORDER", "Sort orders must be exactly 0..n-1.", 400)
+    offset = len(shots) + 1000
+    for item in items:
+        shot = shots[item.id]
+        shot.sort_order = item.sort_order + offset
+        session.add(shot)
+    session.flush()
     for item in items:
         shot = shots[item.id]
         shot.sort_order = item.sort_order
@@ -210,20 +431,27 @@ def log_state(
     from_status: ShotStatus | None,
     to_status: ShotStatus,
     reason: str,
+    commit: bool = True,
 ) -> None:
     session.add(ShotStateChange(shot_id=shot.id or 0, from_status=from_status, to_status=to_status, reason=reason))
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
 
 
-def transition_shot(session: Session, shot: Shot, target: ShotStatus, reason: str) -> Shot:
+def transition_shot(session: Session, shot: Shot, target: ShotStatus, reason: str, *, commit: bool = True) -> Shot:
     previous = shot.status
     ensure_transition_allowed(previous, target)
     shot.status = target
     shot.updated_at = utcnow()
     session.add(shot)
-    session.commit()
-    session.refresh(shot)
-    log_state(session, shot, previous, target, reason)
+    if commit:
+        session.commit()
+        session.refresh(shot)
+    else:
+        session.flush()
+    log_state(session, shot, previous, target, reason, commit=commit)
     return shot
 
 
@@ -234,6 +462,7 @@ def log_task(
     message: str,
     level: str = "INFO",
     task: GenerationTask | None = None,
+    commit: bool = True,
 ) -> None:
     session.add(
         TaskLog(
@@ -244,7 +473,10 @@ def log_task(
             message=message,
         )
     )
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
 
 
 def create_generation_request(
@@ -261,6 +493,7 @@ def create_generation_request(
     allow_capability_fallback: bool = False,
     request_payload: dict[str, object] | None = None,
     provider_config_snapshot: dict[str, object] | None = None,
+    commit: bool = True,
 ) -> GenerationRequest:
     request = task_service.create_generation_request(
         session,
@@ -278,6 +511,7 @@ def create_generation_request(
         prompt_snapshot=shot.prompt,
         negative_prompt_snapshot=shot.negative_prompt,
         input_asset_ids=input_asset_ids or [],
+        commit=commit,
     )
     task = task_service.create_task_attempt(
         session,
@@ -297,9 +531,105 @@ def create_generation_request(
             "allow_capability_fallback": allow_capability_fallback,
         },
         provider_config_snapshot=provider_config_snapshot or {"provider_id": provider_id, "mode": "local_fixture"},
+        commit=commit,
     )
-    log_task(session, request, shot, f"{kind.value.lower()} request created", task=task)
+    log_task(session, request, shot, f"{kind.value.lower()} request created", task=task, commit=commit)
     return request
+
+
+def active_task_for_shot(session: Session, shot_id: int) -> GenerationTask | None:
+    return session.exec(
+        select(GenerationTask)
+        .where(
+            GenerationTask.shot_id == shot_id,
+            col(GenerationTask.status).in_([status.value for status in task_service.ACTIVE_TASK_STATUSES]),
+        )
+        .order_by(col(GenerationTask.created_at).desc())
+    ).first()
+
+
+def start_keyframe_generation_atomic(
+    session: Session,
+    *,
+    shot: Shot,
+    resolved: object,
+    request_payload: dict[str, object],
+) -> GenerationRequest:
+    if shot.status != ShotStatus.DRAFT:
+        raise AppError("INVALID_SHOT_STATE", "Keyframe generation requires a draft shot.", 409)
+    if shot.id is None:
+        raise AppError("SHOT_NOT_PERSISTED", "Shot must be persisted before generation.", 500)
+    if active_task_for_shot(session, shot.id):
+        raise AppError("SHOT_HAS_ACTIVE_TASKS", "Shot already has an active generation task.", 409)
+    try:
+        request = create_generation_request(
+            session,
+            shot,
+            GenerationKind.KEYFRAME,
+            input_asset_ids=getattr(resolved, "input_asset_ids"),
+            provider_id=getattr(resolved, "provider_id"),
+            model=getattr(resolved, "model"),
+            generation_mode=getattr(resolved, "generation_mode").value,
+            aspect_ratio=getattr(resolved, "aspect_ratio"),
+            seed=getattr(resolved, "seed"),
+            duration_seconds=getattr(resolved, "duration_seconds"),
+            allow_capability_fallback=getattr(resolved, "allow_capability_fallback"),
+            request_payload=request_payload,
+            provider_config_snapshot={
+                "provider_id": getattr(resolved, "provider_id"),
+                "configured": getattr(getattr(resolved, "provider_info", None), "configured", True),
+            },
+            commit=False,
+        )
+        transition_shot(session, shot, ShotStatus.KEYFRAME_GENERATING, "keyframe_generation_started", commit=False)
+        session.commit()
+        session.refresh(request)
+        return request
+    except Exception:
+        session.rollback()
+        raise
+
+
+def start_video_generation_atomic(
+    session: Session,
+    *,
+    shot: Shot,
+    resolved: object,
+    request_payload: dict[str, object],
+) -> GenerationRequest:
+    if shot.status != ShotStatus.KEYFRAME_APPROVED:
+        raise AppError("KEYFRAME_NOT_APPROVED", "Video generation requires an approved keyframe.", 409)
+    if shot.id is None:
+        raise AppError("SHOT_NOT_PERSISTED", "Shot must be persisted before generation.", 500)
+    if active_task_for_shot(session, shot.id):
+        raise AppError("SHOT_HAS_ACTIVE_TASKS", "Shot already has an active generation task.", 409)
+    try:
+        request = create_generation_request(
+            session,
+            shot,
+            GenerationKind.VIDEO,
+            input_asset_ids=getattr(resolved, "input_asset_ids"),
+            provider_id=getattr(resolved, "provider_id"),
+            model=getattr(resolved, "model"),
+            generation_mode=getattr(resolved, "generation_mode").value,
+            aspect_ratio=getattr(resolved, "aspect_ratio"),
+            seed=getattr(resolved, "seed"),
+            duration_seconds=getattr(resolved, "duration_seconds"),
+            allow_capability_fallback=getattr(resolved, "allow_capability_fallback"),
+            request_payload=request_payload,
+            provider_config_snapshot={
+                "provider_id": getattr(resolved, "provider_id"),
+                "configured": getattr(getattr(resolved, "provider_info", None), "configured", True),
+            },
+            commit=False,
+        )
+        transition_shot(session, shot, ShotStatus.VIDEO_GENERATING, "video_generation_started", commit=False)
+        session.commit()
+        session.refresh(request)
+        return request
+    except Exception:
+        session.rollback()
+        raise
 
 
 def start_keyframe_generation(session: Session, shot_id: int) -> GenerationRequest:
@@ -448,72 +778,108 @@ def approve_video(session: Session, shot_id: int) -> Shot:
     shot = get_shot_or_404(session, shot_id)
     if shot.status == ShotStatus.COMPLETED:
         return shot
-    transition_shot(session, shot, ShotStatus.VIDEO_APPROVED, "video_approved")
+    if shot.status != ShotStatus.VIDEO_REVIEW:
+        raise AppError("INVALID_SHOT_STATE", "Video approval requires VIDEO_REVIEW status.", 409)
     video = latest_asset(session, shot_id, AssetType.VIDEO)
     if video is None:
         raise AppError("VIDEO_ASSET_MISSING", "Cannot extract tail frame without a video asset.", 409)
-    tail_path = (
-        settings.storage_dir
-        / f"project-{shot.project_id}"
-        / f"shot-{shot.id}"
-        / f"tail-frame-shot-{shot.id}.png"
-    )
-    extract_tail_frame(Path(video.path), tail_path)
-    tail_asset = session.exec(
-        select(Asset).where(
-            Asset.shot_id == shot.id,
-            Asset.type == AssetType.TAIL_FRAME,
-            Asset.source_asset_id == video.id,
-        )
-    ).first()
-    if tail_asset is None:
-        tail_asset = Asset(
-            project_id=shot.project_id,
-            shot_id=shot.id,
-            type=AssetType.TAIL_FRAME,
-            path=str(tail_path),
-            mime_type="image/png",
-            source_asset_id=video.id,
-        )
-        session.add(tail_asset)
-        session.commit()
-        session.refresh(tail_asset)
-    transition_shot(session, shot, ShotStatus.TAIL_FRAME_LOCKED, "tail_frame_extracted")
-    next_shot = session.exec(
-        select(Shot)
-        .where(Shot.project_id == shot.project_id, Shot.sort_order > shot.sort_order)
-        .order_by(col(Shot.sort_order))
-    ).first()
-    if next_shot and tail_asset.id:
-        start_asset = session.exec(
-            select(Asset).where(
-                Asset.shot_id == next_shot.id,
-                Asset.type == AssetType.START_FRAME,
-                Asset.source_asset_id == tail_asset.id,
-            )
-        ).first()
-        if start_asset is None:
-            start_asset = Asset(
-                project_id=shot.project_id,
-                shot_id=next_shot.id,
-                type=AssetType.START_FRAME,
-                path=tail_asset.path,
-                mime_type=tail_asset.mime_type,
-                source_asset_id=tail_asset.id,
-            )
-            session.add(start_asset)
+    video_path = Path(video.path)
+    if not video_path.exists():
+        raise AppError("VIDEO_ASSET_FILE_MISSING", "Cannot extract tail frame because the video file is missing.", 409)
+    temp_dir = settings.storage_dir / "temp" / "tails"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_tail_path = temp_dir / f"shot-{shot.id}-{uuid4().hex}.png"
+    final_tail_path = settings.storage_dir / f"project-{shot.project_id}" / f"shot-{shot.id}" / f"tail-frame-shot-{shot.id}.png"
+    try:
+        extract_tail_frame(video_path, temp_tail_path)
+        _validate_tail_frame_temp(temp_tail_path, settings.storage_dir)
+    except Exception:
+        temp_tail_path.unlink(missing_ok=True)
+        raise
+    final_moved = False
+    try:
+        final_tail_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temp_tail_path, final_tail_path)
+        final_moved = True
+        try:
+            tail_asset = session.exec(
+                select(Asset).where(
+                    Asset.shot_id == shot.id,
+                    Asset.type == AssetType.TAIL_FRAME,
+                    Asset.source_asset_id == video.id,
+                )
+            ).first()
+            transition_shot(session, shot, ShotStatus.VIDEO_APPROVED, "video_approved", commit=False)
+            if tail_asset is None:
+                tail_asset = Asset(
+                    project_id=shot.project_id,
+                    shot_id=shot.id,
+                    type=AssetType.TAIL_FRAME,
+                    path=str(final_tail_path),
+                    mime_type="image/png",
+                    source_asset_id=video.id,
+                )
+                session.add(tail_asset)
+                session.flush()
+            else:
+                tail_asset.path = str(final_tail_path)
+                session.add(tail_asset)
+                session.flush()
+            transition_shot(session, shot, ShotStatus.TAIL_FRAME_LOCKED, "tail_frame_extracted", commit=False)
+            next_shot = session.exec(
+                select(Shot)
+                .where(Shot.project_id == shot.project_id, Shot.sort_order > shot.sort_order)
+                .order_by(col(Shot.sort_order))
+            ).first()
+            if next_shot and tail_asset.id:
+                for existing_start in session.exec(
+                    select(Asset).where(Asset.shot_id == next_shot.id, Asset.type == AssetType.START_FRAME)
+                ).all():
+                    session.delete(existing_start)
+                start_asset = Asset(
+                    project_id=shot.project_id,
+                    shot_id=next_shot.id,
+                    type=AssetType.START_FRAME,
+                    path=tail_asset.path,
+                    mime_type=tail_asset.mime_type,
+                    source_asset_id=tail_asset.id,
+                )
+                session.add(start_asset)
+                session.flush()
+                next_shot.start_frame_asset_id = start_asset.id
+                next_shot.updated_at = utcnow()
+                session.add(next_shot)
+            transition_shot(session, shot, ShotStatus.COMPLETED, "shot_completed", commit=False)
             session.commit()
-            session.refresh(start_asset)
-        next_shot.start_frame_asset_id = start_asset.id
-        next_shot.updated_at = utcnow()
-        session.add(next_shot)
-        session.commit()
-    return transition_shot(session, shot, ShotStatus.COMPLETED, "shot_completed")
+        except Exception:
+            session.rollback()
+            raise
+        session.refresh(shot)
+        return shot
+    except Exception:
+        temp_tail_path.unlink(missing_ok=True)
+        if final_moved:
+            final_tail_path.unlink(missing_ok=True)
+        raise
 
 
 def reject_video(session: Session, shot_id: int) -> Shot:
     shot = get_shot_or_404(session, shot_id)
     return transition_shot(session, shot, ShotStatus.KEYFRAME_APPROVED, "video_rejected")
+
+
+def _validate_tail_frame_temp(path: Path, storage_dir: Path) -> None:
+    resolved = path.resolve()
+    storage_root = storage_dir.resolve()
+    if resolved == storage_root or storage_root not in resolved.parents:
+        raise AppError("TAIL_FRAME_INVALID", "Tail frame temporary file is outside storage.", 500)
+    if not resolved.exists() or not resolved.is_file() or resolved.stat().st_size <= 0:
+        raise AppError("TAIL_FRAME_INVALID", "Tail frame extraction produced an empty file.", 500)
+    try:
+        with Image.open(resolved) as image:
+            image.verify()
+    except (OSError, UnidentifiedImageError) as exc:
+        raise AppError("TAIL_FRAME_INVALID", "Tail frame extraction produced an invalid image.", 500) from exc
 
 
 def project_detail(
@@ -611,11 +977,11 @@ def task_payload(session: Session, task: GenerationTask) -> dict[str, object]:
     result_items = task_service.loads_json_list(task.result_urls_json)
     result_hosts = sorted(
         {
-            parsed.hostname
+            str(item.get("host") or parsed.hostname)
             for item in result_items
             if isinstance(item, dict)
             for parsed in [urlsplit(str(item.get("url", "")))]
-            if parsed.hostname
+            if item.get("host") or parsed.hostname
         }
     )
     processing_status = task_service.primary_result_status(session, task.id or 0)
