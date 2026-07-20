@@ -22,6 +22,7 @@ $BaseUrl = "http://127.0.0.1:$BackendPort/api"
 $FakeBaseUrl = "http://127.0.0.1:$FakeProviderPort/fake/v1"
 $ProcessItems = @()
 $OriginalError = $null
+$ProviderUsageEvidence = [ordered]@{}
 $Summary = [ordered]@{
   run_root = ".run/e2e/$RunId"
   database = "isolated-temp-sqlite"
@@ -32,6 +33,7 @@ $Summary = [ordered]@{
   worker_restart = [ordered]@{ skipped = [bool]$SkipWorkerRestart }
   script_storyboard = $null
   structured_continuity = $null
+  provider_usage = $null
   provider_requests = @()
   range = @()
   render = $null
@@ -365,6 +367,107 @@ function Get-AssetById($Detail, $AssetId) {
 
 function Get-FakeStats {
   return Invoke-RestMethod -Method GET -Uri "$FakeBaseUrl/test/stats" -TimeoutSec 5
+}
+
+function Configure-ProviderCostLedger($ProjectId) {
+  Write-Host "==> Provider profile and cost ledger setup"
+  $profile = Invoke-Api "POST" "/provider-profiles" @{
+    name = "E2E Fake HTTP"
+    provider_key = "fake-http"
+    adapter_type = "FAKE"
+    display_name = "Fake HTTP Provider"
+    base_url = "http://127.0.0.1:$FakeProviderPort"
+    enabled = $true
+    config = @{}
+  }
+  $imageModel = Invoke-Api "POST" "/provider-profiles/$($profile.id)/models" @{
+    model_key = "fake-image"
+    display_name = "Fake Image"
+    generation_type = "IMAGE"
+    enabled = $true
+    capabilities = @{ supported_aspect_ratios = @("16:9") }
+    limits = @{ max_reference_images = 2 }
+    pricing = @{ rules = @(@{ unit = "REQUEST"; price = "0" }, @{ unit = "INPUT_IMAGE"; price = "0" }) }
+    currency = "USD"
+  }
+  $videoModel = Invoke-Api "POST" "/provider-profiles/$($profile.id)/models" @{
+    model_key = "fake-video"
+    display_name = "Fake Video"
+    generation_type = "VIDEO"
+    enabled = $true
+    capabilities = @{ first_last_frame_video = $true; supported_aspect_ratios = @("16:9") }
+    limits = @{ max_duration_seconds = 12 }
+    pricing = @{ rules = @(@{ unit = "REQUEST"; price = "0" }, @{ unit = "VIDEO_SECOND"; price = "0" }, @{ unit = "INPUT_IMAGE"; price = "0" }) }
+    currency = "USD"
+  }
+  $validation = Invoke-Api "POST" "/provider-profiles/$($profile.id)/validate"
+  if ($validation.configuration_valid -ne $true) { Fail "provider-profile" "Fake ProviderProfile did not validate." }
+  $contract = Invoke-Api "POST" "/provider-profiles/$($profile.id)/verify-contract"
+  if ($contract.status -ne "PASSED") { Fail "provider-profile" "Fake ProviderProfile contract verification did not pass." }
+  $live = Invoke-Api "POST" "/provider-profiles/$($profile.id)/verify-live" @{ confirm_live = $false; max_cost = $null }
+  if ($live.error_code -ne "BLOCKED_LIVE_VERIFICATION") { Fail "provider-profile" "Live verification was not blocked by default." }
+  Invoke-Api "PATCH" "/projects/$ProjectId" @{
+    image_provider_id = "fake-http"
+    video_provider_id = "fake-http"
+    image_model = "fake-image"
+    video_model = "fake-video"
+    default_aspect_ratio = "16:9"
+    default_video_duration_seconds = 1.0
+    default_seed = 7
+  } | Out-Null
+  $script:ProviderUsageEvidence = [ordered]@{
+    provider_profile_id = $profile.id
+    image_model_profile_id = $imageModel.id
+    video_model_profile_id = $videoModel.id
+    validation_valid = $validation.configuration_valid
+    contract_status = $contract.status
+    live_verification_error_code = $live.error_code
+  }
+}
+
+function Assert-UsageCostLedger($ProjectId) {
+  Write-Host "==> Usage, budget, and CSV verification"
+  $summary = Invoke-Api "GET" "/projects/$ProjectId/usage/summary"
+  $records = @((Invoke-Api "GET" "/projects/$ProjectId/usage/records") | ForEach-Object { $_ })
+  $currencies = @($summary.currencies)
+  $requestEstimateCount = @($records | Where-Object { $_.record_type -eq "ESTIMATE" -and -not $_.generation_task_id }).Count
+  $taskEstimateCount = @($records | Where-Object { $_.record_type -eq "ESTIMATE" -and $_.generation_task_id }).Count
+  $actualCount = @($records | Where-Object { $_.record_type -eq "PROVIDER_REPORTED" }).Count
+  if ($summary.unknown_cost_count -ne 0) { Fail "usage" "Fake Provider usage should not produce UNKNOWN costs." }
+  if ($currencies.Count -lt 1 -or [string]$currencies[0].estimated_total -ne "0" -or [string]$currencies[0].actual_total -ne "0") {
+    Fail "usage" "Fake Provider totals must remain explicit zero, not missing or unknown."
+  }
+  if ($requestEstimateCount -ne $summary.request_count) { Fail "usage" "Request-level estimates do not match request count." }
+  if ($taskEstimateCount -lt $requestEstimateCount -or $actualCount -lt $requestEstimateCount) { Fail "usage" "Task estimate or actual usage records are missing." }
+
+  $budget = Invoke-Api "PUT" "/projects/$ProjectId/budget" @{
+    currency = "USD"
+    warning_limit = "0.01"
+    hard_limit = "0.01"
+    per_request_limit = "0.01"
+    period_type = "PROJECT_TOTAL"
+    unknown_cost_policy = "BLOCK"
+    enabled = $true
+  }
+  if ($budget.enabled -ne $true -or $budget.unknown_cost_policy -ne "BLOCK") { Fail "usage" "Budget policy was not persisted." }
+
+  $csvUrl = "$BaseUrl/projects/$ProjectId/usage/export.csv"
+  $csvText = Invoke-WebRequest -Uri $csvUrl -UseBasicParsing -TimeoutSec 20
+  if ($csvText.Content -notmatch "estimated_cost" -or $csvText.Content -notmatch "FAKE_PROVIDER") {
+    Fail "usage" "Usage CSV did not include expected headers and fake cost source."
+  }
+
+  $script:ProviderUsageEvidence["request_count"] = $summary.request_count
+  $script:ProviderUsageEvidence["usage_record_count"] = $records.Count
+  $script:ProviderUsageEvidence["request_estimate_count"] = $requestEstimateCount
+  $script:ProviderUsageEvidence["task_estimate_count"] = $taskEstimateCount
+  $script:ProviderUsageEvidence["actual_count"] = $actualCount
+  $script:ProviderUsageEvidence["unknown_cost_count"] = $summary.unknown_cost_count
+  $script:ProviderUsageEvidence["estimated_total"] = [string]$currencies[0].estimated_total
+  $script:ProviderUsageEvidence["actual_total"] = [string]$currencies[0].actual_total
+  $script:ProviderUsageEvidence["budget_enabled"] = $budget.enabled
+  $script:ProviderUsageEvidence["budget_unknown_cost_policy"] = $budget.unknown_cost_policy
+  $script:ProviderUsageEvidence["csv_verified"] = $true
 }
 
 function Assert-ProviderVideoRequest($VideoRequest, $ShotNumber) {
@@ -907,11 +1010,14 @@ try {
     description = "Created by scripts/e2e-local.ps1"
     image_provider_id = "fake-http"
     video_provider_id = "fake-http"
+    image_model = "fake-image"
+    video_model = "fake-video"
     default_aspect_ratio = "16:9"
     default_video_duration_seconds = 1.0
     default_seed = 7
   }
   $Summary.project_id = $project.id
+  Configure-ProviderCostLedger $project.id
 
   $shotIds = @(Create-ScriptStoryboardShots $project.id)
   $Summary.shot_ids = $shotIds
@@ -920,6 +1026,7 @@ try {
   Complete-Shot $project.id $shotIds[0] 1 $true
   Complete-Shot $project.id $shotIds[1] 2 $false
   Complete-Shot $project.id $shotIds[2] 3 $false
+  Assert-UsageCostLedger $project.id
 
   $detail = Get-Detail $project.id
   if ($detail.completion.can_render -ne $true) { Fail "completion" "Project is not renderable after three completed shots." }
@@ -971,6 +1078,7 @@ try {
 
   Write-Host ""
   Write-Host "E2E local isolated validation passed."
+  $Summary.provider_usage = $script:ProviderUsageEvidence
   $Summary | ConvertTo-Json -Depth 12
 } catch {
   $OriginalError = $_

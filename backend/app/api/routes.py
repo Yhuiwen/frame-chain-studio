@@ -6,7 +6,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -23,12 +23,15 @@ from app.models.schemas import (
     CharacterUpdate,
     GenerationStartRequest,
     GenerationRequestRead,
+    GenerationUsageRecordRead,
     LocationCreate,
     LocationRead,
     LocationReferenceCreate,
     LocationReferenceRead,
     LocationUpdate,
     ProjectCreate,
+    ProjectBudgetPolicyRead,
+    ProjectBudgetPolicyUpdate,
     ProjectDetail,
     ProjectRead,
     ProjectUpdate,
@@ -69,13 +72,23 @@ from app.models.schemas import (
     ProjectRenderRead,
     WorkersStatusRead,
     QualityCheckResultRead,
+    LiveVerificationRequest,
+    ProviderModelProfileCreate,
+    ProviderModelProfileRead,
+    ProviderModelProfileUpdate,
+    ProviderProfileCreate,
+    ProviderProfileRead,
+    ProviderProfileUpdate,
+    ProviderValidationRead,
+    ProviderVerificationRunRead,
+    UsageSummaryRead,
 )
-from app.providers.config_loader import load_registry_from_env
+from app.providers.config_loader import load_registry, load_registry_from_env
 from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
 from app.models.entities import ShotDraftStatus
-from app.services import provider_resolution, quality_service, script_workflow, studio, structured, task_service, worker_status
+from app.services import provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, worker_status
 from app.workers import render_service
 
 router = APIRouter()
@@ -147,9 +160,9 @@ def _alembic_head_revision() -> str | None:
 
 
 @router.get("/providers", response_model=list[ProviderInfo])
-def list_providers() -> list[ProviderInfo]:
+def list_providers(session: Session = Depends(get_session)) -> list[ProviderInfo]:
     try:
-        return provider_resolution.list_public_providers(load_registry_from_env())
+        return provider_resolution.list_public_providers(load_registry(session))
     except ProviderError as exc:
         return [
             ProviderInfo(
@@ -165,10 +178,131 @@ def list_providers() -> list[ProviderInfo]:
         ]
 
 
+@router.get("/provider-profiles", response_model=list[ProviderProfileRead])
+def list_provider_profiles(
+    include_archived: bool = False,
+    session: Session = Depends(get_session),
+) -> list[dict[str, object]]:
+    return provider_management.list_provider_profiles(session, include_archived=include_archived)
+
+
+@router.post("/provider-profiles", response_model=ProviderProfileRead)
+def create_provider_profile(
+    payload: ProviderProfileCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return provider_management.create_provider_profile(session, payload)
+
+
+@router.get("/provider-profiles/{provider_id}", response_model=ProviderProfileRead)
+def get_provider_profile(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    profile = provider_management.get_provider_profile_or_404(session, provider_id)
+    return provider_management.provider_profile_payload(session, profile)
+
+
+@router.patch("/provider-profiles/{provider_id}", response_model=ProviderProfileRead)
+def update_provider_profile(
+    provider_id: int,
+    payload: ProviderProfileUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return provider_management.update_provider_profile(session, provider_id, payload)
+
+
+@router.post("/provider-profiles/{provider_id}/archive", response_model=ProviderProfileRead)
+def archive_provider_profile(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.archive_provider_profile(session, provider_id)
+
+
+@router.post("/provider-profiles/{provider_id}/validate", response_model=ProviderValidationRead)
+def validate_provider_profile(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.validate_provider_profile(session, provider_id)
+
+
+@router.post("/provider-profiles/{provider_id}/verify-contract", response_model=ProviderVerificationRunRead)
+def verify_provider_contract(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.verify_contract(session, provider_id)
+
+
+@router.post("/provider-profiles/{provider_id}/verify-live", response_model=ProviderVerificationRunRead)
+def verify_provider_live(
+    provider_id: int,
+    payload: LiveVerificationRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return provider_management.verify_live(session, provider_id, payload)
+
+
+@router.get("/provider-profiles/{provider_id}/models", response_model=list[ProviderModelProfileRead])
+def list_provider_models(provider_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return provider_management.list_provider_models(session, provider_id)
+
+
+@router.post("/provider-profiles/{provider_id}/models", response_model=ProviderModelProfileRead)
+def create_provider_model(
+    provider_id: int,
+    payload: ProviderModelProfileCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return provider_management.create_provider_model(session, provider_id, payload)
+
+
+@router.patch("/provider-models/{model_id}", response_model=ProviderModelProfileRead)
+def update_provider_model(
+    model_id: int,
+    payload: ProviderModelProfileUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return provider_management.update_provider_model(session, model_id, payload)
+
+
+@router.post("/provider-models/{model_id}/archive", response_model=ProviderModelProfileRead)
+def archive_provider_model(model_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.archive_provider_model(session, model_id)
+
+
 @router.get("/workers/status", response_model=WorkersStatusRead)
 def workers_status(session: Session = Depends(get_session)) -> dict[str, object]:
     settings = get_settings()
     return worker_status.status_summary(session, stale_after_seconds=settings.worker_stale_after_seconds)
+
+
+@router.get("/projects/{project_id}/usage/summary", response_model=UsageSummaryRead)
+def project_usage_summary(project_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.usage_summary(session, project_id)
+
+
+@router.get("/projects/{project_id}/usage/records", response_model=list[GenerationUsageRecordRead])
+def project_usage_records(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return provider_management.usage_records(session, project_id)
+
+
+@router.get("/generation-requests/{request_id}/usage", response_model=list[GenerationUsageRecordRead])
+def generation_request_usage(request_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return provider_management.request_usage(session, request_id)
+
+
+@router.get("/projects/{project_id}/budget", response_model=ProjectBudgetPolicyRead)
+def project_budget(project_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.budget_for_project(session, project_id)
+
+
+@router.put("/projects/{project_id}/budget", response_model=ProjectBudgetPolicyRead)
+def update_project_budget(
+    project_id: int,
+    payload: ProjectBudgetPolicyUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return provider_management.update_budget(session, project_id, payload)
+
+
+@router.get("/projects/{project_id}/usage/export.csv", response_class=PlainTextResponse)
+def export_project_usage(project_id: int, session: Session = Depends(get_session)) -> PlainTextResponse:
+    return PlainTextResponse(
+        provider_management.usage_csv(session, project_id),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="project-{project_id}-usage.csv"'},
+    )
 
 
 @router.get("/tasks", response_model=list[GenerationTaskRead])
@@ -809,7 +943,7 @@ def generate_keyframe(
         shot=shot,
         kind=GenerationKind.KEYFRAME,
         payload=payload,
-        registry=load_registry_from_env(),
+        registry=load_registry(session),
         system_default_provider_id=settings.default_image_provider_id,
     )
     request = studio.start_keyframe_generation_atomic(
@@ -818,6 +952,8 @@ def generate_keyframe(
         resolved=resolved,
         request_payload=resolved.request_payload(shot),
     )
+    provider_management.create_estimate_for_request(session, request)
+    session.commit()
     if resolved.provider_id == provider_resolution.MOCK_PROVIDER_ID:
         background_tasks.add_task(run_request_in_background, request.id or 0)
     return request
@@ -849,7 +985,7 @@ def generate_video(
         shot=shot,
         kind=GenerationKind.VIDEO,
         payload=payload,
-        registry=load_registry_from_env(),
+        registry=load_registry(session),
         system_default_provider_id=settings.default_video_provider_id,
     )
     request = studio.start_video_generation_atomic(
@@ -858,6 +994,8 @@ def generate_video(
         resolved=resolved,
         request_payload=resolved.request_payload(shot),
     )
+    provider_management.create_estimate_for_request(session, request)
+    session.commit()
     if resolved.provider_id == provider_resolution.MOCK_PROVIDER_ID:
         background_tasks.add_task(run_request_in_background, request.id or 0)
     return request

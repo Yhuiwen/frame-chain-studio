@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlmodel import Session, select
 
+from app.core.errors import AppError
 from app.core.redaction import redact_sensitive
 from app.domain.retry_policy import RetryPolicyConfig, decide_error
 from app.core.config import get_settings
@@ -31,7 +32,7 @@ from app.providers.models import (
     VideoGenerationRequest,
 )
 from app.providers.registry import ProviderRegistry
-from app.services import task_service, worker_status
+from app.services import provider_management, task_service, worker_status
 from app.workers.request_factory import ProviderRequestFactory
 from app.workers.settings import WorkerSettings
 from app.workers.lease_guard import LeaseLostError, TaskLeaseGuard, TaskLeaseGuardConfig
@@ -341,7 +342,21 @@ class ProviderExecutionService:
             task = task_service.get_task(session, task_id)
             provider = self._provider_or_fail(session, task)
             try:
+                generation_request = session.get(GenerationRequest, task.generation_request_id)
+                if generation_request is not None:
+                    provider_management.check_budget_before_task(session, generation_request)
+                provider_management.ensure_task_usage_estimate(session, task)
                 request = await self._build_provider_request(session, task, provider)
+            except AppError as exc:
+                task_service.mark_task_failed(
+                    session,
+                    task_id,
+                    error_code=TaskErrorCode.CONFIGURATION_ERROR,
+                    error_message=self._safe_message(exc.message),
+                    error_details={"error_code": exc.code},
+                    now=now,
+                )
+                return True
             except ProviderError as exc:
                 self._record_provider_error(task_id, exc, now=now)
                 return True
@@ -617,6 +632,8 @@ class ProviderExecutionService:
                         now=now,
                     )
                     return
+                task = task_service.get_task(session, task_id)
+                provider_management.record_actual_from_provider(session, task, self._usage_metadata(result))
                 task_service.mark_task_result_ready(
                     session,
                     task_id,
@@ -628,6 +645,8 @@ class ProviderExecutionService:
                 )
                 return
             if result.normalized_status == RemoteJobStatus.FAILED:
+                task = task_service.get_task(session, task_id)
+                provider_management.record_actual_from_provider(session, task, self._usage_metadata(result))
                 task_service.mark_task_failed(
                     session,
                     task_id,
@@ -638,6 +657,8 @@ class ProviderExecutionService:
                 )
                 return
             if result.normalized_status == RemoteJobStatus.CANCELLED:
+                task = task_service.get_task(session, task_id)
+                provider_management.record_actual_from_provider(session, task, self._usage_metadata(result))
                 task_service.mark_remote_cancelled(session, task_id, now=now)
                 return
             task = task_service.record_running_poll(
@@ -667,6 +688,12 @@ class ProviderExecutionService:
             "file_name": url.rsplit("/", 1)[-1],
             "metadata": item.metadata,
         }
+
+    def _usage_metadata(self, result: ProviderJobResult) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        for item in result.result_urls:
+            metadata.update(item.metadata)
+        return metadata
 
     def _lease_owned(self, task_id: int, *, now: datetime | None = None) -> bool:
         with self.session_factory() as session:

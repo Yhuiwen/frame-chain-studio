@@ -6,7 +6,7 @@ import signal
 from sqlmodel import Session
 
 from app.db import engine, init_db
-from app.providers.config_loader import load_registry_from_env
+from app.providers.config_loader import load_registry
 from app.workers.generation_worker import GenerationWorker
 from app.workers.settings import load_worker_settings
 
@@ -22,7 +22,8 @@ async def main_async() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_parser().parse_args()
     init_db()
-    registry = load_registry_from_env()
+    with Session(engine) as session:
+        registry = load_registry(session)
     if not registry.list_capabilities():
         raise SystemExit("No providers configured. Set FCS_PROVIDER_CONFIG_FILE.")
     settings = load_worker_settings()

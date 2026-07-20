@@ -1043,6 +1043,7 @@ def create_generation_request(
     allow_capability_fallback: bool = False,
     request_payload: dict[str, object] | None = None,
     provider_config_snapshot: dict[str, object] | None = None,
+    provider_snapshot: dict[str, object] | None = None,
     commit: bool = True,
 ) -> GenerationRequest:
     spec = structured.create_initial_shot_spec(session, shot, commit=False)
@@ -1057,6 +1058,11 @@ def create_generation_request(
     reference_asset_ids = [item for item in structured_payload.get("reference_asset_ids", []) if isinstance(item, int)]
     if reference_asset_ids:
         provider_payload["reference_asset_ids"] = reference_asset_ids
+    snapshot = provider_snapshot or {}
+    snapshot_model = snapshot.get("provider_model_key")
+    snapshot_revision = snapshot.get("revision")
+    provider_model_key = snapshot_model if isinstance(snapshot_model, str) else model
+    provider_config_revision = snapshot_revision if isinstance(snapshot_revision, int) else None
     request = task_service.create_generation_request(
         session,
         project_id=shot.project_id,
@@ -1075,6 +1081,11 @@ def create_generation_request(
         negative_prompt_snapshot=negative_snapshot,
         structured_payload_json=spec.structured_payload_json,
         compiler_version=spec.compiler_version,
+        provider_key=str(snapshot.get("provider_key") or provider_id),
+        provider_model_key=provider_model_key,
+        provider_config_revision=provider_config_revision,
+        provider_capability_snapshot_json=json.dumps(snapshot.get("capabilities") or {}, ensure_ascii=True, sort_keys=True),
+        pricing_snapshot_json=json.dumps(snapshot, ensure_ascii=True, sort_keys=True),
         input_asset_ids=input_asset_ids or [],
         commit=commit,
     )
@@ -1145,7 +1156,9 @@ def start_keyframe_generation_atomic(
             provider_config_snapshot={
                 "provider_id": getattr(resolved, "provider_id"),
                 "configured": getattr(getattr(resolved, "provider_info", None), "configured", True),
+                "provider_config_revision": getattr(resolved, "provider_snapshot", {}).get("revision") if isinstance(getattr(resolved, "provider_snapshot", {}), dict) else None,
             },
+            provider_snapshot=getattr(resolved, "provider_snapshot", {}),
             commit=False,
         )
         transition_shot(session, shot, ShotStatus.KEYFRAME_GENERATING, "keyframe_generation_started", commit=False)
@@ -1187,7 +1200,9 @@ def start_video_generation_atomic(
             provider_config_snapshot={
                 "provider_id": getattr(resolved, "provider_id"),
                 "configured": getattr(getattr(resolved, "provider_info", None), "configured", True),
+                "provider_config_revision": getattr(resolved, "provider_snapshot", {}).get("revision") if isinstance(getattr(resolved, "provider_snapshot", {}), dict) else None,
             },
+            provider_snapshot=getattr(resolved, "provider_snapshot", {}),
             commit=False,
         )
         transition_shot(session, shot, ShotStatus.VIDEO_GENERATING, "video_generation_started", commit=False)

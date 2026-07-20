@@ -185,7 +185,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0011"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0012"
         for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
             assert connection.execute(sa.text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
     assert "task_id" in columns(db_path, "tasklog")
@@ -212,6 +212,15 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
     assert "storyboarddraft" in table_names(db_path)
     assert "shotdraft" in table_names(db_path)
     assert "shotdraftcharacter" in table_names(db_path)
+    assert "provider_key" in columns(db_path, "generationrequest")
+    assert "provider_model_key" in columns(db_path, "generationrequest")
+    assert "provider_capability_snapshot_json" in columns(db_path, "generationrequest")
+    assert "pricing_snapshot_json" in columns(db_path, "generationrequest")
+    assert "providerprofile" in table_names(db_path)
+    assert "providermodelprofile" in table_names(db_path)
+    assert "generationusagerecord" in table_names(db_path)
+    assert "projectbudgetpolicy" in table_names(db_path)
+    assert "providerverificationrun" in table_names(db_path)
 
 
 def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(tmp_path: Path) -> None:

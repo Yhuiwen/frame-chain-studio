@@ -526,6 +526,126 @@ export interface ProviderInfo {
   defaults: ProviderDefaults;
 }
 
+export type ProviderAdapterType = "FAKE" | "MAPPED_ASYNC_HTTP";
+export type ProviderModelGenerationType = "IMAGE" | "VIDEO";
+export type UsageRecordType = "ESTIMATE" | "PROVIDER_REPORTED" | "MANUAL_ADJUSTMENT";
+export type UsageRecordStatus = "ESTIMATED" | "ACTUAL" | "UNKNOWN" | "WAIVED";
+export type UsageCostSource = "PRICING_RULE" | "PROVIDER_RESPONSE" | "MANUAL" | "FAKE_PROVIDER" | "UNKNOWN";
+export type UnknownCostPolicy = "ALLOW_WITH_WARNING" | "BLOCK";
+
+export interface ProviderProfile {
+  id: number;
+  name: string;
+  provider_key: string;
+  adapter_type: ProviderAdapterType;
+  display_name: string;
+  description: string;
+  base_url: string;
+  secret_env_var: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  config_revision: number;
+  secret_configured: boolean;
+  configuration_valid: boolean;
+  contract_verified: boolean;
+  live_verified: boolean;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProviderModelProfile {
+  id: number;
+  provider_profile_id: number;
+  model_key: string;
+  display_name: string;
+  generation_type: ProviderModelGenerationType;
+  enabled: boolean;
+  capabilities: Record<string, unknown>;
+  limits: Record<string, unknown>;
+  pricing: Record<string, unknown>;
+  currency: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProviderValidation {
+  provider_profile_id: number;
+  configuration_valid: boolean;
+  secret_configured: boolean;
+  contract_verified: boolean;
+  live_verified: boolean;
+  warnings: string[];
+  errors: string[];
+}
+
+export interface ProviderVerificationRun {
+  id: number;
+  provider_profile_id: number;
+  model_profile_id: number | null;
+  verification_type: "CONTRACT" | "LIVE_IMAGE" | "LIVE_VIDEO" | "LIVE_CHAIN";
+  status: "PENDING" | "RUNNING" | "PASSED" | "FAILED" | "BLOCKED" | "CANCELLED";
+  started_at: string | null;
+  completed_at: string | null;
+  max_cost: string | null;
+  actual_cost: string | null;
+  summary: Record<string, unknown>;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface GenerationUsageRecord {
+  id: number;
+  project_id: number;
+  shot_id: number | null;
+  generation_request_id: number | null;
+  generation_task_id: number | null;
+  provider_profile_id: number | null;
+  provider_model_profile_id: number | null;
+  attempt_number: number;
+  record_type: UsageRecordType;
+  status: UsageRecordStatus;
+  currency: string;
+  estimated_units: Record<string, unknown>;
+  actual_units: Record<string, unknown>;
+  estimated_cost: string | null;
+  actual_cost: string | null;
+  cost_source: UsageCostSource;
+  provider_usage: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UsageSummary {
+  currencies: Array<{ currency: string; estimated_total: string; actual_total: string }>;
+  unknown_cost_count: number;
+  pending_estimate_total: Record<string, string>;
+  request_count: number;
+  image_request_count: number;
+  video_request_count: number;
+  failed_request_count: number;
+  cancelled_request_count: number;
+  provider_breakdown: Array<{ key: string; record_count: number }>;
+  model_breakdown: Array<{ key: string; record_count: number }>;
+  period_start: string | null;
+  period_end: string | null;
+}
+
+export interface ProjectBudgetPolicy {
+  id: number | null;
+  project_id: number;
+  currency: string;
+  warning_limit: string | null;
+  hard_limit: string | null;
+  per_request_limit: string | null;
+  period_type: "PROJECT_TOTAL" | "MONTHLY";
+  unknown_cost_policy: UnknownCostPolicy;
+  enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface GenerationStartOptions {
   provider_id?: string | null;
   model?: string | null;
@@ -611,7 +731,42 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  usageCsvUrl: (projectId: number) => `${API_BASE}/api/projects/${projectId}/usage/export.csv`,
   listProviders: () => request<ProviderInfo[]>("/api/providers"),
+  listProviderProfiles: (includeArchived = false) =>
+    request<ProviderProfile[]>(`/api/provider-profiles?include_archived=${includeArchived ? "true" : "false"}`),
+  createProviderProfile: (body: Partial<ProviderProfile>) =>
+    request<ProviderProfile>("/api/provider-profiles", { method: "POST", body: JSON.stringify(body) }),
+  updateProviderProfile: (providerId: number, body: Partial<ProviderProfile>) =>
+    request<ProviderProfile>(`/api/provider-profiles/${providerId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  archiveProviderProfile: (providerId: number) =>
+    request<ProviderProfile>(`/api/provider-profiles/${providerId}/archive`, { method: "POST" }),
+  validateProviderProfile: (providerId: number) =>
+    request<ProviderValidation>(`/api/provider-profiles/${providerId}/validate`, { method: "POST" }),
+  verifyProviderContract: (providerId: number) =>
+    request<ProviderVerificationRun>(`/api/provider-profiles/${providerId}/verify-contract`, { method: "POST" }),
+  verifyProviderLive: (providerId: number, body: { confirm_live?: boolean; model_profile_id?: number | null; max_cost?: string | null }) =>
+    request<ProviderVerificationRun>(`/api/provider-profiles/${providerId}/verify-live`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  listProviderModels: (providerId: number) =>
+    request<ProviderModelProfile[]>(`/api/provider-profiles/${providerId}/models`),
+  createProviderModel: (providerId: number, body: Partial<ProviderModelProfile>) =>
+    request<ProviderModelProfile>(`/api/provider-profiles/${providerId}/models`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateProviderModel: (modelId: number, body: Partial<ProviderModelProfile>) =>
+    request<ProviderModelProfile>(`/api/provider-models/${modelId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  archiveProviderModel: (modelId: number) =>
+    request<ProviderModelProfile>(`/api/provider-models/${modelId}/archive`, { method: "POST" }),
+  getProjectUsageSummary: (projectId: number) => request<UsageSummary>(`/api/projects/${projectId}/usage/summary`),
+  listProjectUsageRecords: (projectId: number) =>
+    request<GenerationUsageRecord[]>(`/api/projects/${projectId}/usage/records`),
+  getProjectBudget: (projectId: number) => request<ProjectBudgetPolicy>(`/api/projects/${projectId}/budget`),
+  updateProjectBudget: (projectId: number, body: Partial<ProjectBudgetPolicy>) =>
+    request<ProjectBudgetPolicy>(`/api/projects/${projectId}/budget`, { method: "PUT", body: JSON.stringify(body) }),
   getWorkerStatus: () => request<WorkersStatus>("/api/workers/status"),
   listTasks: () => request<GenerationTask[]>("/api/tasks"),
   listProjects: () => request<Project[]>("/api/projects"),

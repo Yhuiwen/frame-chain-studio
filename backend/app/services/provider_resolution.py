@@ -32,6 +32,7 @@ class ResolvedGeneration:
     allow_capability_fallback: bool
     input_asset_ids: list[int]
     provider_info: ProviderInfo | None
+    provider_snapshot: dict[str, object]
 
     def request_payload(self, shot: Shot) -> dict[str, object]:
         return {
@@ -121,6 +122,7 @@ def resolve_generation(
         allow_capability_fallback=payload.allow_capability_fallback,
         input_asset_ids=input_asset_ids,
         provider_info=info,
+        provider_snapshot=_provider_snapshot(session, provider_id, model, info),
     )
 
 
@@ -243,3 +245,12 @@ def _validate_snapshot(
 
 def _asset_ref(asset_id: int) -> AssetReference:
     return AssetReference(asset_id=asset_id, url=f"asset://{asset_id}", mime_type=None, role="reference")
+
+
+def _provider_snapshot(session: Session, provider_id: str, model: str | None, info: ProviderInfo) -> dict[str, object]:
+    from app.services import provider_management
+
+    snapshot = provider_management.snapshot_for_provider(session, provider_id, model)
+    if not snapshot.get("capabilities"):
+        snapshot["capabilities"] = info.capabilities.model_dump()
+    return snapshot

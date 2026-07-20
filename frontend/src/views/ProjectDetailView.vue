@@ -376,6 +376,12 @@ async function uploadTargetKeyframe(event: Event) {
         <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/scripts`)">
           Scripts
         </el-button>
+        <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/usage`)">
+          Usage
+        </el-button>
+        <el-button native-type="button" @click="navigateTo('/settings/providers')">
+          Providers
+        </el-button>
         <el-button
           v-if="selected"
           native-type="button"

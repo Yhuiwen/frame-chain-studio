@@ -331,7 +331,7 @@ For release-candidate smoke validation, `scripts/e2e-local.ps1` starts its own i
 .\scripts\e2e-local.ps1 -BackendPort 8100 -FrontendPort 5174 -FakeProviderPort 8091
 ```
 
-The E2E script verifies one three-Shot project end to end, including keyframe review, video review, persisted quality-check evidence, locked tail frames, Shot 2/3 start-frame inheritance, Fake Provider upload references in first/last-frame video requests, GenerationWorker restart recovery without duplicate submit, final render, media full download, HTTP Range `206`, FFprobe metadata, backup, restore, restored quality rows, and restored media access. Its JSON summary uses the same `project_id` and `render_id` for E2E, backup, and restore evidence and includes per-Shot quality result counts, check types, algorithm versions, asset revision counts, and duplicate-check guards.
+The E2E script verifies one three-Shot project end to end, including keyframe review, video review, persisted quality-check evidence, locked tail frames, Shot 2/3 start-frame inheritance, Fake Provider upload references in first/last-frame video requests, GenerationWorker restart recovery without duplicate submit, ProviderProfile/model pricing setup, usage and cost ledger records, budget policy persistence, CSV export, default-blocked live verification, final render, media full download, HTTP Range `206`, FFprobe metadata, backup, restore, restored quality rows, and restored media access. Its JSON summary uses the same `project_id` and `render_id` for E2E, backup, and restore evidence and includes per-Shot quality result counts, check types, algorithm versions, asset revision counts, duplicate-check guards, and `provider_usage` evidence.
 
 Backup and restore scripts operate on the configured SQLite database:
 
@@ -550,9 +550,9 @@ Workflow bridge:
 
 Phase 2E still does not implement authenticated vendor downloads, object storage, video stitching, audio, subtitles, super-resolution, CLIP/VLM scoring, Provider settings UI, WebSocket/SSE, Redis, Celery, Kafka, automatic Git commits, or tags.
 
-## Provider Settings And Worker Status
+## Provider Settings, Usage, And Worker Status
 
-Phase 2F adds Provider capability-driven generation settings and task visibility without adding real vendor APIs or streaming transports.
+Phase 2F adds Provider capability-driven generation settings and task visibility without adding real vendor APIs or streaming transports. Phase 3C-3 adds a local Provider configuration center, model pricing profiles, usage/cost ledger records, budget policy storage, CSV export, and live-verification readiness gates. Live real-Provider execution is still blocked by default and must not run unless explicitly enabled with local credentials and a documented Provider contract.
 
 Projects may store safe generation defaults:
 
@@ -571,6 +571,24 @@ explicit request payload -> project default -> system default -> local mock defa
 ```
 
 Image and video providers may differ. Project records never store API keys, base URLs, or raw Provider JSON. `/api/providers` returns only public capability and default-model metadata, including the local `mock` provider. The frontend settings panel lists configured Providers that support the required capability.
+
+ProviderProfile rows may store safe Provider IDs, display names, adapter type, base URL, config revision, safe mapping config, and the name of an environment variable that should contain a secret. They must not store secret values, secret prefixes, hashes, cookies, authorization headers, or API keys. API and frontend responses expose only `secret_configured: true|false`; they never reveal the secret value, length, prefix, or hash.
+
+ProviderModelProfile rows declare image/video model keys, capabilities, limits, currency, and declarative pricing rules. Pricing and usage values are stored as decimal strings. Unknown costs remain `UNKNOWN`/`null` and are never silently converted to `0`; the Fake Provider is the only provider that reports explicit zero-cost records through `FAKE_PROVIDER`.
+
+Usage APIs:
+
+- `GET /api/projects/{project_id}/usage/summary`
+- `GET /api/projects/{project_id}/usage/records`
+- `GET /api/generation-requests/{request_id}/usage`
+- `GET /api/projects/{project_id}/usage/export.csv`
+
+Budget APIs:
+
+- `GET /api/projects/{project_id}/budget`
+- `PUT /api/projects/{project_id}/budget`
+
+Budget checks run before Worker remote submit for non-Fake Providers. Fake Provider local E2E remains unblocked even under a hard budget policy so release validation cannot accidentally depend on paid APIs.
 
 Generation requests accept optional safe parameters:
 

@@ -11,6 +11,9 @@ Use this before creating a `v0.2.0` tag. Do not tag until every required item is
 - Local 3 Shot E2E passes, including GenerationWorker restart recovery without duplicate Provider submit, first/last-frame Provider request evidence, quality-check evidence for current video assets, final render playback, full download, Range `206`, and FFprobe verification.
 - Structured continuity evidence passes: Character, Location, StyleProfile, ShotSpec history, no-op sync, explicit sync, Prompt Compiler `structured-continuity-v1`, GenerationRequest structured snapshots, and Provider reference Asset injection.
 - Script/storyboard evidence passes: script SHA/version, parser `deterministic-script-parser-v1`, ScriptBlock source ranges, editable ShotDrafts, split/merge, manual Character/Location/StyleProfile matching, Prompt preview, batch apply into three Shots, and restored `applied_shot_id` links.
+- Provider settings evidence passes: ProviderProfile and ProviderModelProfile CRUD/validation, contract verification, safe `secret_configured` reporting, and no secret values in API payloads.
+- Usage and budget evidence passes: request-level estimates, task-attempt estimates, provider-reported actual records, Decimal-string costs, unknown costs shown as `UNKNOWN`/`null`, Fake Provider explicit zero-cost records, budget policy persistence, and CSV export.
+- Live real-Provider verification remains blocked by default: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-real-provider.ps1` prints `BLOCKED_LIVE_VERIFICATION` without network or cost.
 - Structured prompt and reference-image behavior remains labeled `CONTRACT_VERIFIED_ONLY`; do not claim live real-Provider visual quality validation.
 - E2E summary includes per-Shot `quality_result_count`, `quality_check_types`, `quality_algorithm_versions`, `quality_asset_id`, `asset_revision_count`, and `superseded_asset_count`.
 - Backup/restore evidence includes persisted quality-check counts and `quality_duplicate_count = 0`.
@@ -21,7 +24,7 @@ Use this before creating a `v0.2.0` tag. Do not tag until every required item is
 - Backup and restore smoke tests pass.
 - Quality-check warnings/errors are reviewed as advisory reviewer evidence only; they must not be treated as automatic Shot approval or rejection.
 - Runtime data is not staged: SQLite databases, storage, logs, `.run`, `backups`, `dist`, and `node_modules`.
-- Provider configs contain no real API keys.
+- Provider configs and ProviderProfile rows contain no real API keys, authorization headers, cookies, tokens, or secret material.
 - CI passes on GitHub Actions.
 - Known Vite warnings are reviewed and documented.
 

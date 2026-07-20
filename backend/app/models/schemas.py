@@ -12,6 +12,11 @@ from app.models.entities import (
     GenerationTaskStatus,
     GenerationTaskType,
     LocationReferenceType,
+    BudgetPeriodType,
+    ProviderAdapterType,
+    ProviderModelGenerationType,
+    ProviderVerificationStatus,
+    ProviderVerificationType,
     ProjectRenderStatus,
     QualityCheckSeverity,
     ReliableTaskStatus,
@@ -23,6 +28,10 @@ from app.models.entities import (
     ShotStatus,
     StartFrameSourceType,
     StoryboardDraftStatus,
+    UnknownCostPolicy,
+    UsageCostSource,
+    UsageRecordStatus,
+    UsageRecordType,
     WorkerStatus,
     WorkerType,
 )
@@ -32,6 +41,7 @@ MODEL_MAX_LENGTH = 120
 ASPECT_RATIO_PATTERN = re.compile(r"^[1-9][0-9]{0,2}:[1-9][0-9]{0,2}$")
 SEED_MIN = 0
 SEED_MAX = 2_147_483_647
+DECIMAL_STRING_PATTERN = re.compile(r"^(0|[1-9][0-9]*)(\.[0-9]{1,8})?$")
 
 
 class ProjectSettingsValidationMixin(BaseModel):
@@ -72,6 +82,179 @@ class ProjectRead(ProjectCreate):
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProviderProfileBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    provider_key: str = Field(min_length=1, max_length=120)
+    adapter_type: ProviderAdapterType = ProviderAdapterType.MAPPED_ASYNC_HTTP
+    display_name: str = Field(default="", max_length=160)
+    description: str = Field(default="", max_length=4000)
+    base_url: str = Field(default="", max_length=1000)
+    secret_env_var: str = Field(default="", max_length=160)
+    enabled: bool = True
+    config: dict[str, object] = Field(default_factory=dict)
+
+
+class ProviderProfileCreate(ProviderProfileBase):
+    pass
+
+
+class ProviderProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    display_name: str | None = Field(default=None, max_length=160)
+    description: str | None = Field(default=None, max_length=4000)
+    base_url: str | None = Field(default=None, max_length=1000)
+    secret_env_var: str | None = Field(default=None, max_length=160)
+    enabled: bool | None = None
+    config: dict[str, object] | None = None
+
+
+class ProviderProfileRead(ProviderProfileBase):
+    id: int
+    config_revision: int
+    secret_configured: bool = False
+    configuration_valid: bool = False
+    contract_verified: bool = False
+    live_verified: bool = False
+    archived_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProviderModelProfileBase(BaseModel):
+    model_key: str = Field(min_length=1, max_length=160)
+    display_name: str = Field(default="", max_length=160)
+    generation_type: ProviderModelGenerationType
+    enabled: bool = True
+    capabilities: dict[str, object] = Field(default_factory=dict)
+    limits: dict[str, object] = Field(default_factory=dict)
+    pricing: dict[str, object] = Field(default_factory=dict)
+    currency: str = Field(default="USD", min_length=3, max_length=12)
+
+
+class ProviderModelProfileCreate(ProviderModelProfileBase):
+    pass
+
+
+class ProviderModelProfileUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=160)
+    enabled: bool | None = None
+    capabilities: dict[str, object] | None = None
+    limits: dict[str, object] | None = None
+    pricing: dict[str, object] | None = None
+    currency: str | None = Field(default=None, min_length=3, max_length=12)
+
+
+class ProviderModelProfileRead(ProviderModelProfileBase):
+    id: int
+    provider_profile_id: int
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProviderValidationRead(BaseModel):
+    provider_profile_id: int
+    configuration_valid: bool
+    secret_configured: bool
+    contract_verified: bool
+    live_verified: bool
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class GenerationUsageRecordRead(BaseModel):
+    id: int
+    project_id: int
+    shot_id: int | None
+    generation_request_id: int | None
+    generation_task_id: int | None
+    provider_profile_id: int | None
+    provider_model_profile_id: int | None
+    attempt_number: int
+    record_type: UsageRecordType
+    status: UsageRecordStatus
+    currency: str
+    estimated_units: dict[str, object]
+    actual_units: dict[str, object]
+    estimated_cost: str | None
+    actual_cost: str | None
+    cost_source: UsageCostSource
+    provider_usage: dict[str, object]
+    created_at: datetime
+    updated_at: datetime
+
+
+class UsageSummaryRead(BaseModel):
+    currencies: list[dict[str, object]]
+    unknown_cost_count: int
+    pending_estimate_total: dict[str, str]
+    request_count: int
+    image_request_count: int
+    video_request_count: int
+    failed_request_count: int
+    cancelled_request_count: int
+    provider_breakdown: list[dict[str, object]]
+    model_breakdown: list[dict[str, object]]
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+
+
+class ProjectBudgetPolicyRead(BaseModel):
+    id: int | None = None
+    project_id: int
+    currency: str = "USD"
+    warning_limit: str | None = None
+    hard_limit: str | None = None
+    per_request_limit: str | None = None
+    period_type: BudgetPeriodType = BudgetPeriodType.PROJECT_TOTAL
+    unknown_cost_policy: UnknownCostPolicy = UnknownCostPolicy.ALLOW_WITH_WARNING
+    enabled: bool = False
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProjectBudgetPolicyUpdate(BaseModel):
+    currency: str = Field(default="USD", min_length=3, max_length=12)
+    warning_limit: str | None = None
+    hard_limit: str | None = None
+    per_request_limit: str | None = None
+    period_type: BudgetPeriodType = BudgetPeriodType.PROJECT_TOTAL
+    unknown_cost_policy: UnknownCostPolicy = UnknownCostPolicy.ALLOW_WITH_WARNING
+    enabled: bool = False
+
+    @field_validator("warning_limit", "hard_limit", "per_request_limit")
+    @classmethod
+    def validate_decimal_string(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        if not DECIMAL_STRING_PATTERN.fullmatch(value):
+            raise ValueError("Use a non-negative decimal string with at most 8 decimal places.")
+        return value
+
+
+class ProviderVerificationRunRead(BaseModel):
+    id: int
+    provider_profile_id: int
+    model_profile_id: int | None
+    verification_type: ProviderVerificationType
+    status: ProviderVerificationStatus
+    started_at: datetime | None
+    completed_at: datetime | None
+    max_cost: str | None
+    actual_cost: str | None
+    summary: dict[str, object]
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+
+
+class LiveVerificationRequest(BaseModel):
+    confirm_live: bool = False
+    model_profile_id: int | None = None
+    max_cost: str | None = None
 
 
 class CharacterBase(BaseModel):

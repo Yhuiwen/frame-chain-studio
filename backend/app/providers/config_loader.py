@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -9,6 +10,9 @@ from app.providers.exceptions import ProviderConfigurationError
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import MappedHttpProviderConfig
 from app.providers.registry import ProviderRegistry
+
+if TYPE_CHECKING:
+    from sqlmodel import Session
 
 PROVIDER_CONFIG_ENV = "FCS_PROVIDER_CONFIG_FILE"
 
@@ -46,4 +50,24 @@ def load_registry_from_env() -> ProviderRegistry:
         return registry
     for config in load_provider_configs_from_file(Path(config_file)):
         registry.register(MappedAsyncHttpProvider(config))
+    return registry
+
+
+def load_registry(session: "Session | None" = None) -> ProviderRegistry:
+    registry = load_registry_from_env()
+    if session is None:
+        return registry
+    from app.services.provider_management import db_profile_to_http_config
+    from app.models.entities import ProviderAdapterType, ProviderProfile
+    from sqlmodel import col, select
+
+    profiles = session.exec(
+        select(ProviderProfile).where(
+            col(ProviderProfile.enabled).is_(True),
+            col(ProviderProfile.archived_at).is_(None),
+            ProviderProfile.adapter_type != ProviderAdapterType.FAKE,
+        )
+    ).all()
+    for profile in profiles:
+        registry.register(MappedAsyncHttpProvider(db_profile_to_http_config(session, profile)))
     return registry

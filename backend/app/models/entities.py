@@ -225,6 +225,63 @@ class ShotDraftStatus(str, Enum):
     APPLIED = "APPLIED"
 
 
+class ProviderAdapterType(str, Enum):
+    FAKE = "FAKE"
+    MAPPED_ASYNC_HTTP = "MAPPED_ASYNC_HTTP"
+
+
+class ProviderModelGenerationType(str, Enum):
+    IMAGE = "IMAGE"
+    VIDEO = "VIDEO"
+
+
+class UsageRecordType(str, Enum):
+    ESTIMATE = "ESTIMATE"
+    PROVIDER_REPORTED = "PROVIDER_REPORTED"
+    MANUAL_ADJUSTMENT = "MANUAL_ADJUSTMENT"
+
+
+class UsageRecordStatus(str, Enum):
+    ESTIMATED = "ESTIMATED"
+    ACTUAL = "ACTUAL"
+    UNKNOWN = "UNKNOWN"
+    WAIVED = "WAIVED"
+
+
+class UsageCostSource(str, Enum):
+    PRICING_RULE = "PRICING_RULE"
+    PROVIDER_RESPONSE = "PROVIDER_RESPONSE"
+    MANUAL = "MANUAL"
+    FAKE_PROVIDER = "FAKE_PROVIDER"
+    UNKNOWN = "UNKNOWN"
+
+
+class BudgetPeriodType(str, Enum):
+    PROJECT_TOTAL = "PROJECT_TOTAL"
+    MONTHLY = "MONTHLY"
+
+
+class UnknownCostPolicy(str, Enum):
+    ALLOW_WITH_WARNING = "ALLOW_WITH_WARNING"
+    BLOCK = "BLOCK"
+
+
+class ProviderVerificationType(str, Enum):
+    CONTRACT = "CONTRACT"
+    LIVE_IMAGE = "LIVE_IMAGE"
+    LIVE_VIDEO = "LIVE_VIDEO"
+    LIVE_CHAIN = "LIVE_CHAIN"
+
+
+class ProviderVerificationStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+    CANCELLED = "CANCELLED"
+
+
 class ProjectBase(SQLModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
@@ -577,6 +634,118 @@ class ShotDraftCharacter(SQLModel, table=True):
     sort_order: int = Field(default=0, index=True)
 
 
+class ProviderProfile(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("provider_key", name="uq_providerprofile_provider_key"),
+        Index("ix_providerprofile_enabled_archived", "enabled", "archived_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(min_length=1, max_length=160)
+    provider_key: str = Field(min_length=1, max_length=120, index=True)
+    adapter_type: ProviderAdapterType = Field(index=True)
+    display_name: str = Field(default="", max_length=160)
+    description: str = Field(default="", max_length=4000)
+    base_url: str = Field(default="", max_length=1000)
+    secret_env_var: str = Field(default="", max_length=160)
+    enabled: bool = Field(default=True, index=True)
+    archived_at: datetime | None = Field(default=None, index=True)
+    config_json: str = Field(default="{}")
+    config_revision: int = Field(default=1, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ProviderModelProfile(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("provider_profile_id", "model_key", name="uq_providermodel_profile_model"),
+        Index("ix_providermodel_profile_type", "provider_profile_id", "generation_type"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    provider_profile_id: int = Field(foreign_key="providerprofile.id", index=True)
+    model_key: str = Field(min_length=1, max_length=160, index=True)
+    display_name: str = Field(default="", max_length=160)
+    generation_type: ProviderModelGenerationType = Field(index=True)
+    enabled: bool = Field(default=True, index=True)
+    capabilities_json: str = Field(default="{}")
+    limits_json: str = Field(default="{}")
+    pricing_json: str = Field(default="{}")
+    currency: str = Field(default="USD", max_length=12, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class GenerationUsageRecord(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "generation_task_id",
+            "attempt_number",
+            "record_type",
+            name="uq_usagerecord_task_attempt_type",
+        ),
+        Index("ix_usagerecord_project_created", "project_id", "created_at"),
+        Index("ix_usagerecord_request_type", "generation_request_id", "record_type"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    shot_id: int | None = Field(default=None, foreign_key="shot.id", index=True)
+    generation_request_id: int | None = Field(default=None, foreign_key="generationrequest.id", index=True)
+    generation_task_id: int | None = Field(default=None, foreign_key="generationtask.id", index=True)
+    provider_profile_id: int | None = Field(default=None, foreign_key="providerprofile.id", index=True)
+    provider_model_profile_id: int | None = Field(default=None, foreign_key="providermodelprofile.id", index=True)
+    attempt_number: int = Field(default=1, index=True)
+    record_type: UsageRecordType = Field(index=True)
+    status: UsageRecordStatus = Field(index=True)
+    currency: str = Field(default="USD", max_length=12, index=True)
+    estimated_units_json: str = Field(default="{}")
+    actual_units_json: str = Field(default="{}")
+    estimated_cost: str | None = Field(default=None, max_length=80)
+    actual_cost: str | None = Field(default=None, max_length=80)
+    cost_source: UsageCostSource = Field(default=UsageCostSource.UNKNOWN, index=True)
+    provider_usage_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ProjectBudgetPolicy(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("project_id", "period_type", name="uq_projectbudget_project_period"),
+        Index("ix_projectbudget_project_enabled", "project_id", "enabled"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    currency: str = Field(default="USD", max_length=12, index=True)
+    warning_limit: str | None = Field(default=None, max_length=80)
+    hard_limit: str | None = Field(default=None, max_length=80)
+    per_request_limit: str | None = Field(default=None, max_length=80)
+    period_type: BudgetPeriodType = Field(default=BudgetPeriodType.PROJECT_TOTAL, index=True)
+    unknown_cost_policy: UnknownCostPolicy = Field(default=UnknownCostPolicy.ALLOW_WITH_WARNING, index=True)
+    enabled: bool = Field(default=False, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ProviderVerificationRun(SQLModel, table=True):
+    __table_args__ = (Index("ix_providerverification_provider_created", "provider_profile_id", "created_at"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    provider_profile_id: int = Field(foreign_key="providerprofile.id", index=True)
+    model_profile_id: int | None = Field(default=None, foreign_key="providermodelprofile.id", index=True)
+    verification_type: ProviderVerificationType = Field(index=True)
+    status: ProviderVerificationStatus = Field(default=ProviderVerificationStatus.PENDING, index=True)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    max_cost: str | None = Field(default=None, max_length=80)
+    actual_cost: str | None = Field(default=None, max_length=80)
+    summary_json: str = Field(default="{}")
+    error_code: str | None = Field(default=None, max_length=120)
+    error_message: str | None = Field(default=None, max_length=1000)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class GenerationRequest(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
@@ -596,6 +765,11 @@ class GenerationRequest(SQLModel, table=True):
     negative_prompt_snapshot: str = ""
     structured_payload_json: str = Field(default="{}")
     compiler_version: str = Field(default="legacy-v1", index=True)
+    provider_key: str | None = Field(default=None, index=True)
+    provider_model_key: str | None = Field(default=None, index=True)
+    provider_config_revision: int | None = Field(default=None, index=True)
+    provider_capability_snapshot_json: str = Field(default="{}")
+    pricing_snapshot_json: str = Field(default="{}")
     input_asset_ids: str = ""
     output_asset_ids: str = ""
     error_code: str | None = None

@@ -91,6 +91,11 @@ def create_generation_request(
     negative_prompt_snapshot: str = "",
     structured_payload_json: str = "{}",
     compiler_version: str = "legacy-v1",
+    provider_key: str | None = None,
+    provider_model_key: str | None = None,
+    provider_config_revision: int | None = None,
+    provider_capability_snapshot_json: str = "{}",
+    pricing_snapshot_json: str = "{}",
     input_asset_ids: list[int] | None = None,
     commit: bool = True,
 ) -> GenerationRequest:
@@ -111,6 +116,11 @@ def create_generation_request(
         negative_prompt_snapshot=negative_prompt_snapshot,
         structured_payload_json=structured_payload_json,
         compiler_version=compiler_version,
+        provider_key=provider_key,
+        provider_model_key=provider_model_key,
+        provider_config_revision=provider_config_revision,
+        provider_capability_snapshot_json=provider_capability_snapshot_json,
+        pricing_snapshot_json=pricing_snapshot_json,
         input_asset_ids=json.dumps(input_asset_ids or []),
     )
     session.add(request)
@@ -255,6 +265,9 @@ def create_task_attempt(
             session.refresh(task)
         else:
             session.flush()
+    from app.services import provider_management
+
+    provider_management.ensure_task_usage_estimate(session, task)
     session.add(
         TaskStateChange(
             task_id=task.id or 0,
