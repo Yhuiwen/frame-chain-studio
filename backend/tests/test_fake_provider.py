@@ -27,6 +27,25 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.mark.anyio
+async def test_fake_provider_upload_returns_accessible_reference() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        upload = await client.post("/fake/v1/uploads", content=b"asset-bytes")
+        assert upload.status_code == 200
+        payload = upload.json()
+        assert payload["data"]["size"] == len(b"asset-bytes")
+        assert payload["data"]["url"].startswith("http://testserver/fake/v1/uploads/upload-")
+        assert "\\" not in payload["data"]["url"]
+
+        fetched = await client.get(payload["data"]["url"].removeprefix("http://testserver"))
+        assert fetched.status_code == 200
+        assert fetched.content == b"asset-bytes"
+
+        stats = (await client.get("/fake/v1/test/stats")).json()
+        assert payload["data"]["id"] in stats["uploads"]
+
+
 def mapping_for(response_format: str) -> ProviderMappingConfig:
     if response_format == "B":
         response = ResponseMappingConfig(

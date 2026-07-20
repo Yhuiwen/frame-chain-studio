@@ -16,6 +16,7 @@ from app.domain.task_state_machine import (
 )
 from app.models.entities import (
     Asset,
+    AssetStatus,
     AssetType,
     GenerationKind,
     GenerationMode,
@@ -76,6 +77,7 @@ def create_generation_request(
     *,
     project_id: int,
     shot_id: int,
+    shot_spec_revision: int = 1,
     kind: GenerationKind,
     provider_name: str,
     effective_provider_id: str | None = None,
@@ -93,6 +95,7 @@ def create_generation_request(
     request = GenerationRequest(
         project_id=project_id,
         shot_id=shot_id,
+        shot_spec_revision=shot_spec_revision,
         kind=kind,
         provider_name=provider_name,
         effective_provider_id=effective_provider_id,
@@ -142,6 +145,10 @@ def list_project_tasks(session: Session, project_id: int) -> list[GenerationTask
             .order_by(col(GenerationTask.created_at))
         ).all()
     )
+
+
+def list_all_tasks(session: Session) -> list[GenerationTask]:
+    return list(session.exec(select(GenerationTask).order_by(col(GenerationTask.created_at).desc())).all())
 
 
 def list_shot_tasks(session: Session, shot_id: int) -> list[GenerationTask]:
@@ -910,6 +917,7 @@ def register_result_asset(
     now: datetime | None = None,
 ) -> tuple[GenerationTask, Any]:
     from app.services import studio
+    from app.services import quality_service
 
     current_time = db_time(now)
     task = get_task(session, task_id)
@@ -935,6 +943,7 @@ def register_result_asset(
         )
         transition_task(session, task_id, ReliableTaskStatus.FAILED, reason_code="stale_result", now=current_time)
         return get_task(session, task_id), None
+    stale_revision = request.shot_spec_revision != shot.spec_revision
     if result.asset_id is not None:
         asset = session.get(Asset, result.asset_id)
     else:
@@ -951,6 +960,8 @@ def register_result_asset(
                 project_id=task.project_id,
                 shot_id=task.shot_id,
                 type=asset_type,
+                status=AssetStatus.STALE if stale_revision else AssetStatus.ACTIVE,
+                revision=request.shot_spec_revision,
                 path=final_path,
                 mime_type=result.mime_type or "application/octet-stream",
                 sha256=result.sha256,
@@ -967,6 +978,10 @@ def register_result_asset(
             session.add(asset)
             session.commit()
             session.refresh(asset)
+        elif stale_revision:
+            asset.status = AssetStatus.STALE
+            session.add(asset)
+            session.commit()
         result.asset_id = asset.id
     result.status = GenerationTaskResultStatus.COMPLETED
     result.finalized_at = result.finalized_at or current_time
@@ -981,6 +996,16 @@ def register_result_asset(
     request.updated_at = current_time
     session.add(request)
     session.commit()
+    if stale_revision:
+        record_task_error(
+            session,
+            task_id,
+            error_code="STALE_SPEC_REVISION",
+            error_message="Task result was produced for an older shot spec revision.",
+            now=current_time,
+        )
+        transition_task(session, task_id, ReliableTaskStatus.FAILED, reason_code="stale_spec_revision", now=current_time)
+        return get_task(session, task_id), asset
     if shot.status != shot_next_status:
         studio.transition_shot(session, shot, shot_next_status, workflow_reason)
     studio.log_task(session, request, shot, f"{request.kind.value.lower()} result registered", task=task)
@@ -991,6 +1016,8 @@ def register_result_asset(
         response_summary={"asset_id": result.asset_id, "asset_type": asset_type.value},
         now=current_time,
     )
+    if asset_type == AssetType.VIDEO:
+        quality_service.maybe_run_video_quality_checks(session, shot.id or 0, result.asset_id)
     return completed, session.get(Asset, result.asset_id)
 
 

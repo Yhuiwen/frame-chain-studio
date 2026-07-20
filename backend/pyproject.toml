@@ -1,7 +1,7 @@
 [project]
 name = "frame-chain-studio-backend"
-version = "0.1.0"
-description = "Mock backend for AI long-form storyboard video generation."
+version = "0.2.0rc2"
+description = "Continuity-aware backend for AI storyboard video generation."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",

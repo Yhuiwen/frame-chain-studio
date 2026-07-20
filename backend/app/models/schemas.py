@@ -4,14 +4,17 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.entities import (
+    AssetStatus,
     AssetType,
     GenerationKind,
     GenerationMode,
     GenerationTaskStatus,
     GenerationTaskType,
     ProjectRenderStatus,
+    QualityCheckSeverity,
     ReliableTaskStatus,
     ShotStatus,
+    StartFrameSourceType,
     WorkerStatus,
     WorkerType,
 )
@@ -79,6 +82,30 @@ class ShotUpdate(BaseModel):
     negative_prompt: str | None = None
 
 
+class ShotRevisionRequest(BaseModel):
+    reason: str = ""
+    changes: dict[str, object] = Field(default_factory=dict)
+
+
+class ShotRevisionRead(BaseModel):
+    shot_id: int
+    old_spec_revision: int
+    new_spec_revision: int
+    old_state: ShotStatus
+    new_state: ShotStatus
+    invalidated_asset_ids: list[int]
+    affected_downstream_shot_ids: list[int]
+
+
+class ShotStartFrameRequest(BaseModel):
+    action: str
+    asset_id: int | None = None
+
+
+class ShotTargetKeyframeRequest(BaseModel):
+    asset_id: int
+
+
 class ShotAssetSummary(BaseModel):
     asset_id: int
     url: str
@@ -86,6 +113,8 @@ class ShotAssetSummary(BaseModel):
     source_shot_id: int | None = None
     source_shot_title: str | None = None
     file_name: str
+    status: AssetStatus | None = None
+    revision: int | None = None
     created_at: datetime
 
 
@@ -101,6 +130,11 @@ class ShotRead(ShotCreate):
     sort_order: int
     status: ShotStatus
     start_frame_asset_id: int | None
+    spec_revision: int
+    approved_keyframe_asset_id: int | None = None
+    approved_video_asset_id: int | None = None
+    locked_tail_frame_asset_id: int | None = None
+    start_frame_source_type: StartFrameSourceType
     start_frame: ShotAssetSummary | None = None
     target_keyframe: ShotAssetSummary | None = None
     locked_tail_frame: ShotAssetSummary | None = None
@@ -120,6 +154,9 @@ class AssetRead(BaseModel):
     project_id: int
     shot_id: int | None
     type: AssetType
+    status: AssetStatus
+    revision: int
+    superseded_by_asset_id: int | None = None
     url: str
     file_name: str
     mime_type: str
@@ -147,6 +184,7 @@ class GenerationRequestRead(BaseModel):
     id: int
     project_id: int
     shot_id: int
+    shot_spec_revision: int
     kind: GenerationKind
     provider_name: str
     effective_provider_id: str | None
@@ -265,6 +303,24 @@ class TaskLogRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class QualityCheckResultRead(BaseModel):
+    id: int
+    project_id: int
+    shot_id: int | None
+    asset_id: int | None
+    reference_asset_id: int | None = None
+    check_type: str
+    severity: QualityCheckSeverity
+    score: float | None
+    threshold: float | None
+    message: str
+    details_json: str
+    details: dict[str, object] = {}
+    algorithm_version: str = "quality-v1"
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
 class TaskCancelRequest(BaseModel):
     reason: str = ""
 
@@ -302,5 +358,8 @@ class ProjectDetail(ProjectRead):
     requests: list[GenerationRequestRead]
     tasks: list[GenerationTaskRead]
     renders: list[ProjectRenderRead] = []
+    quality_checks: list[QualityCheckResultRead] = []
     completion: ProjectCompletionRead
     logs: list[TaskLogRead]
+    QualityCheckSeverity,
+    StartFrameSourceType,

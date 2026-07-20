@@ -5,7 +5,18 @@ import pytest
 from sqlmodel import Session
 
 from app.core.errors import AppError
-from app.models.entities import Asset, AssetType, GenerationKind, Project, Shot, ShotStatus, WorkerStatus, WorkerType, utcnow
+from app.models.entities import (
+    Asset,
+    AssetStatus,
+    AssetType,
+    GenerationKind,
+    Project,
+    Shot,
+    ShotStatus,
+    WorkerStatus,
+    WorkerType,
+    utcnow,
+)
 from app.models.schemas import GenerationStartRequest
 from app.providers.async_base import AsyncGenerationProvider
 from app.providers.models import (
@@ -87,12 +98,22 @@ def test_first_last_frame_requires_capability_unless_fallback_allowed(session: S
     session.commit()
     session.refresh(shot)
     start = Asset(project_id=project.id or 0, shot_id=shot.id, type=AssetType.START_FRAME, path="s.png", mime_type="image/png")
-    keyframe = Asset(project_id=project.id or 0, shot_id=shot.id, type=AssetType.KEYFRAME, path="k.png", mime_type="image/png")
+    keyframe = Asset(
+        project_id=project.id or 0,
+        shot_id=shot.id,
+        type=AssetType.KEYFRAME,
+        status=AssetStatus.APPROVED,
+        revision=shot.spec_revision,
+        path="k.png",
+        mime_type="image/png",
+    )
     session.add(start)
     session.add(keyframe)
     session.commit()
     session.refresh(start)
+    session.refresh(keyframe)
     shot.start_frame_asset_id = start.id
+    shot.approved_keyframe_asset_id = keyframe.id
     session.add(shot)
     session.commit()
     registry = ProviderRegistry()
@@ -157,7 +178,7 @@ def test_project_detail_returns_shot_actions_for_many_shots(session: Session) ->
         session.add(Shot(project_id=project.id or 0, title=f"Shot {index + 1}", sort_order=index))
     session.commit()
 
-    _, shots, _, _, tasks, _, _, _ = studio.project_detail(session, project.id or 0)
+    _, shots, _, _, tasks, _, _, _, _ = studio.project_detail(session, project.id or 0)
 
     assert len(shots) == 20
     assert tasks == []

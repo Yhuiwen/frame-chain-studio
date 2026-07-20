@@ -92,7 +92,12 @@ function Stop-ServiceItem($Item) {
   $ids = @($Item.pid) + @(Get-ProcessTreeIds $Item.pid)
   foreach ($id in @($ids | Select-Object -Unique | Sort-Object -Descending)) {
     $process = Get-Process -Id $id -ErrorAction SilentlyContinue
-    if ($process) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+    if ($process) {
+      Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+      try {
+        Wait-Process -Id $id -Timeout 10 -ErrorAction SilentlyContinue
+      } catch {}
+    }
   }
 }
 
@@ -123,6 +128,21 @@ function Assert-ServiceAlive($Name) {
     if (Test-Path $item.stderr) { $tail = (Get-Content $item.stderr -Tail 80) -join "`n" }
     Fail "process" "Service '$Name' exited early. stderr tail:`n$tail"
   }
+}
+
+function Wait-FileUnlocked($Path, [int]$TimeoutSeconds = 20) {
+  if (-not (Test-Path $Path)) { return }
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    try {
+      $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+      $stream.Close()
+      return
+    } catch {
+      Start-Sleep -Milliseconds 250
+    }
+  } while ((Get-Date) -lt $deadline)
+  Fail "restore" "Timed out waiting for database file to be released: $Path"
 }
 
 function Stop-TrackedService($Name) {
@@ -388,6 +408,22 @@ function Complete-Shot($ProjectId, $ShotId, [int]$ShotNumber, [bool]$RestartGene
   $videoAsset = @($detail.assets | Where-Object { $_.shot_id -eq $ShotId -and $_.type -eq "VIDEO" } | Sort-Object id -Descending | Select-Object -First 1)[0]
   if (-not $videoAsset) { Fail "shot:$ShotId" "Video asset is missing." }
   Assert-MediaRange $videoAsset.url $videoAsset.file_size "shot-$ShotNumber-video" | Out-Null
+  $qualityChecks = @()
+  $qualityDeadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $qualityDeadline) {
+    $qualityDetail = Invoke-Api "GET" "/projects/$ProjectId"
+    $qualityChecks = @($qualityDetail.quality_checks | Where-Object { $_.shot_id -eq $ShotId -and $_.asset_id -eq $videoAsset.id })
+    if ($qualityChecks.Count -ge 2) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if ($qualityChecks.Count -lt 2) { Fail "shot:$ShotId" "Quality checks were not generated for video review." }
+  $durationCheck = @($qualityChecks | Where-Object { $_.check_type -eq "DURATION_DEVIATION" -and $_.asset_id -eq $videoAsset.id })[0]
+  if (-not $durationCheck -or -not $durationCheck.algorithm_version) { Fail "shot:$ShotId" "Quality checks are not tied to the current video asset." }
+  $tailTargetChecks = @($qualityChecks | Where-Object { $_.check_type -like "TAIL_TARGET_*" })
+  if ($tailTargetChecks.Count -lt 1) { Fail "shot:$ShotId" "Quality checks did not compare the tail frame to the target keyframe." }
+  $startAnchorChecks = @($qualityChecks | Where-Object { $_.check_type -like "START_ANCHOR_*" })
+  if ($ShotNumber -gt 1 -and $startAnchorChecks.Count -lt 1) { Fail "shot:$ShotId" "Quality checks did not compare the inherited start frame." }
+  if ($shot.status -ne "VIDEO_REVIEW") { Fail "shot:$ShotId" "Quality checks changed the review state." }
   Assert-ProviderVideoRequest $videoRequest $ShotNumber
 
   Invoke-Api "POST" "/shots/$ShotId/video/approve" | Out-Null
@@ -403,6 +439,11 @@ function Complete-Shot($ProjectId, $ShotId, [int]$ShotNumber, [bool]$RestartGene
   $startFrameAsset = if ($shot.start_frame_asset_id) { Get-AssetById $detail $shot.start_frame_asset_id } else { $null }
   if ($keyTask.status -ne "SUCCEEDED" -or -not $keyTask.result_asset_id) { Fail "shot:$ShotId" "Keyframe task did not persist a result asset." }
   if ($videoTask.status -ne "SUCCEEDED" -or -not $videoTask.result_asset_id) { Fail "shot:$ShotId" "Video task did not persist a result asset." }
+  $shotAssets = @($detail.assets | Where-Object { $_.shot_id -eq $ShotId })
+  $qualityTypes = @($qualityChecks | ForEach-Object { $_.check_type } | Sort-Object -Unique)
+  $qualityVersions = @($qualityChecks | ForEach-Object { $_.algorithm_version } | Sort-Object -Unique)
+  $qualityWarnings = @($qualityChecks | Where-Object { $_.severity -eq "WARNING" })
+  $qualityErrors = @($qualityChecks | Where-Object { $_.severity -eq "ERROR" })
 
   $Summary.shots += [ordered]@{
     shot_id = $ShotId
@@ -418,6 +459,16 @@ function Complete-Shot($ProjectId, $ShotId, [int]$ShotNumber, [bool]$RestartGene
     video_request_id = $videoRequest.id
     video_task_id = $videoTask.id
     video_generation_mode = $videoRequest.generation_mode
+    quality_asset_id = $videoAsset.id
+    quality_result_count = $qualityChecks.Count
+    quality_check_types = $qualityTypes
+    quality_algorithm_versions = $qualityVersions
+    quality_warning_count = $qualityWarnings.Count
+    quality_error_count = $qualityErrors.Count
+    quality_tail_target_count = $tailTargetChecks.Count
+    quality_start_anchor_count = $startAnchorChecks.Count
+    asset_revision_count = @($shotAssets | Where-Object { $null -ne $_.revision } | ForEach-Object { $_.revision } | Sort-Object -Unique).Count
+    superseded_asset_count = @($shotAssets | Where-Object { $_.status -eq "SUPERSEDED" }).Count
   }
 }
 
@@ -441,12 +492,30 @@ with sqlite3.connect(db_path) as conn:
     shot_count = conn.execute("SELECT COUNT(*) FROM shot WHERE project_id = ?", (project_id,)).fetchone()[0]
     task_count = conn.execute("SELECT COUNT(*) FROM generationtask WHERE project_id = ?", (project_id,)).fetchone()[0]
     render_count = conn.execute("SELECT COUNT(*) FROM projectrender WHERE id = ? AND project_id = ?", (render_id, project_id)).fetchone()[0]
+    asset_count = conn.execute("SELECT COUNT(*) FROM asset WHERE project_id = ?", (project_id,)).fetchone()[0]
+    superseded_asset_count = conn.execute("SELECT COUNT(*) FROM asset WHERE project_id = ? AND status = 'SUPERSEDED'", (project_id,)).fetchone()[0]
+    asset_revision_count = conn.execute("SELECT COUNT(DISTINCT revision) FROM asset WHERE project_id = ? AND shot_id IS NOT NULL", (project_id,)).fetchone()[0]
+    quality_count = conn.execute("SELECT COUNT(*) FROM qualitycheckresult WHERE project_id = ?", (project_id,)).fetchone()[0]
+    quality_duplicate_count = conn.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT asset_id, COALESCE(reference_asset_id, -1), check_type, algorithm_version, COUNT(*) AS count
+            FROM qualitycheckresult
+            WHERE project_id = ?
+            GROUP BY asset_id, COALESCE(reference_asset_id, -1), check_type, algorithm_version
+            HAVING COUNT(*) > 1
+        )
+    """, (project_id,)).fetchone()[0]
 print(json.dumps({
     "quick_check": quick_check,
     "project_count": project_count,
     "shot_count": shot_count,
     "task_count": task_count,
     "render_count": render_count,
+    "asset_count": asset_count,
+    "asset_revision_count": asset_revision_count,
+    "superseded_asset_count": superseded_asset_count,
+    "quality_count": quality_count,
+    "quality_duplicate_count": quality_duplicate_count,
 }, sort_keys=True))
 '@ | python -
     return $json | ConvertFrom-Json
@@ -469,26 +538,28 @@ function Run-BackupRestoreVerification($ProjectId, $RenderId, $RenderUrl, $Rende
   if (-not (Test-Path $backupPath)) { Fail "backup" "Backup file does not exist: $backupPath" }
   if ((Get-Item $backupPath).Length -le 0) { Fail "backup" "Backup file is empty: $backupPath" }
   $backupCheck = Invoke-SqliteCheck $backupPath $ProjectId $RenderId
-  if ($backupCheck.quick_check -ne "ok" -or $backupCheck.project_count -ne 1 -or $backupCheck.render_count -ne 1) {
-    Fail "backup" "Backup DB did not contain the expected project/render."
+  if ($backupCheck.quick_check -ne "ok" -or $backupCheck.project_count -ne 1 -or $backupCheck.render_count -ne 1 -or $backupCheck.quality_count -lt 1 -or $backupCheck.quality_duplicate_count -ne 0) {
+    Fail "backup" "Backup DB did not contain the expected project/render/quality state."
   }
 
   Write-Host "==> Restore same project/render into isolated DB"
   Stop-TrackedServices
   $script:ProcessItems = @()
   Save-PidFile
+  Wait-FileUnlocked $DatabasePath
   Move-Item -LiteralPath $DatabasePath -Destination "$DatabasePath.before-restore" -Force
   Set-Content -Path $DatabasePath -Value "not sqlite" -Encoding ASCII
   $restoreOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "restore.ps1") -BackupPath $backupPath -Force
   if ($LASTEXITCODE -ne 0) { Fail "restore" "restore.ps1 failed." }
   $restoreCheck = Invoke-SqliteCheck $DatabasePath $ProjectId $RenderId
-  if ($restoreCheck.quick_check -ne "ok" -or $restoreCheck.project_count -ne 1 -or $restoreCheck.shot_count -ne 3 -or $restoreCheck.task_count -ne 6 -or $restoreCheck.render_count -ne 1) {
-    Fail "restore" "Restored DB did not contain expected project/render/task counts."
+  if ($restoreCheck.quick_check -ne "ok" -or $restoreCheck.project_count -ne 1 -or $restoreCheck.shot_count -ne 3 -or $restoreCheck.task_count -ne 6 -or $restoreCheck.render_count -ne 1 -or $restoreCheck.quality_count -lt 1 -or $restoreCheck.quality_duplicate_count -ne 0) {
+    Fail "restore" "Restored DB did not contain expected project/render/task/quality counts."
   }
 
   Restart-Stack
   $detail = Get-Detail $ProjectId
   if ($detail.shots.Count -ne 3 -or $detail.tasks.Count -ne 6) { Fail "restore" "Restored API detail has unexpected shot/task counts." }
+  if (@($detail.quality_checks).Count -lt 1) { Fail "restore" "Restored API detail is missing quality checks." }
   $render = Invoke-Api "GET" "/renders/$RenderId"
   if ($render.status -ne "SUCCEEDED" -or -not $render.output_asset_id) { Fail "restore" "Restored render did not remain succeeded." }
   Assert-MediaRange $RenderUrl $RenderSize "restored-render" | Out-Null
@@ -497,11 +568,20 @@ function Run-BackupRestoreVerification($ProjectId, $RenderId, $RenderUrl, $Rende
     backup_quick_check = $backupCheck.quick_check
     backup_project_id = $ProjectId
     backup_render_id = $RenderId
+    backup_asset_count = $backupCheck.asset_count
+    backup_quality_count = $backupCheck.quality_count
+    backup_quality_duplicate_count = $backupCheck.quality_duplicate_count
     restored_quick_check = $restoreCheck.quick_check
     restored_project_id = $ProjectId
     restored_render_id = $RenderId
     restored_shot_count = $detail.shots.Count
     restored_task_count = $detail.tasks.Count
+    restored_asset_count = $restoreCheck.asset_count
+    restored_asset_revision_count = $restoreCheck.asset_revision_count
+    restored_superseded_asset_count = $restoreCheck.superseded_asset_count
+    restored_quality_count = $restoreCheck.quality_count
+    restored_quality_duplicate_count = $restoreCheck.quality_duplicate_count
+    restored_api_quality_count = @($detail.quality_checks).Count
     restored_render_status = $render.status
   }
 }

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -85,6 +85,16 @@ class Settings(BaseSettings):
     render_video_codec: str = "libx264"
     render_audio_codec: str = "aac"
     render_temp_file_ttl_hours: int = 24
+    upload_max_image_bytes: int = 25 * 1024 * 1024
+    upload_max_image_pixels: int = 80_000_000
+    quality_dhash_warning_distance: int = Field(default=16, ge=0, le=64)
+    quality_pixel_mae_warning: float = Field(default=0.12, ge=0, le=1)
+    quality_brightness_warning: float = Field(default=0.15, ge=0, le=1)
+    quality_color_shift_warning: float = Field(default=0.18, ge=0, le=1)
+    quality_duration_warning_ratio: float = Field(default=0.12, ge=0, le=1)
+    quality_black_min_duration: float = Field(default=0.5, ge=0, le=60)
+    quality_freeze_min_duration: float = Field(default=0.75, ge=0, le=60)
+    quality_check_timeout_seconds: int = Field(default=30, ge=1, le=300)
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="FCS_")
 

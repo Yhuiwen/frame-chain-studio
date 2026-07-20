@@ -35,6 +35,11 @@ export interface Shot {
   negative_prompt: string;
   status: ShotStatus;
   start_frame_asset_id: number | null;
+  spec_revision?: number;
+  approved_keyframe_asset_id?: number | null;
+  approved_video_asset_id?: number | null;
+  locked_tail_frame_asset_id?: number | null;
+  start_frame_source_type?: "NONE" | "MANUAL" | "INHERITED";
   start_frame: ShotAssetSummary | null;
   target_keyframe: ShotAssetSummary | null;
   locked_tail_frame: ShotAssetSummary | null;
@@ -50,10 +55,12 @@ export interface ShotActionState {
 export interface ShotAssetSummary {
   asset_id: number;
   url: string;
-  source_type: "inherited" | "manual" | "generated";
+  source_type: "inherited" | "manual" | "generated" | "none";
   source_shot_id: number | null;
   source_shot_title: string | null;
   file_name: string;
+  status?: Asset["status"] | null;
+  revision?: number | null;
   created_at: string;
 }
 
@@ -62,6 +69,9 @@ export interface Asset {
   project_id: number;
   shot_id: number | null;
   type: "KEYFRAME" | "VIDEO" | "TAIL_FRAME" | "START_FRAME" | "PROJECT_RENDER";
+  status?: "ACTIVE" | "APPROVED" | "REJECTED" | "STALE" | "SUPERSEDED";
+  revision?: number;
+  superseded_by_asset_id?: number | null;
   url: string;
   file_name: string;
   mime_type: string;
@@ -78,6 +88,7 @@ export interface GenerationRequest {
   id: number;
   project_id: number;
   shot_id: number;
+  shot_spec_revision?: number;
   kind: "KEYFRAME" | "VIDEO" | "TAIL_FRAME";
   provider_name: string;
   effective_provider_id: string | null;
@@ -162,12 +173,30 @@ export interface TaskLog {
   created_at: string;
 }
 
+export interface QualityCheckResult {
+  id: number;
+  project_id: number;
+  shot_id: number | null;
+  asset_id: number | null;
+  reference_asset_id: number | null;
+  check_type: string;
+  severity: "INFO" | "WARNING" | "ERROR";
+  score: number | null;
+  threshold: number | null;
+  message: string;
+  details_json: string;
+  details: Record<string, unknown>;
+  algorithm_version: string;
+  created_at: string;
+}
+
 export interface ProjectDetail extends Project {
   shots: Shot[];
   assets: Asset[];
   requests: GenerationRequest[];
   tasks: GenerationTask[];
   renders: ProjectRender[];
+  quality_checks?: QualityCheckResult[];
   completion: ProjectCompletion;
   logs: TaskLog[];
 }
@@ -289,8 +318,12 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers =
+    init?.body instanceof FormData
+      ? { ...(init?.headers ?? {}) }
+      : { "Content-Type": "application/json", ...(init?.headers ?? {}) };
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers,
     ...init,
   });
   if (!response.ok) {
@@ -315,6 +348,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   listProviders: () => request<ProviderInfo[]>("/api/providers"),
   getWorkerStatus: () => request<WorkersStatus>("/api/workers/status"),
+  listTasks: () => request<GenerationTask[]>("/api/tasks"),
   listProjects: () => request<Project[]>("/api/projects"),
   createProject: (body: { name: string; description: string }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
@@ -325,6 +359,28 @@ export const api = {
     request<Shot>(`/api/projects/${projectId}/shots`, { method: "POST", body: JSON.stringify(body) }),
   updateShot: (shotId: number, body: Partial<Shot>) =>
     request<Shot>(`/api/shots/${shotId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  reviseShot: (shotId: number, body: { reason?: string; changes: Record<string, unknown> }) =>
+    request<{
+      shot_id: number;
+      old_spec_revision: number;
+      new_spec_revision: number;
+      old_state: ShotStatus;
+      new_state: ShotStatus;
+      invalidated_asset_ids: number[];
+      affected_downstream_shot_ids: number[];
+    }>(`/api/shots/${shotId}/revisions`, { method: "POST", body: JSON.stringify(body) }),
+  uploadProjectImage: (projectId: number, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<Asset>(`/api/projects/${projectId}/assets/images`, { method: "POST", body });
+  },
+  setStartFrame: (shotId: number, body: { action: "SELECT" | "CLEAR" | "RESTORE_INHERITED"; asset_id?: number | null }) =>
+    request<Shot>(`/api/shots/${shotId}/start-frame`, { method: "POST", body: JSON.stringify(body) }),
+  setTargetKeyframe: (shotId: number, body: { asset_id: number }) =>
+    request<Shot>(`/api/shots/${shotId}/target-keyframe`, { method: "POST", body: JSON.stringify(body) }),
+  listQualityChecks: (shotId: number) => request<QualityCheckResult[]>(`/api/shots/${shotId}/quality-checks`),
+  runQualityChecks: (shotId: number) =>
+    request<QualityCheckResult[]>(`/api/shots/${shotId}/quality-checks/run`, { method: "POST" }),
   deleteShot: (shotId: number) => request<void>(`/api/shots/${shotId}`, { method: "DELETE" }),
   reorderShots: (projectId: number, shots: Shot[]) =>
     request<Shot[]>(`/api/projects/${projectId}/shots/reorder`, {

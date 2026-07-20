@@ -1,7 +1,9 @@
 import hashlib
 import json
+from io import BytesIO
 from pathlib import Path
 
+from PIL import Image
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
@@ -12,8 +14,8 @@ from app.core.errors import AppError
 from app.db import get_session
 from app.main import app
 from app.media.ffmpeg import assert_probeable
-from app.models.entities import Asset, AssetType, GenerationRequest, GenerationTaskStatus, Shot, ShotStatus, TaskLog
-from app.models.schemas import ProjectCreate, ShotCreate
+from app.models.entities import Asset, AssetStatus, AssetType, GenerationRequest, GenerationTaskStatus, Shot, ShotStatus, TaskLog
+from app.models.schemas import ProjectCreate, ReorderShot, ShotCreate, ShotRevisionRequest, ShotUpdate
 from app.providers.mock import MockGenerationProvider
 from app.services import studio
 
@@ -60,7 +62,8 @@ def test_generation_flow_persists_assets_requests_logs_and_tail_frame(session: S
     completed = studio.approve_video(session, first.id or 0)
     assert completed.status == ShotStatus.COMPLETED
 
-    tail_asset = studio.latest_asset(session, first.id or 0, AssetType.TAIL_FRAME)
+    first = studio.get_shot_or_404(session, first.id or 0)
+    tail_asset = studio.get_current_locked_tail_frame(session, first)
     assert tail_asset is not None
     assert Path(tail_asset.path).exists()
 
@@ -84,6 +87,77 @@ def test_video_generation_requires_approved_keyframe(session: Session) -> None:
         assert getattr(exc, "code") == "KEYFRAME_NOT_APPROVED"
     else:
         raise AssertionError("Expected video generation to fail before keyframe approval")
+
+
+def test_revision_prompt_invalidates_completed_shot_and_downstream(session: Session) -> None:
+    first, second = create_two_shot_project(session)
+    complete_first_shot(session, first)
+    complete_first_shot(session, second)
+
+    result = studio.revise_shot_spec(
+        session,
+        first.id or 0,
+        ShotRevisionRequest(reason="change action", changes={"prompt": "new action"}),
+    )
+
+    first_after = studio.get_shot_or_404(session, first.id or 0)
+    second_after = studio.get_shot_or_404(session, second.id or 0)
+    assert result["old_spec_revision"] == 1
+    assert result["new_spec_revision"] == 2
+    assert first_after.status == ShotStatus.DRAFT
+    assert first_after.approved_keyframe_asset_id is None
+    assert first_after.approved_video_asset_id is None
+    assert first_after.locked_tail_frame_asset_id is None
+    assert second_after.status in {ShotStatus.DRAFT, ShotStatus.KEYFRAME_APPROVED}
+    assert session.exec(select(Asset).where(Asset.shot_id == first.id, Asset.status == AssetStatus.STALE)).all()
+
+
+def test_revision_duration_keeps_keyframe_but_invalidates_video(session: Session) -> None:
+    first, _second = create_two_shot_project(session)
+    complete_first_shot(session, first)
+    before = studio.get_shot_or_404(session, first.id or 0)
+    before_revision = before.spec_revision
+    keyframe_id = before.approved_keyframe_asset_id
+
+    studio.revise_shot_spec(
+        session,
+        first.id or 0,
+        ShotRevisionRequest(reason="retime", changes={"duration_seconds": 6}),
+    )
+
+    after = studio.get_shot_or_404(session, first.id or 0)
+    assert after.spec_revision == before_revision + 1
+    assert after.status == ShotStatus.KEYFRAME_APPROVED
+    assert after.approved_keyframe_asset_id != keyframe_id
+    assert after.approved_video_asset_id is None
+    assert after.locked_tail_frame_asset_id is None
+    old_keyframe = session.get(Asset, keyframe_id)
+    new_keyframe = session.get(Asset, after.approved_keyframe_asset_id)
+    assert old_keyframe is not None
+    assert new_keyframe is not None
+    assert old_keyframe.status == AssetStatus.SUPERSEDED
+    assert old_keyframe.superseded_by_asset_id == new_keyframe.id
+    assert new_keyframe.status == AssetStatus.APPROVED
+    assert new_keyframe.revision == after.spec_revision
+
+
+def test_title_patch_does_not_increment_revision(session: Session) -> None:
+    first, _second = create_two_shot_project(session)
+    before = first.spec_revision
+
+    updated = studio.update_shot(session, first.id or 0, ShotUpdate(title="Renamed"))
+
+    assert updated.title == "Renamed"
+    assert updated.spec_revision == before
+
+
+def test_patch_generation_field_requires_revision_api(session: Session) -> None:
+    first, _second = create_two_shot_project(session)
+
+    with pytest.raises(AppError) as exc:
+        studio.update_shot(session, first.id or 0, ShotUpdate(prompt="silent mutation"))
+
+    assert exc.value.code == "SHOT_REVISION_REQUIRED"
 
 
 def complete_first_shot(session: Session, shot: Shot) -> None:
@@ -127,7 +201,7 @@ def test_delete_middle_shot_rebuilds_start_frame_inheritance(session: Session) -
 
     before = studio.get_shot_or_404(session, last.id or 0)
     before_start = session.get(Asset, before.start_frame_asset_id)
-    middle_tail = studio.latest_asset(session, middle.id or 0, AssetType.TAIL_FRAME)
+    middle_tail = studio.get_current_locked_tail_frame(session, studio.get_shot_or_404(session, middle.id or 0))
     assert before_start is not None
     assert middle_tail is not None
     assert before_start.source_asset_id == middle_tail.id
@@ -136,7 +210,7 @@ def test_delete_middle_shot_rebuilds_start_frame_inheritance(session: Session) -
 
     after = studio.get_shot_or_404(session, last.id or 0)
     after_start = session.get(Asset, after.start_frame_asset_id)
-    first_tail = studio.latest_asset(session, first.id or 0, AssetType.TAIL_FRAME)
+    first_tail = studio.get_current_locked_tail_frame(session, studio.get_shot_or_404(session, first.id or 0))
     assert after.sort_order == 1
     assert after_start is not None
     assert first_tail is not None
@@ -189,7 +263,7 @@ def test_project_detail_returns_start_frame_source_and_readable_url(session: Ses
     first, second = create_two_shot_project(session)
     complete_first_shot(session, first)
 
-    _, shots, _, _, _, _, _, _ = studio.project_detail(session, first.project_id)
+    _, shots, _, _, _, _, _, _, _ = studio.project_detail(session, first.project_id)
     second_payload = next(shot for shot in shots if shot["id"] == second.id)
     start_frame = second_payload["start_frame"]
     assert isinstance(start_frame, dict)
@@ -233,6 +307,211 @@ def test_asset_read_rejects_outside_storage_and_missing_asset(session: Session, 
     with pytest.raises(AppError) as missing:
         asset_response(999999, session=session)
     assert missing.value.code == "ASSET_NOT_FOUND"
+
+
+def test_project_image_upload_validates_and_deduplicates(session: Session) -> None:
+    project = studio.create_project(session, ProjectCreate(name="Uploads"))
+    image_bytes = png_bytes()
+
+    first = studio.create_project_image_asset(
+        session,
+        project.id or 0,
+        content=image_bytes,
+        content_type="image/png",
+    )
+    assert first.sha256 == hashlib.sha256(image_bytes).hexdigest()
+    assert ".." not in Path(first.path).name
+    assert "\\" not in Path(first.path).name
+
+    duplicate = studio.create_project_image_asset(
+        session,
+        project.id or 0,
+        content=image_bytes,
+        content_type="image/png",
+    )
+    assert duplicate.id == first.id
+
+    with pytest.raises(AppError) as exc:
+        studio.create_project_image_asset(
+            session,
+            project.id or 0,
+            content=b"not an image",
+            content_type="image/png",
+        )
+    assert exc.value.code == "MEDIA_VALIDATION_ERROR"
+
+
+def png_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (4, 4), "red").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def create_shot_chain(session: Session, count: int) -> list[Shot]:
+    project = studio.create_project(session, ProjectCreate(name=f"{count} shot chain"))
+    return [
+        studio.create_shot(session, project.id or 0, ShotCreate(title=f"Shot {index + 1}"))
+        for index in range(count)
+    ]
+
+
+def test_four_shot_middle_prompt_revision_recursively_invalidates_inherited_chain(session: Session) -> None:
+    first, second, third, fourth = create_shot_chain(session, 4)
+    for shot in [first, second, third, fourth]:
+        complete_first_shot(session, shot)
+    second_before = studio.get_shot_or_404(session, second.id or 0)
+    third_before = studio.get_shot_or_404(session, third.id or 0)
+    fourth_before = studio.get_shot_or_404(session, fourth.id or 0)
+    stale_ids = {
+        second_before.approved_keyframe_asset_id,
+        second_before.approved_video_asset_id,
+        second_before.locked_tail_frame_asset_id,
+        third_before.start_frame_asset_id,
+        third_before.approved_video_asset_id,
+        third_before.locked_tail_frame_asset_id,
+        fourth_before.start_frame_asset_id,
+        fourth_before.approved_video_asset_id,
+        fourth_before.locked_tail_frame_asset_id,
+    }
+
+    studio.revise_shot_spec(
+        session,
+        second.id or 0,
+        ShotRevisionRequest(reason="rewrite middle", changes={"prompt": "different middle"}),
+    )
+
+    first_after = studio.get_shot_or_404(session, first.id or 0)
+    second_after = studio.get_shot_or_404(session, second.id or 0)
+    third_after = studio.get_shot_or_404(session, third.id or 0)
+    fourth_after = studio.get_shot_or_404(session, fourth.id or 0)
+    assert first_after.status == ShotStatus.COMPLETED
+    assert second_after.status == ShotStatus.DRAFT
+    assert third_after.status in {ShotStatus.DRAFT, ShotStatus.KEYFRAME_APPROVED}
+    assert fourth_after.status in {ShotStatus.DRAFT, ShotStatus.KEYFRAME_APPROVED}
+    assert second_after.approved_keyframe_asset_id is None
+    assert second_after.approved_video_asset_id is None
+    assert second_after.locked_tail_frame_asset_id is None
+    assert third_after.start_frame_asset_id is None
+    assert fourth_after.start_frame_asset_id is None
+    assert third_after.approved_video_asset_id is None
+    assert fourth_after.approved_video_asset_id is None
+    for asset_id in stale_ids:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        assert asset.status == AssetStatus.STALE
+    completion = studio.project_completion(
+        [first_after, second_after, third_after, fourth_after],
+        list(session.exec(select(Asset).where(Asset.project_id == first.project_id)).all()),
+    )
+    assert completion["can_render"] is False
+
+
+def test_manual_start_frame_breaks_upstream_continuity_propagation(session: Session) -> None:
+    first, second, third = create_shot_chain(session, 3)
+    manual = studio.create_project_image_asset(
+        session,
+        first.project_id,
+        content=png_bytes(),
+        content_type="image/png",
+    )
+    studio.set_shot_start_frame(session, second.id or 0, action="SELECT", asset_id=manual.id)
+    for shot in [first, second, third]:
+        complete_first_shot(session, shot)
+    second_before = studio.get_shot_or_404(session, second.id or 0)
+    third_before = studio.get_shot_or_404(session, third.id or 0)
+
+    studio.revise_shot_spec(
+        session,
+        first.id or 0,
+        ShotRevisionRequest(reason="rewrite first", changes={"prompt": "new first"}),
+    )
+
+    second_after = studio.get_shot_or_404(session, second.id or 0)
+    third_after = studio.get_shot_or_404(session, third.id or 0)
+    assert second_after.status == ShotStatus.COMPLETED
+    assert third_after.status == ShotStatus.COMPLETED
+    assert second_after.start_frame_source_type == second_before.start_frame_source_type == "MANUAL"
+    assert second_after.start_frame_asset_id == second_before.start_frame_asset_id
+    assert third_after.start_frame_asset_id == third_before.start_frame_asset_id
+    assert second_after.approved_video_asset_id == second_before.approved_video_asset_id
+    assert third_after.approved_video_asset_id == third_before.approved_video_asset_id
+
+
+def test_reorder_rebuilds_inherited_start_frames_and_invalidates_changed_segments(session: Session) -> None:
+    first, second, third = create_shot_chain(session, 3)
+    for shot in [first, second, third]:
+        complete_first_shot(session, shot)
+    second_before = studio.get_shot_or_404(session, second.id or 0)
+    third_before = studio.get_shot_or_404(session, third.id or 0)
+    old_second_start = second_before.start_frame_asset_id
+    old_third_start = third_before.start_frame_asset_id
+    old_third_video = third_before.approved_video_asset_id
+    first_tail = studio.get_current_locked_tail_frame(session, studio.get_shot_or_404(session, first.id or 0))
+    assert first_tail is not None
+
+    studio.reorder_shots(
+        session,
+        first.project_id,
+        [
+            ReorderShot(id=first.id or 0, sort_order=0),
+            ReorderShot(id=third.id or 0, sort_order=1),
+            ReorderShot(id=second.id or 0, sort_order=2),
+        ],
+    )
+
+    third_after = studio.get_shot_or_404(session, third.id or 0)
+    second_after = studio.get_shot_or_404(session, second.id or 0)
+    third_start = session.get(Asset, third_after.start_frame_asset_id)
+    assert third_start is not None
+    assert third_start.source_asset_id == first_tail.id
+    assert second_after.start_frame_asset_id is None
+    assert third_after.approved_video_asset_id is None
+    assert second_after.approved_video_asset_id is None
+    old_second_start_asset = session.get(Asset, old_second_start)
+    old_third_start_asset = session.get(Asset, old_third_start)
+    old_third_video_asset = session.get(Asset, old_third_video)
+    assert old_second_start_asset is not None
+    assert old_third_start_asset is not None
+    assert old_third_video_asset is not None
+    assert old_second_start_asset.status == AssetStatus.STALE
+    assert old_third_start_asset.status == AssetStatus.STALE
+    assert old_third_video_asset.status == AssetStatus.STALE
+
+
+def test_target_keyframe_replacement_enters_review_and_invalidates_downstream(session: Session) -> None:
+    first, second = create_two_shot_project(session)
+    complete_first_shot(session, first)
+    complete_first_shot(session, second)
+    first_before = studio.get_shot_or_404(session, first.id or 0)
+    second_before = studio.get_shot_or_404(session, second.id or 0)
+    stale_ids = [
+        first_before.approved_keyframe_asset_id,
+        first_before.approved_video_asset_id,
+        first_before.locked_tail_frame_asset_id,
+        second_before.start_frame_asset_id,
+        second_before.approved_video_asset_id,
+        second_before.locked_tail_frame_asset_id,
+    ]
+    upload = studio.create_project_image_asset(
+        session,
+        first.project_id,
+        content=png_bytes(),
+        content_type="image/png",
+    )
+
+    studio.set_shot_target_keyframe(session, first.id or 0, asset_id=upload.id or 0)
+
+    first_after = studio.get_shot_or_404(session, first.id or 0)
+    second_after = studio.get_shot_or_404(session, second.id or 0)
+    assert first_after.status == ShotStatus.KEYFRAME_REVIEW
+    assert first_after.approved_keyframe_asset_id is None
+    assert first_after.approved_video_asset_id is None
+    assert first_after.locked_tail_frame_asset_id is None
+    assert second_after.start_frame_asset_id is None
+    for asset_id in stale_ids:
+        asset = session.get(Asset, asset_id)
+        assert asset is not None
+        assert asset.status == AssetStatus.STALE
 
 
 def test_repeated_video_approval_does_not_duplicate_tail_or_start_assets(session: Session) -> None:

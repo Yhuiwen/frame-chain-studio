@@ -17,6 +17,7 @@ from app.media.ffmpeg import require_binary
 from app.media.validation import validate_video
 from app.models.entities import (
     Asset,
+    AssetStatus,
     AssetType,
     ProjectRender,
     ProjectRenderStatus,
@@ -87,13 +88,23 @@ def build_input_manifest(session: Session, project_id: int, *, allow_partial_ren
     manifest: list[dict[str, Any]] = []
     missing: list[int] = []
     for shot in shots:
-        video = studio.latest_asset(session, shot.id or 0, AssetType.VIDEO)
+        video = studio.get_current_approved_video(session, shot)
         if shot.status != ShotStatus.COMPLETED or video is None:
             missing.append(shot.id or 0)
             continue
+        if (
+            video.type != AssetType.VIDEO
+            or video.status != AssetStatus.APPROVED
+            or video.revision != shot.spec_revision
+            or video.shot_id != shot.id
+            or video.project_id != project_id
+        ):
+            raise AppError("RENDER_INPUT_INVALID", f"Video asset for Shot {shot.id} is not a current approved video.", 409)
         path = Path(video.path)
         if not path.exists():
             raise AppError("RENDER_INPUT_FILE_MISSING", f"Video file for Shot {shot.id} is missing.", 409)
+        if video.sha256 and sha256_file(path) != video.sha256:
+            raise AppError("RENDER_INPUT_CHANGED", f"Video file for Shot {shot.id} changed after approval.", 409)
         manifest.append(
             {
                 "shot_id": shot.id,

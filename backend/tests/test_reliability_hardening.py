@@ -13,6 +13,7 @@ from app.core.request_id import register_request_id_middleware
 from app.db import engine as app_engine
 from app.models.entities import (
     Asset,
+    AssetStatus,
     AssetType,
     GenerationKind,
     GenerationRequest,
@@ -46,6 +47,18 @@ def _video_review_shot(session: Session, tmp_path: Path, *, with_next: bool = Fa
     shot = studio.create_shot(session, project.id or 0, ShotCreate(title="S"))
     if with_next:
         studio.create_shot(session, project.id or 0, ShotCreate(title="Next"))
+    keyframe = Asset(
+        project_id=project.id or 0,
+        shot_id=shot.id,
+        type=AssetType.KEYFRAME,
+        status=AssetStatus.APPROVED,
+        revision=shot.spec_revision,
+        path=str(tmp_path / f"keyframe-{shot.id}.png"),
+        mime_type="image/png",
+    )
+    session.add(keyframe)
+    session.flush()
+    shot.approved_keyframe_asset_id = keyframe.id
     shot.status = ShotStatus.VIDEO_REVIEW
     session.add(shot)
     video_path = tmp_path / f"video-{shot.id}.mp4"
@@ -55,6 +68,8 @@ def _video_review_shot(session: Session, tmp_path: Path, *, with_next: bool = Fa
             project_id=project.id or 0,
             shot_id=shot.id,
             type=AssetType.VIDEO,
+            status=AssetStatus.ACTIVE,
+            revision=shot.spec_revision,
             path=str(video_path),
             mime_type="video/mp4",
         )
@@ -140,6 +155,18 @@ def test_video_approval_ffmpeg_failure_keeps_video_review(
 ) -> None:
     project = studio.create_project(session, ProjectCreate(name="P"))
     shot = studio.create_shot(session, project.id or 0, ShotCreate(title="S"))
+    keyframe = Asset(
+        project_id=project.id or 0,
+        shot_id=shot.id,
+        type=AssetType.KEYFRAME,
+        status=AssetStatus.APPROVED,
+        revision=shot.spec_revision,
+        path=str(tmp_path / "k.png"),
+        mime_type="image/png",
+    )
+    session.add(keyframe)
+    session.flush()
+    shot.approved_keyframe_asset_id = keyframe.id
     shot.status = ShotStatus.VIDEO_REVIEW
     session.add(shot)
     video_path = tmp_path / "v.mp4"
@@ -149,6 +176,8 @@ def test_video_approval_ffmpeg_failure_keeps_video_review(
             project_id=project.id or 0,
             shot_id=shot.id,
             type=AssetType.VIDEO,
+            status=AssetStatus.ACTIVE,
+            revision=shot.spec_revision,
             path=str(video_path),
             mime_type="video/mp4",
         )
@@ -173,6 +202,18 @@ def test_video_approval_db_failure_removes_moved_tail_file(
 ) -> None:
     project = studio.create_project(session, ProjectCreate(name="P"))
     shot = studio.create_shot(session, project.id or 0, ShotCreate(title="S"))
+    keyframe = Asset(
+        project_id=project.id or 0,
+        shot_id=shot.id,
+        type=AssetType.KEYFRAME,
+        status=AssetStatus.APPROVED,
+        revision=shot.spec_revision,
+        path=str(tmp_path / "k.png"),
+        mime_type="image/png",
+    )
+    session.add(keyframe)
+    session.flush()
+    shot.approved_keyframe_asset_id = keyframe.id
     shot.status = ShotStatus.VIDEO_REVIEW
     session.add(shot)
     video_path = tmp_path / "v.mp4"
@@ -181,6 +222,8 @@ def test_video_approval_db_failure_removes_moved_tail_file(
         project_id=project.id or 0,
         shot_id=shot.id,
         type=AssetType.VIDEO,
+        status=AssetStatus.ACTIVE,
+        revision=shot.spec_revision,
         path=str(video_path),
         mime_type="video/mp4",
     )

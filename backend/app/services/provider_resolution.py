@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from sqlmodel import Session
 
 from app.core.errors import AppError
-from app.models.entities import AssetType, GenerationKind, GenerationMode, Project, Shot
+from app.models.entities import GenerationKind, GenerationMode, Project, Shot
 from app.models.schemas import GenerationStartRequest
 from app.providers.exceptions import ProviderUnsupportedCapabilityError
 from app.providers.models import (
@@ -166,7 +166,7 @@ def _input_asset_ids(session: Session, shot: Shot, kind: GenerationKind) -> list
     assets: list[int] = []
     if shot.start_frame_asset_id:
         assets.append(shot.start_frame_asset_id)
-    keyframe = studio.latest_asset(session, shot.id or 0, AssetType.KEYFRAME)
+    keyframe = studio.get_current_approved_keyframe(session, shot)
     if keyframe and keyframe.id:
         assets.append(keyframe.id)
     return assets

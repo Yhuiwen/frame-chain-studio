@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import shutil
+import hashlib
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -10,10 +12,16 @@ from sqlmodel import Session, col, select
 
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.domain.continuity_invariants import (
+    validate_project_continuity_invariants,
+    validate_shot_invariants,
+)
 from app.domain.state_machine import ensure_transition_allowed
 from app.media.ffmpeg import extract_tail_frame
+from app.media.validation import MediaValidationError, validate_image
 from app.models.entities import (
     Asset,
+    AssetStatus,
     AssetType,
     GenerationKind,
     GenerationRequest,
@@ -27,15 +35,16 @@ from app.models.entities import (
     Shot,
     ShotStateChange,
     ShotStatus,
+    StartFrameSourceType,
     TaskCommand,
     TaskLog,
     TaskStateChange,
     WorkerHeartbeat,
     utcnow,
 )
-from app.models.schemas import ProjectCreate, ProjectUpdate, ReorderShot, ShotCreate, ShotUpdate
+from app.models.schemas import ProjectCreate, ProjectUpdate, ReorderShot, ShotCreate, ShotRevisionRequest, ShotUpdate
 from app.providers.base import GenerationProvider
-from app.services import task_service
+from app.services import quality_service, task_service
 
 ACTIVE_GENERATION_STATUSES = task_service.ACTIVE_TASK_STATUSES
 ACTIVE_RENDER_STATUSES = {
@@ -46,6 +55,9 @@ ACTIVE_RENDER_STATUSES = {
     "VALIDATING",
     "FINALIZING",
 }
+GENERATION_SPEC_FIELDS = {"description", "prompt", "negative_prompt"}
+VIDEO_SPEC_FIELDS = {"duration_seconds"}
+DISPLAY_ONLY_FIELDS = {"title"}
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +125,9 @@ def delete_project(session: Session, project_id: int) -> None:
             session.delete(request)
         for shot in session.exec(select(Shot).where(Shot.project_id == project_id)).all():
             shot.start_frame_asset_id = None
+            shot.approved_keyframe_asset_id = None
+            shot.approved_video_asset_id = None
+            shot.locked_tail_frame_asset_id = None
             session.add(shot)
         session.flush()
         for asset in session.exec(select(Asset).where(Asset.project_id == project_id)).all():
@@ -156,13 +171,91 @@ def create_shot(session: Session, project_id: int, payload: ShotCreate) -> Shot:
 
 def update_shot(session: Session, shot_id: int, payload: ShotUpdate) -> Shot:
     shot = get_shot_or_404(session, shot_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    generation_updates = sorted(set(updates) - DISPLAY_ONLY_FIELDS)
+    if generation_updates:
+        raise AppError(
+            "SHOT_REVISION_REQUIRED",
+            f"Use the shot revision API to update generation fields: {generation_updates}.",
+            409,
+        )
+    for key, value in updates.items():
         setattr(shot, key, value)
     shot.updated_at = utcnow()
     session.add(shot)
     session.commit()
     session.refresh(shot)
     return shot
+
+
+def revise_shot_spec(session: Session, shot_id: int, payload: ShotRevisionRequest) -> dict[str, object]:
+    shot = get_shot_or_404(session, shot_id)
+    changes = payload.changes or {}
+    unknown = sorted(set(changes) - (DISPLAY_ONLY_FIELDS | GENERATION_SPEC_FIELDS | VIDEO_SPEC_FIELDS))
+    if unknown:
+        raise AppError("INVALID_REVISION_FIELDS", f"Unsupported revision fields: {unknown}.", 400)
+    old_revision = shot.spec_revision
+    old_state = shot.status
+    invalidated: list[int] = []
+    affects_keyframe = any(field in changes for field in GENERATION_SPEC_FIELDS)
+    affects_video_only = any(field in changes for field in VIDEO_SPEC_FIELDS) and not affects_keyframe
+    for key, value in changes.items():
+        setattr(shot, key, value)
+    if affects_keyframe or affects_video_only:
+        shot.spec_revision += 1
+        if affects_keyframe:
+            invalidated.extend(
+                invalidate_shot_assets(
+                    session,
+                    shot,
+                    asset_types={AssetType.KEYFRAME, AssetType.VIDEO, AssetType.TAIL_FRAME},
+                    clear_keyframe=True,
+                    clear_video=True,
+                    clear_tail=True,
+                )
+            )
+            new_state = ShotStatus.DRAFT
+        else:
+            keyframe = _copy_current_approved_keyframe_for_revision(session, shot)
+            invalidated.extend(
+                invalidate_shot_assets(
+                    session,
+                    shot,
+                    asset_types={AssetType.VIDEO, AssetType.TAIL_FRAME},
+                    clear_video=True,
+                    clear_tail=True,
+                )
+            )
+            if keyframe is not None:
+                shot.approved_keyframe_asset_id = keyframe.id
+                session.add(shot)
+            new_state = ShotStatus.KEYFRAME_APPROVED if get_current_approved_keyframe(session, shot) else ShotStatus.DRAFT
+        previous = shot.status
+        shot.status = new_state
+        session.add(ShotStateChange(shot_id=shot.id or 0, from_status=previous, to_status=new_state, reason="shot_revised"))
+    shot.updated_at = utcnow()
+    session.add(shot)
+    affected = invalidate_downstream_shots(session, shot, reason=payload.reason or "shot_revised")
+    rebuild_project_continuity_chain(session, shot.project_id, reason=payload.reason or "shot_revised")
+    log_task(
+        session,
+        None,
+        shot,
+        f"Shot revised from spec {old_revision} to {shot.spec_revision}: {payload.reason}",
+        commit=False,
+    )
+    validate_project_continuity_invariants(session, shot.project_id)
+    session.commit()
+    session.refresh(shot)
+    return {
+        "shot_id": shot.id,
+        "old_spec_revision": old_revision,
+        "new_spec_revision": shot.spec_revision,
+        "old_state": old_state,
+        "new_state": shot.status,
+        "invalidated_asset_ids": sorted(set(invalidated)),
+        "affected_downstream_shot_ids": sorted(set(affected)),
+    }
 
 
 def delete_shot(session: Session, shot_id: int) -> None:
@@ -200,6 +293,15 @@ def delete_shot(session: Session, shot_id: int) -> None:
         for other_shot in session.exec(select(Shot).where(col(Shot.start_frame_asset_id).in_(asset_ids_to_delete))).all():
             other_shot.start_frame_asset_id = None
             other_shot.updated_at = utcnow()
+            session.add(other_shot)
+        for other_shot in session.exec(select(Shot).where(col(Shot.approved_keyframe_asset_id).in_(asset_ids_to_delete))).all():
+            other_shot.approved_keyframe_asset_id = None
+            session.add(other_shot)
+        for other_shot in session.exec(select(Shot).where(col(Shot.approved_video_asset_id).in_(asset_ids_to_delete))).all():
+            other_shot.approved_video_asset_id = None
+            session.add(other_shot)
+        for other_shot in session.exec(select(Shot).where(col(Shot.locked_tail_frame_asset_id).in_(asset_ids_to_delete))).all():
+            other_shot.locked_tail_frame_asset_id = None
             session.add(other_shot)
         for task in session.exec(select(GenerationTask).where(col(GenerationTask.result_asset_id).in_(asset_ids_to_delete))).all():
             task.result_asset_id = None
@@ -352,6 +454,139 @@ def _safe_storage_path(path: Path) -> str:
         return Path(path).name
 
 
+def create_project_image_asset(
+    session: Session,
+    project_id: int,
+    *,
+    content: bytes,
+    content_type: str | None,
+) -> Asset:
+    get_project_or_404(session, project_id)
+    settings = get_settings()
+    if not content:
+        raise AppError("UPLOAD_EMPTY", "Uploaded image is empty.", 400)
+    if len(content) > settings.upload_max_image_bytes:
+        raise AppError("UPLOAD_TOO_LARGE", "Uploaded image exceeds the configured byte limit.", 413)
+    digest = hashlib.sha256(content).hexdigest()
+    existing = session.exec(
+        select(Asset).where(Asset.project_id == project_id, col(Asset.shot_id).is_(None), Asset.sha256 == digest)
+    ).first()
+    if existing is not None:
+        return existing
+    temp_dir = settings.storage_dir / "temp" / "uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid4().hex}.upload"
+    temp_path.write_bytes(content)
+    try:
+        try:
+            metadata = validate_image(temp_path, max_pixels=settings.upload_max_image_pixels)
+        except MediaValidationError as exc:
+            raise AppError(exc.code, str(exc), 400) from exc
+        if content_type and content_type not in {"application/octet-stream", metadata.mime_type}:
+            raise AppError("UPLOAD_MIME_MISMATCH", "Uploaded image MIME type does not match its decoded format.", 400)
+        extension = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[metadata.mime_type]
+        final_path = settings.storage_dir / f"project-{project_id}" / "uploads" / f"image-{uuid4().hex}{extension}"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(temp_path), final_path)
+        asset = Asset(
+            project_id=project_id,
+            shot_id=None,
+            type=AssetType.START_FRAME,
+            status=AssetStatus.ACTIVE,
+            revision=1,
+            path=str(final_path),
+            mime_type=metadata.mime_type,
+            sha256=digest,
+            file_size=len(content),
+            width=metadata.width,
+            height=metadata.height,
+        )
+        session.add(asset)
+        session.commit()
+        session.refresh(asset)
+        return asset
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def set_shot_start_frame(session: Session, shot_id: int, *, action: str, asset_id: int | None = None) -> Shot:
+    shot = get_shot_or_404(session, shot_id)
+    normalized = action.upper()
+    if normalized == "CLEAR":
+        _clear_start_frame(session, shot)
+    elif normalized == "RESTORE_INHERITED":
+        shot.start_frame_source_type = StartFrameSourceType.INHERITED
+        shot.updated_at = utcnow()
+        session.add(shot)
+        rebuild_project_continuity_chain(session, shot.project_id, reason="start_frame_restored")
+    elif normalized == "SELECT":
+        asset = _project_image_asset_or_404(session, shot.project_id, asset_id)
+        shot.start_frame_asset_id = asset.id
+        shot.start_frame_source_type = StartFrameSourceType.MANUAL
+        shot.updated_at = utcnow()
+        session.add(shot)
+    else:
+        raise AppError("INVALID_START_FRAME_ACTION", "Unsupported start frame action.", 400)
+    _invalidate_after_start_frame_change(session, shot, "start_frame_changed")
+    affected = invalidate_downstream_shots(session, shot, reason="start_frame_changed")
+    if affected:
+        rebuild_project_continuity_chain(session, shot.project_id, reason="start_frame_changed")
+    validate_project_continuity_invariants(session, shot.project_id)
+    session.commit()
+    session.refresh(shot)
+    return shot
+
+
+def set_shot_target_keyframe(session: Session, shot_id: int, *, asset_id: int) -> Shot:
+    shot = get_shot_or_404(session, shot_id)
+    source = _project_image_asset_or_404(session, shot.project_id, asset_id)
+    invalidate_shot_assets(
+        session,
+        shot,
+        asset_types={AssetType.KEYFRAME, AssetType.VIDEO, AssetType.TAIL_FRAME},
+        clear_keyframe=True,
+        clear_video=True,
+        clear_tail=True,
+    )
+    keyframe = Asset(
+        project_id=shot.project_id,
+        shot_id=shot.id,
+        type=AssetType.KEYFRAME,
+        status=AssetStatus.ACTIVE,
+        revision=shot.spec_revision,
+        path=source.path,
+        mime_type=source.mime_type,
+        source_asset_id=source.id,
+        sha256=source.sha256,
+        file_size=source.file_size,
+        width=source.width,
+        height=source.height,
+    )
+    session.add(keyframe)
+    session.flush()
+    previous = shot.status
+    shot.status = ShotStatus.KEYFRAME_REVIEW
+    shot.updated_at = utcnow()
+    session.add(shot)
+    session.add(ShotStateChange(shot_id=shot.id or 0, from_status=previous, to_status=shot.status, reason="manual_keyframe_uploaded"))
+    invalidate_downstream_shots(session, shot, reason="manual_keyframe_uploaded")
+    validate_project_continuity_invariants(session, shot.project_id)
+    session.commit()
+    session.refresh(shot)
+    return shot
+
+
+def _project_image_asset_or_404(session: Session, project_id: int, asset_id: int | None) -> Asset:
+    if asset_id is None:
+        raise AppError("ASSET_REQUIRED", "An image asset id is required.", 400)
+    asset = session.get(Asset, asset_id)
+    if asset is None or asset.project_id != project_id:
+        raise AppError("ASSET_NOT_FOUND", f"Asset {asset_id} was not found in this project.", 404)
+    if asset.mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise AppError("ASSET_NOT_IMAGE", "Selected asset is not an accepted image.", 400)
+    return asset
+
+
 def relink_start_frame_after_delete(
     session: Session,
     previous_shot: Shot | None,
@@ -366,9 +601,10 @@ def relink_start_frame_after_delete(
     ).all():
         session.delete(start_asset)
 
-    tail_asset = latest_asset(session, previous_shot.id or 0, AssetType.TAIL_FRAME) if previous_shot else None
+    tail_asset = get_current_locked_tail_frame(session, previous_shot) if previous_shot else None
     if tail_asset is None or tail_asset.id is None:
         next_shot.start_frame_asset_id = None
+        next_shot.start_frame_source_type = StartFrameSourceType.NONE
         next_shot.updated_at = utcnow()
         session.add(next_shot)
         return
@@ -377,6 +613,8 @@ def relink_start_frame_after_delete(
         project_id=next_shot.project_id,
         shot_id=next_shot.id,
         type=AssetType.START_FRAME,
+        status=AssetStatus.APPROVED,
+        revision=next_shot.spec_revision,
         path=tail_asset.path,
         mime_type=tail_asset.mime_type,
         source_asset_id=tail_asset.id,
@@ -384,6 +622,7 @@ def relink_start_frame_after_delete(
     session.add(inherited)
     session.flush()
     next_shot.start_frame_asset_id = inherited.id
+    next_shot.start_frame_source_type = StartFrameSourceType.INHERITED
     next_shot.updated_at = utcnow()
     session.add(next_shot)
 
@@ -396,6 +635,7 @@ def list_project_shots(session: Session, project_id: int) -> list[Shot]:
 
 
 def reorder_shots(session: Session, project_id: int, items: list[ReorderShot]) -> list[Shot]:
+    _ensure_project_reorderable(session, project_id)
     shots = {shot.id: shot for shot in list_project_shots(session, project_id)}
     if len(items) != len(shots):
         raise AppError("INVALID_SHOT_ORDER", "Reorder payload must include every shot in the project.", 400)
@@ -421,8 +661,120 @@ def reorder_shots(session: Session, project_id: int, items: list[ReorderShot]) -
         shot.sort_order = item.sort_order
         shot.updated_at = utcnow()
         session.add(shot)
+    rebuild_project_continuity_chain(session, project_id, reason="shots_reordered")
+    validate_project_continuity_invariants(session, project_id)
     session.commit()
     return list_project_shots(session, project_id)
+
+
+def _ensure_project_reorderable(session: Session, project_id: int) -> None:
+    active = session.exec(
+        select(GenerationTask).where(
+            GenerationTask.project_id == project_id,
+            col(GenerationTask.status).in_([status.value for status in ACTIVE_GENERATION_STATUSES]),
+        )
+    ).first()
+    if active:
+        raise AppError("PROJECT_HAS_ACTIVE_TASKS", f"Project has active generation task {active.id}.", 409)
+    active_render = session.exec(
+        select(ProjectRender).where(
+            ProjectRender.project_id == project_id,
+            col(ProjectRender.status).in_(list(ACTIVE_RENDER_STATUSES)),
+        )
+    ).first()
+    if active_render:
+        raise AppError("PROJECT_HAS_ACTIVE_RENDER", f"Project has active render {active_render.id}.", 409)
+
+
+def rebuild_project_continuity_chain(session: Session, project_id: int, *, reason: str) -> list[int]:
+    shots = list_project_shots(session, project_id)
+    affected: list[int] = []
+    previous_tail: Asset | None = None
+    for index, shot in enumerate(shots):
+        existing_start = session.get(Asset, shot.start_frame_asset_id) if shot.start_frame_asset_id else None
+        if index == 0:
+            if shot.start_frame_source_type == StartFrameSourceType.INHERITED:
+                _clear_start_frame(session, shot)
+                _invalidate_after_start_frame_change(session, shot, reason)
+                affected.append(shot.id or 0)
+            previous_tail = get_current_locked_tail_frame(session, shot)
+            continue
+        if shot.start_frame_source_type == StartFrameSourceType.MANUAL:
+            previous_tail = get_current_locked_tail_frame(session, shot)
+            continue
+        if previous_tail is None:
+            if shot.start_frame_asset_id is not None or shot.start_frame_source_type == StartFrameSourceType.INHERITED:
+                _clear_start_frame(session, shot)
+                _invalidate_after_start_frame_change(session, shot, reason)
+                affected.append(shot.id or 0)
+            previous_tail = get_current_locked_tail_frame(session, shot)
+            continue
+        if existing_start is None or existing_start.source_asset_id != previous_tail.id:
+            inherited = _set_inherited_start_frame(session, shot, previous_tail)
+            if inherited:
+                _invalidate_after_start_frame_change(session, shot, reason)
+                affected.append(shot.id or 0)
+        previous_tail = get_current_locked_tail_frame(session, shot)
+    return [item for item in affected if item]
+
+
+def _clear_start_frame(session: Session, shot: Shot) -> None:
+    existing = session.get(Asset, shot.start_frame_asset_id) if shot.start_frame_asset_id else None
+    if (
+        existing is not None
+        and existing.shot_id == shot.id
+        and existing.type == AssetType.START_FRAME
+        and existing.source_asset_id is not None
+        and existing.status in {AssetStatus.ACTIVE, AssetStatus.APPROVED}
+    ):
+        existing.status = AssetStatus.STALE
+        session.add(existing)
+    shot.start_frame_asset_id = None
+    shot.start_frame_source_type = StartFrameSourceType.NONE
+    shot.updated_at = utcnow()
+    session.add(shot)
+
+
+def _set_inherited_start_frame(session: Session, shot: Shot, tail_asset: Asset) -> Asset | None:
+    if tail_asset.id is None:
+        return None
+    _clear_start_frame(session, shot)
+    inherited = Asset(
+        project_id=shot.project_id,
+        shot_id=shot.id,
+        type=AssetType.START_FRAME,
+        status=AssetStatus.APPROVED,
+        revision=shot.spec_revision,
+        path=tail_asset.path,
+        mime_type=tail_asset.mime_type,
+        source_asset_id=tail_asset.id,
+        sha256=tail_asset.sha256,
+        file_size=tail_asset.file_size,
+        width=tail_asset.width,
+        height=tail_asset.height,
+    )
+    session.add(inherited)
+    session.flush()
+    shot.start_frame_asset_id = inherited.id
+    shot.start_frame_source_type = StartFrameSourceType.INHERITED
+    shot.updated_at = utcnow()
+    session.add(shot)
+    return inherited
+
+
+def _invalidate_after_start_frame_change(session: Session, shot: Shot, reason: str) -> None:
+    invalidate_shot_assets(
+        session,
+        shot,
+        asset_types={AssetType.VIDEO, AssetType.TAIL_FRAME},
+        clear_video=True,
+        clear_tail=True,
+    )
+    previous = shot.status
+    shot.status = ShotStatus.KEYFRAME_APPROVED if get_current_approved_keyframe(session, shot) else ShotStatus.DRAFT
+    shot.updated_at = utcnow()
+    session.add(shot)
+    session.add(ShotStateChange(shot_id=shot.id or 0, from_status=previous, to_status=shot.status, reason=reason))
 
 
 def log_state(
@@ -499,6 +851,7 @@ def create_generation_request(
         session,
         project_id=shot.project_id,
         shot_id=shot.id or 0,
+        shot_spec_revision=shot.spec_revision,
         kind=kind,
         provider_name=provider_id,
         effective_provider_id=provider_id,
@@ -642,7 +995,7 @@ def start_video_generation(session: Session, shot_id: int) -> GenerationRequest:
     shot = get_shot_or_404(session, shot_id)
     if shot.status != ShotStatus.KEYFRAME_APPROVED:
         raise AppError("KEYFRAME_NOT_APPROVED", "Video generation requires an approved keyframe.", 409)
-    keyframe = latest_asset(session, shot.id or 0, AssetType.KEYFRAME)
+    keyframe = get_current_approved_keyframe(session, shot)
     transition_shot(session, shot, ShotStatus.VIDEO_GENERATING, "video_generation_started")
     return create_generation_request(
         session,
@@ -658,6 +1011,156 @@ def latest_asset(session: Session, shot_id: int, asset_type: AssetType) -> Asset
         .where(Asset.shot_id == shot_id, Asset.type == asset_type)
         .order_by(col(Asset.created_at).desc())
     ).first()
+
+
+def current_asset_by_id(session: Session, asset_id: int | None, *, revision: int | None = None) -> Asset | None:
+    if asset_id is None:
+        return None
+    asset = session.get(Asset, asset_id)
+    if asset is None:
+        return None
+    if asset.status not in {AssetStatus.APPROVED, AssetStatus.ACTIVE}:
+        return None
+    if revision is not None and asset.revision != revision:
+        return None
+    return asset
+
+
+def latest_current_revision_asset(session: Session, shot: Shot, asset_type: AssetType) -> Asset | None:
+    return session.exec(
+        select(Asset)
+        .where(
+            Asset.shot_id == shot.id,
+            Asset.type == asset_type,
+            Asset.revision == shot.spec_revision,
+            col(Asset.status).in_([AssetStatus.ACTIVE.value, AssetStatus.APPROVED.value]),
+        )
+        .order_by(col(Asset.created_at).desc(), col(Asset.id).desc())
+    ).first()
+
+
+def supersede_current_asset(session: Session, asset_id: int | None, *, superseded_by: int | None) -> None:
+    asset = session.get(Asset, asset_id) if asset_id else None
+    if asset is None or asset.id == superseded_by:
+        return
+    asset.status = AssetStatus.SUPERSEDED
+    asset.superseded_by_asset_id = superseded_by
+    session.add(asset)
+
+
+def _copy_current_approved_keyframe_for_revision(session: Session, shot: Shot) -> Asset | None:
+    previous = session.get(Asset, shot.approved_keyframe_asset_id) if shot.approved_keyframe_asset_id else None
+    if previous is None:
+        return None
+    if previous.type != AssetType.KEYFRAME or previous.status != AssetStatus.APPROVED:
+        return None
+    copied = Asset(
+        project_id=previous.project_id,
+        shot_id=previous.shot_id,
+        type=previous.type,
+        status=AssetStatus.APPROVED,
+        revision=shot.spec_revision,
+        path=previous.path,
+        mime_type=previous.mime_type,
+        source_asset_id=previous.source_asset_id,
+        sha256=previous.sha256,
+        file_size=previous.file_size,
+        width=previous.width,
+        height=previous.height,
+        duration_seconds=previous.duration_seconds,
+        fps=previous.fps,
+        frame_count=previous.frame_count,
+        video_codec=previous.video_codec,
+        audio_codec=previous.audio_codec,
+    )
+    session.add(copied)
+    session.flush()
+    previous.status = AssetStatus.SUPERSEDED
+    previous.superseded_by_asset_id = copied.id
+    session.add(previous)
+    return copied
+
+
+def get_current_approved_keyframe(session: Session, shot: Shot) -> Asset | None:
+    asset = current_asset_by_id(session, shot.approved_keyframe_asset_id, revision=shot.spec_revision)
+    return asset if asset and asset.type == AssetType.KEYFRAME else None
+
+
+def get_current_display_keyframe(session: Session, shot: Shot) -> Asset | None:
+    return get_current_approved_keyframe(session, shot) or latest_current_revision_asset(session, shot, AssetType.KEYFRAME)
+
+
+def get_current_approved_video(session: Session, shot: Shot) -> Asset | None:
+    asset = current_asset_by_id(session, shot.approved_video_asset_id, revision=shot.spec_revision)
+    return asset if asset and asset.type == AssetType.VIDEO and asset.status == AssetStatus.APPROVED else None
+
+
+def get_current_locked_tail_frame(session: Session, shot: Shot) -> Asset | None:
+    asset = current_asset_by_id(session, shot.locked_tail_frame_asset_id, revision=shot.spec_revision)
+    return asset if asset and asset.type == AssetType.TAIL_FRAME else None
+
+
+def invalidate_shot_assets(
+    session: Session,
+    shot: Shot,
+    *,
+    asset_types: set[AssetType],
+    clear_keyframe: bool = False,
+    clear_video: bool = False,
+    clear_tail: bool = False,
+) -> list[int]:
+    invalidated: list[int] = []
+    for asset in session.exec(
+        select(Asset).where(
+            Asset.shot_id == shot.id,
+            col(Asset.type).in_([item.value for item in asset_types]),
+            col(Asset.status).in_([AssetStatus.ACTIVE.value, AssetStatus.APPROVED.value]),
+        )
+    ).all():
+        asset.status = AssetStatus.STALE
+        session.add(asset)
+        if asset.id is not None:
+            invalidated.append(asset.id)
+    if clear_keyframe:
+        shot.approved_keyframe_asset_id = None
+    if clear_video:
+        shot.approved_video_asset_id = None
+    if clear_tail:
+        shot.locked_tail_frame_asset_id = None
+    session.add(shot)
+    return invalidated
+
+
+def invalidate_downstream_shots(session: Session, shot: Shot, *, reason: str) -> list[int]:
+    affected: list[int] = []
+    downstream = list(
+        session.exec(
+            select(Shot)
+            .where(Shot.project_id == shot.project_id, Shot.sort_order > shot.sort_order)
+            .order_by(col(Shot.sort_order))
+        ).all()
+    )
+    for child in downstream:
+        if child.start_frame_source_type == StartFrameSourceType.MANUAL:
+            break
+        if child.start_frame_source_type != StartFrameSourceType.INHERITED:
+            continue
+        _clear_start_frame(session, child)
+        invalidate_shot_assets(
+            session,
+            child,
+            asset_types={AssetType.VIDEO, AssetType.TAIL_FRAME},
+            clear_video=True,
+            clear_tail=True,
+        )
+        previous = child.status
+        child.status = ShotStatus.KEYFRAME_APPROVED if get_current_approved_keyframe(session, child) else ShotStatus.DRAFT
+        child.updated_at = utcnow()
+        session.add(child)
+        session.add(ShotStateChange(shot_id=child.id or 0, from_status=previous, to_status=child.status, reason=reason))
+        if child.id is not None:
+            affected.append(child.id)
+    return affected
 
 
 def run_generation_request(
@@ -694,6 +1197,8 @@ def run_generation_request(
             project_id=request.project_id,
             shot_id=request.shot_id,
             type=asset_type,
+            status=AssetStatus.STALE if request.shot_spec_revision != shot.spec_revision else AssetStatus.ACTIVE,
+            revision=request.shot_spec_revision,
             path=str(output_path),
             mime_type=mime_type,
         )
@@ -711,8 +1216,19 @@ def run_generation_request(
             result_asset_id=asset.id,
             response_summary={"asset_id": asset.id, "asset_type": asset_type.value},
         )
-        transition_shot(session, shot, next_status, f"{request.kind.value.lower()}_generation_succeeded")
-        log_task(session, request, shot, f"{request.kind.value.lower()} request succeeded", task=task)
+        if request.shot_spec_revision == shot.spec_revision:
+            transition_shot(session, shot, next_status, f"{request.kind.value.lower()}_generation_succeeded")
+            log_task(session, request, shot, f"{request.kind.value.lower()} request succeeded", task=task)
+            if request.kind == GenerationKind.VIDEO:
+                quality_service.maybe_run_video_quality_checks(session, shot.id or 0, asset.id)
+        else:
+            task_service.record_task_error(
+                session,
+                task.id or 0,
+                error_code="STALE_SPEC_REVISION",
+                error_message="Task result was produced for an older shot spec revision.",
+            )
+            log_task(session, request, shot, "stale generation result registered without advancing shot", task=task)
     except Exception as exc:
         request.status = GenerationTaskStatus.FAILED
         request.error_code = exc.__class__.__name__
@@ -765,11 +1281,31 @@ def approve_keyframe(session: Session, shot_id: int) -> Shot:
     shot = get_shot_or_404(session, shot_id)
     if shot.status == ShotStatus.KEYFRAME_APPROVED:
         return shot
-    return transition_shot(session, shot, ShotStatus.KEYFRAME_APPROVED, "keyframe_approved")
+    if shot.status != ShotStatus.KEYFRAME_REVIEW:
+        raise AppError("INVALID_SHOT_STATE", "Keyframe approval requires KEYFRAME_REVIEW status.", 409)
+    asset = latest_current_revision_asset(session, shot, AssetType.KEYFRAME)
+    if asset is None:
+        raise AppError("KEYFRAME_ASSET_MISSING", "Cannot approve without a current keyframe asset.", 409)
+    supersede_current_asset(session, shot.approved_keyframe_asset_id, superseded_by=asset.id)
+    asset.status = AssetStatus.APPROVED
+    asset.revision = shot.spec_revision
+    shot.approved_keyframe_asset_id = asset.id
+    session.add(asset)
+    session.add(shot)
+    transition_shot(session, shot, ShotStatus.KEYFRAME_APPROVED, "keyframe_approved", commit=False)
+    validate_shot_invariants(session, shot)
+    session.commit()
+    session.refresh(shot)
+    return shot
 
 
 def reject_keyframe(session: Session, shot_id: int) -> Shot:
     shot = get_shot_or_404(session, shot_id)
+    asset = latest_current_revision_asset(session, shot, AssetType.KEYFRAME)
+    if asset is not None:
+        asset.status = AssetStatus.REJECTED
+        session.add(asset)
+        session.commit()
     return transition_shot(session, shot, ShotStatus.DRAFT, "keyframe_rejected")
 
 
@@ -780,7 +1316,7 @@ def approve_video(session: Session, shot_id: int) -> Shot:
         return shot
     if shot.status != ShotStatus.VIDEO_REVIEW:
         raise AppError("INVALID_SHOT_STATE", "Video approval requires VIDEO_REVIEW status.", 409)
-    video = latest_asset(session, shot_id, AssetType.VIDEO)
+    video = latest_current_revision_asset(session, shot, AssetType.VIDEO)
     if video is None:
         raise AppError("VIDEO_ASSET_MISSING", "Cannot extract tail frame without a video asset.", 409)
     video_path = Path(video.path)
@@ -789,7 +1325,12 @@ def approve_video(session: Session, shot_id: int) -> Shot:
     temp_dir = settings.storage_dir / "temp" / "tails"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_tail_path = temp_dir / f"shot-{shot.id}-{uuid4().hex}.png"
-    final_tail_path = settings.storage_dir / f"project-{shot.project_id}" / f"shot-{shot.id}" / f"tail-frame-shot-{shot.id}.png"
+    final_tail_path = (
+        settings.storage_dir
+        / f"project-{shot.project_id}"
+        / f"shot-{shot.id}"
+        / f"tail-frame-shot-{shot.id}-rev-{shot.spec_revision}-{uuid4().hex}.png"
+    )
     try:
         extract_tail_frame(video_path, temp_tail_path)
         _validate_tail_frame_temp(temp_tail_path, settings.storage_dir)
@@ -815,6 +1356,8 @@ def approve_video(session: Session, shot_id: int) -> Shot:
                     project_id=shot.project_id,
                     shot_id=shot.id,
                     type=AssetType.TAIL_FRAME,
+                    status=AssetStatus.APPROVED,
+                    revision=shot.spec_revision,
                     path=str(final_tail_path),
                     mime_type="image/png",
                     source_asset_id=video.id,
@@ -823,33 +1366,21 @@ def approve_video(session: Session, shot_id: int) -> Shot:
                 session.flush()
             else:
                 tail_asset.path = str(final_tail_path)
+                tail_asset.status = AssetStatus.APPROVED
+                tail_asset.revision = shot.spec_revision
                 session.add(tail_asset)
                 session.flush()
+            supersede_current_asset(session, shot.approved_video_asset_id, superseded_by=video.id)
+            video.status = AssetStatus.APPROVED
+            video.revision = shot.spec_revision
+            shot.approved_video_asset_id = video.id
+            shot.locked_tail_frame_asset_id = tail_asset.id
+            session.add(video)
+            session.add(shot)
             transition_shot(session, shot, ShotStatus.TAIL_FRAME_LOCKED, "tail_frame_extracted", commit=False)
-            next_shot = session.exec(
-                select(Shot)
-                .where(Shot.project_id == shot.project_id, Shot.sort_order > shot.sort_order)
-                .order_by(col(Shot.sort_order))
-            ).first()
-            if next_shot and tail_asset.id:
-                for existing_start in session.exec(
-                    select(Asset).where(Asset.shot_id == next_shot.id, Asset.type == AssetType.START_FRAME)
-                ).all():
-                    session.delete(existing_start)
-                start_asset = Asset(
-                    project_id=shot.project_id,
-                    shot_id=next_shot.id,
-                    type=AssetType.START_FRAME,
-                    path=tail_asset.path,
-                    mime_type=tail_asset.mime_type,
-                    source_asset_id=tail_asset.id,
-                )
-                session.add(start_asset)
-                session.flush()
-                next_shot.start_frame_asset_id = start_asset.id
-                next_shot.updated_at = utcnow()
-                session.add(next_shot)
+            rebuild_project_continuity_chain(session, shot.project_id, reason="tail_frame_locked")
             transition_shot(session, shot, ShotStatus.COMPLETED, "shot_completed", commit=False)
+            validate_project_continuity_invariants(session, shot.project_id)
             session.commit()
         except Exception:
             session.rollback()
@@ -865,6 +1396,11 @@ def approve_video(session: Session, shot_id: int) -> Shot:
 
 def reject_video(session: Session, shot_id: int) -> Shot:
     shot = get_shot_or_404(session, shot_id)
+    asset = latest_current_revision_asset(session, shot, AssetType.VIDEO)
+    if asset is not None:
+        asset.status = AssetStatus.REJECTED
+        session.add(asset)
+        session.commit()
     return transition_shot(session, shot, ShotStatus.KEYFRAME_APPROVED, "video_rejected")
 
 
@@ -893,6 +1429,7 @@ def project_detail(
     list[dict[str, object]],
     list[dict[str, object]],
     dict[str, object],
+    list[dict[str, object]],
     list[TaskLog],
 ]:
     project = get_project_or_404(session, project_id)
@@ -909,6 +1446,12 @@ def project_detail(
     )
     tasks = [task_payload(session, task) for task in task_service.list_project_tasks(session, project_id)]
     renders = [render_payload(render) for render in list_project_renders(session, project_id)]
+    quality_checks = [
+        quality_payload(item)
+        for shot in shots
+        for item in quality_service.list_shot_quality_checks(session, shot.id or 0)
+        if shot.id is not None
+    ]
     shot_ids = [shot.id for shot in shots if shot.id is not None]
     logs = list(
         session.exec(
@@ -919,7 +1462,7 @@ def project_detail(
     )
     serialized_assets = [asset_payload(asset) for asset in assets]
     serialized_shots = [shot_payload(session, shot) for shot in shots]
-    return project, serialized_shots, serialized_assets, requests, tasks, renders, project_completion(shots, assets), logs
+    return project, serialized_shots, serialized_assets, requests, tasks, renders, project_completion(shots, assets), quality_checks, logs
 
 
 def list_project_renders(session: Session, project_id: int) -> list[ProjectRender]:
@@ -950,16 +1493,42 @@ def render_payload(render: ProjectRender) -> dict[str, object]:
     }
 
 
+def quality_payload(result: object) -> dict[str, object]:
+    details_json = getattr(result, "details_json", "{}")
+    try:
+        details = json.loads(details_json) if isinstance(details_json, str) else {}
+    except json.JSONDecodeError:
+        details = {}
+    return {
+        "id": getattr(result, "id", None),
+        "project_id": getattr(result, "project_id", None),
+        "shot_id": getattr(result, "shot_id", None),
+        "asset_id": getattr(result, "asset_id", None),
+        "reference_asset_id": getattr(result, "reference_asset_id", None),
+        "check_type": getattr(result, "check_type", ""),
+        "severity": getattr(result, "severity", None),
+        "score": getattr(result, "score", None),
+        "threshold": getattr(result, "threshold", None),
+        "message": getattr(result, "message", ""),
+        "details_json": details_json,
+        "details": details,
+        "algorithm_version": getattr(result, "algorithm_version", "quality-v1"),
+        "created_at": getattr(result, "created_at", None),
+    }
+
+
 def project_completion(shots: list[Shot], assets: list[Asset]) -> dict[str, object]:
-    video_by_shot = {asset.shot_id: asset for asset in assets if asset.type == AssetType.VIDEO and asset.shot_id}
-    missing = [shot.id or 0 for shot in shots if shot.status != ShotStatus.COMPLETED or shot.id not in video_by_shot]
+    video_by_id = {asset.id: asset for asset in assets if asset.id is not None}
+    missing: list[int] = []
     estimated = 0.0
     for shot in shots:
         if shot.id is None:
             continue
-        video = video_by_shot.get(shot.id)
-        if video is not None:
-            estimated += video.duration_seconds or shot.duration_seconds
+        video = video_by_id.get(shot.approved_video_asset_id or -1)
+        if shot.status != ShotStatus.COMPLETED or video is None or video.status != AssetStatus.APPROVED or video.revision != shot.spec_revision:
+            missing.append(shot.id)
+            continue
+        estimated += video.duration_seconds or shot.duration_seconds
     reason = None
     if missing:
         reason = f"Missing approved video for Shot {missing[0]}"
@@ -1052,6 +1621,9 @@ def asset_payload(asset: Asset) -> dict[str, object]:
         "project_id": asset.project_id,
         "shot_id": asset.shot_id,
         "type": asset.type,
+        "status": asset.status,
+        "revision": asset.revision,
+        "superseded_by_asset_id": asset.superseded_by_asset_id,
         "url": asset_url(asset.id or 0),
         "file_name": Path(asset.path).name,
         "mime_type": asset.mime_type,
@@ -1089,13 +1661,15 @@ def asset_summary(
         "source_shot_id": source_shot_id,
         "source_shot_title": source_shot_title,
         "file_name": Path(asset.path).name,
+        "status": asset.status,
+        "revision": asset.revision,
         "created_at": asset.created_at,
     }
 
 
 def shot_payload(session: Session, shot: Shot) -> dict[str, object]:
     start_asset = session.get(Asset, shot.start_frame_asset_id) if shot.start_frame_asset_id else None
-    start_source_type = "inherited" if start_asset and start_asset.source_asset_id else "manual"
+    start_source_type = shot.start_frame_source_type.value.lower()
     return {
         "id": shot.id,
         "project_id": shot.project_id,
@@ -1107,11 +1681,16 @@ def shot_payload(session: Session, shot: Shot) -> dict[str, object]:
         "negative_prompt": shot.negative_prompt,
         "status": shot.status,
         "start_frame_asset_id": shot.start_frame_asset_id,
+        "spec_revision": shot.spec_revision,
+        "approved_keyframe_asset_id": shot.approved_keyframe_asset_id,
+        "approved_video_asset_id": shot.approved_video_asset_id,
+        "locked_tail_frame_asset_id": shot.locked_tail_frame_asset_id,
+        "start_frame_source_type": shot.start_frame_source_type,
         "start_frame": asset_summary(session, start_asset, start_source_type),
-        "target_keyframe": asset_summary(session, latest_asset(session, shot.id or 0, AssetType.KEYFRAME), "generated"),
+        "target_keyframe": asset_summary(session, get_current_display_keyframe(session, shot), "generated"),
         "locked_tail_frame": asset_summary(
             session,
-            latest_asset(session, shot.id or 0, AssetType.TAIL_FRAME),
+            get_current_locked_tail_frame(session, shot),
             "generated",
         ),
         "actions": shot_actions(shot),

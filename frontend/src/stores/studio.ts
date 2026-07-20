@@ -7,6 +7,7 @@ import {
   type Project,
   type ProjectDetail,
   type ProviderInfo,
+  type QualityCheckResult,
   type Shot,
   type TaskLog,
   type WorkersStatus,
@@ -61,6 +62,12 @@ export const useStudioStore = defineStore("studio", {
     tasksForSelected: (state): GenerationTask[] => {
       const shotId = state.selectedShotId ?? state.current?.shots[0]?.id;
       return (state.current?.tasks ?? []).filter((task) => !shotId || task.shot_id === shotId);
+    },
+    qualityChecksForSelected: (state): QualityCheckResult[] => {
+      const shot = state.current?.shots.find((item) => item.id === state.selectedShotId) ?? state.current?.shots[0];
+      if (!shot) return [];
+      const currentVideoId = shot.status === "VIDEO_REVIEW" ? state.current?.assets.find((asset) => asset.shot_id === shot.id && asset.type === "VIDEO" && asset.status === "ACTIVE" && asset.revision === shot.spec_revision)?.id : shot.approved_video_asset_id;
+      return (state.current?.quality_checks ?? []).filter((item) => item.shot_id === shot.id && item.asset_id === currentVideoId);
     },
     hasActiveTasks: (state): boolean =>
       (state.current?.requests ?? []).some((request) => ACTIVE_TASK_STATUSES.has(request.status)) ||
@@ -145,6 +152,11 @@ export const useStudioStore = defineStore("studio", {
       await api.updateShot(this.selectedShot.id, patch);
       if (this.current) await this.loadProject(this.current.id);
     },
+    async reviseSelectedShot(reason: string, changes: Record<string, unknown>) {
+      if (!this.selectedShot) return;
+      await api.reviseShot(this.selectedShot.id, { reason, changes });
+      if (this.current) await this.loadProject(this.current.id);
+    },
     async reorder(projectId: number, shots: Shot[]) {
       await api.reorderShots(projectId, shots);
       await this.loadProject(projectId);
@@ -155,6 +167,14 @@ export const useStudioStore = defineStore("studio", {
       if (!shot || !projectId) return;
       await action(shot.id);
       await this.loadProject(projectId);
+      this.selectedShotId = shot.id;
+    },
+    async runQualityChecks() {
+      const shot = this.selectedShot;
+      const projectId = this.current?.id;
+      if (!shot || !projectId) return;
+      await api.runQualityChecks(shot.id);
+      await this.loadProject(projectId, { showLoading: false });
       this.selectedShotId = shot.id;
     },
   },

@@ -60,6 +60,7 @@
 - Media type must be determined by Pillow or FFprobe validation, not URL suffix or Content-Type alone.
 - Result download, FFprobe, file moves, sleeps, and network calls must happen outside database transactions.
 - Asset creation from result processing must be idempotent per project, Shot, asset type, and SHA-256.
+- Asset identity is revision-aware. The same SHA-256 may exist across different Shot revisions, but current identity must stay unique per project, Shot, asset type, revision, and SHA-256.
 - ResultWorker must not directly mutate Shot fields. It must call workflow/service functions that validate Shot transitions.
 - Older task results must not overwrite newer task attempts. Stale results should be marked explicitly and skipped before download when detectable.
 - API payloads must not expose full result source URLs, presigned query strings, temp paths, storage roots, or local absolute paths.
@@ -68,6 +69,7 @@
 - Retry/cancel tests must cover legal and illegal manual retry, cancel idempotency, retry limits, provider cancel failures, and timeout paths.
 - Do not perform network requests, FFmpeg work, sleeps, or long-running provider operations inside database transactions.
 - Task completion must be idempotent and must not create duplicate result assets.
+- Quality checks are advisory review evidence only. They must be persisted against the current video asset, optional reference asset, check type, and algorithm version; they must not advance, approve, or reject Shots.
 - New task-model fields require an Alembic migration and migration tests.
 - After changing task models or migrations, run migration tests and `.\scripts\check.ps1`.
 - Project Provider defaults may store only safe Provider IDs, model names, aspect ratio, duration, and seed. Never store API keys, base URLs, or raw Provider JSON on `Project`.

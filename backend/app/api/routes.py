@@ -5,7 +5,7 @@ import tempfile
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from sqlalchemy import text
 from sqlmodel import Session
@@ -25,6 +25,10 @@ from app.models.schemas import (
     ReorderShot,
     ShotCreate,
     ShotRead,
+    ShotRevisionRead,
+    ShotRevisionRequest,
+    ShotStartFrameRequest,
+    ShotTargetKeyframeRequest,
     ShotUpdate,
     TaskCancelRequest,
     TaskRetryRequest,
@@ -32,12 +36,13 @@ from app.models.schemas import (
     ProjectRenderCreate,
     ProjectRenderRead,
     WorkersStatusRead,
+    QualityCheckResultRead,
 )
 from app.providers.config_loader import load_registry_from_env
 from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
-from app.services import provider_resolution, studio, task_service, worker_status
+from app.services import provider_resolution, quality_service, studio, task_service, worker_status
 from app.workers import render_service
 
 router = APIRouter()
@@ -131,6 +136,12 @@ def list_providers() -> list[ProviderInfo]:
 def workers_status(session: Session = Depends(get_session)) -> dict[str, object]:
     settings = get_settings()
     return worker_status.status_summary(session, stale_after_seconds=settings.worker_stale_after_seconds)
+
+
+@router.get("/tasks", response_model=list[GenerationTaskRead])
+def list_tasks(session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    tasks = task_service.list_all_tasks(session)
+    return [studio.task_payload(session, task) for task in tasks]
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=GenerationTaskRead)
@@ -295,7 +306,7 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def project_detail(project_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
-    project, shots, assets, requests, tasks, renders, completion, logs = studio.project_detail(session, project_id)
+    project, shots, assets, requests, tasks, renders, completion, quality_checks, logs = studio.project_detail(session, project_id)
     return {
         **ProjectRead.model_validate(project).model_dump(),
         "shots": shots,
@@ -303,6 +314,7 @@ def project_detail(project_id: int, session: Session = Depends(get_session)) -> 
         "requests": requests,
         "tasks": tasks,
         "renders": renders,
+        "quality_checks": quality_checks,
         "completion": completion,
         "logs": logs,
     }
@@ -329,9 +341,64 @@ def create_shot(project_id: int, payload: ShotCreate, session: Session = Depends
     return studio.create_shot(session, project_id, payload)
 
 
+@router.post("/projects/{project_id}/assets/images", response_model=dict, status_code=201)
+async def upload_project_image(
+    project_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    content = await file.read()
+    asset = studio.create_project_image_asset(
+        session,
+        project_id,
+        content=content,
+        content_type=file.content_type,
+    )
+    return studio.asset_payload(asset)
+
+
 @router.patch("/shots/{shot_id}", response_model=ShotRead)
 def update_shot(shot_id: int, payload: ShotUpdate, session: Session = Depends(get_session)) -> Shot:
     return studio.update_shot(session, shot_id, payload)
+
+
+@router.post("/shots/{shot_id}/revisions", response_model=ShotRevisionRead)
+def revise_shot(
+    shot_id: int,
+    payload: ShotRevisionRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return studio.revise_shot_spec(session, shot_id, payload)
+
+
+@router.post("/shots/{shot_id}/start-frame", response_model=ShotRead)
+def set_start_frame(
+    shot_id: int,
+    payload: ShotStartFrameRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    shot = studio.set_shot_start_frame(session, shot_id, action=payload.action, asset_id=payload.asset_id)
+    return studio.shot_payload(session, shot)
+
+
+@router.post("/shots/{shot_id}/target-keyframe", response_model=ShotRead)
+def set_target_keyframe(
+    shot_id: int,
+    payload: ShotTargetKeyframeRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    shot = studio.set_shot_target_keyframe(session, shot_id, asset_id=payload.asset_id)
+    return studio.shot_payload(session, shot)
+
+
+@router.get("/shots/{shot_id}/quality-checks", response_model=list[QualityCheckResultRead])
+def list_quality_checks(shot_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return [studio.quality_payload(item) for item in quality_service.list_shot_quality_checks(session, shot_id)]
+
+
+@router.post("/shots/{shot_id}/quality-checks/run", response_model=list[QualityCheckResultRead])
+def run_quality_checks(shot_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return [studio.quality_payload(item) for item in quality_service.run_shot_quality_checks(session, shot_id)]
 
 
 @router.delete("/shots/{shot_id}", status_code=204)

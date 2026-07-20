@@ -26,6 +26,8 @@ class MediaMetadata:
     frame_count: int | None = None
     video_codec: str | None = None
     audio_codec: str | None = None
+    sample_aspect_ratio: str | None = None
+    display_aspect_ratio: str | None = None
 
 
 def validate_image(path: Path, *, max_pixels: int) -> MediaMetadata:
@@ -121,6 +123,8 @@ def validate_video(path: Path, *, timeout_seconds: int) -> MediaMetadata:
         frame_count=_positive_int(video_stream.get("nb_frames")),
         video_codec=str(video_stream.get("codec_name") or ""),
         audio_codec=str(audio_stream.get("codec_name") or "") if isinstance(audio_stream, dict) else None,
+        sample_aspect_ratio=str(video_stream.get("sample_aspect_ratio") or "") or None,
+        display_aspect_ratio=str(video_stream.get("display_aspect_ratio") or "") or None,
     )
 
 

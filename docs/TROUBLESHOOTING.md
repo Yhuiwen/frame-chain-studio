@@ -60,6 +60,18 @@ First/last-frame video requests use the local Fake Provider upload endpoint, `PO
 
 For release validation, backup and restore evidence must refer to the same `project_id` and `render.id` that completed the E2E run. Prefer `scripts/e2e-local.ps1` because it performs backup, destructive restore smoke, API restart, restored project/render lookup, and restored media Range verification in one isolated run.
 
+The RC3 E2E summary should also report restored quality-check counts and `quality_duplicate_count = 0`. If these are missing, run Alembic to head and repeat the isolated E2E script instead of reusing an older database.
+
+## Quality Checks Missing
+
+Quality checks run after a current video enters `VIDEO_REVIEW` or after a manual re-run from the API/UI. They require `ffmpeg` and `ffprobe`, the current video file, and any current start/keyframe reference files to be readable under configured storage. Failures are persisted as reviewer-visible check rows or sanitized task logs; local temp paths and storage roots should not appear in API payloads.
+
+Quality checks are advisory. A warning or error does not automatically reject a video, and a clean result does not approve it.
+
+## Duplicate Quality Rows
+
+Current quality-check identity is `(asset_id, reference_asset_id, check_type, algorithm_version)`, with `NULL` reference assets normalized for uniqueness in the migration. If duplicate current rows appear, verify the database has migration `20260720_0009` applied and check for manual inserts that bypassed the application service.
+
 ## PowerShell ExecutionPolicy
 
 Run scripts with `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\dev-start.ps1`.

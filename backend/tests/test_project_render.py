@@ -9,8 +9,18 @@ from app.core.errors import AppError
 from app.main import app
 from app.media.ffmpeg import create_test_video
 from app.media.validation import validate_video
-from app.models.entities import Asset, AssetType, Project, ProjectRender, ProjectRenderStatus, Shot, ShotStatus, WorkerHeartbeat
-from app.workers.render_service import RenderProcessingService, create_project_render
+from app.models.entities import (
+    Asset,
+    AssetStatus,
+    AssetType,
+    Project,
+    ProjectRender,
+    ProjectRenderStatus,
+    Shot,
+    ShotStatus,
+    WorkerHeartbeat,
+)
+from app.workers.render_service import RenderProcessingService, create_project_render, sha256_file
 from app.workers.render_worker import RenderWorker
 
 
@@ -26,6 +36,42 @@ def test_render_requires_completed_shots(session: Session) -> None:
         create_project_render(session, project_id=project.id or 0, idempotency_key="r1")
 
     assert exc_info.value.code == "RENDER_INPUT_INCOMPLETE"
+
+
+def test_render_rejects_stale_or_revision_mismatched_video_pointer(session: Session, tmp_path: Path) -> None:
+    project, shot, asset = completed_project_with_video(session, tmp_path)
+    asset.status = AssetStatus.STALE
+    session.add(asset)
+    session.commit()
+
+    with pytest.raises(AppError) as stale:
+        create_project_render(session, project_id=project.id or 0, idempotency_key="stale-video")
+
+    assert stale.value.code == "RENDER_INPUT_INCOMPLETE"
+
+    asset.status = AssetStatus.APPROVED
+    asset.revision = shot.spec_revision + 1
+    session.add(asset)
+    session.commit()
+
+    with pytest.raises(AppError) as revision:
+        create_project_render(session, project_id=project.id or 0, idempotency_key="wrong-revision")
+
+    assert revision.value.code == "RENDER_INPUT_INCOMPLETE"
+
+
+def test_render_rejects_changed_video_hash(session: Session, tmp_path: Path) -> None:
+    project, _shot, asset = completed_project_with_video(session, tmp_path)
+    path = Path(asset.path)
+    asset.sha256 = "0" * 64
+    session.add(asset)
+    session.commit()
+
+    with pytest.raises(AppError) as exc_info:
+        create_project_render(session, project_id=project.id or 0, idempotency_key="changed-video")
+
+    assert exc_info.value.code == "RENDER_INPUT_CHANGED"
+    assert str(path) not in exc_info.value.message
 
 
 def test_render_idempotency_returns_same_row(session: Session, tmp_path: Path) -> None:
@@ -116,14 +162,20 @@ def completed_project_with_video(session: Session, tmp_path: Path) -> tuple[Proj
         project_id=project.id or 0,
         shot_id=shot.id,
         type=AssetType.VIDEO,
+        status=AssetStatus.APPROVED,
+        revision=shot.spec_revision,
         path=str(video_path),
         mime_type="video/mp4",
         duration_seconds=0.5,
         width=1280,
         height=720,
         fps=24,
+        sha256=sha256_file(video_path),
     )
     session.add(asset)
     session.commit()
     session.refresh(asset)
+    shot.approved_video_asset_id = asset.id
+    session.add(shot)
+    session.commit()
     return project, shot, asset

@@ -29,6 +29,26 @@ class AssetType(str, Enum):
     PROJECT_RENDER = "PROJECT_RENDER"
 
 
+class AssetStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    STALE = "STALE"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class StartFrameSourceType(str, Enum):
+    NONE = "NONE"
+    MANUAL = "MANUAL"
+    INHERITED = "INHERITED"
+
+
+class QualityCheckSeverity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
 class GenerationKind(str, Enum):
     KEYFRAME = "KEYFRAME"
     VIDEO = "VIDEO"
@@ -175,6 +195,11 @@ class Shot(ShotBase, table=True):
     sort_order: int = Field(default=0, index=True)
     status: ShotStatus = Field(default=ShotStatus.DRAFT, index=True)
     start_frame_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    spec_revision: int = Field(default=1, index=True)
+    approved_keyframe_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    approved_video_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    locked_tail_frame_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    start_frame_source_type: StartFrameSourceType = Field(default=StartFrameSourceType.NONE, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     project: Project | None = Relationship(back_populates="shots")
@@ -182,14 +207,24 @@ class Shot(ShotBase, table=True):
 
 class Asset(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("project_id", "shot_id", "type", "sha256", name="uq_asset_project_shot_type_sha256"),
-        Index("ix_asset_project_shot_type_sha256", "project_id", "shot_id", "type", "sha256"),
+        UniqueConstraint(
+            "project_id",
+            "shot_id",
+            "type",
+            "revision",
+            "sha256",
+            name="uq_asset_project_shot_type_revision_sha256",
+        ),
+        Index("ix_asset_project_shot_type_revision_sha256", "project_id", "shot_id", "type", "revision", "sha256"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
     shot_id: int | None = Field(default=None, foreign_key="shot.id", index=True)
     type: AssetType = Field(index=True)
+    status: AssetStatus = Field(default=AssetStatus.ACTIVE, index=True)
+    revision: int = Field(default=1, index=True)
+    superseded_by_asset_id: int | None = Field(default=None, foreign_key="asset.id")
     path: str
     mime_type: str
     source_asset_id: int | None = Field(default=None, foreign_key="asset.id")
@@ -209,6 +244,7 @@ class GenerationRequest(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
     shot_id: int = Field(foreign_key="shot.id", index=True)
+    shot_spec_revision: int = Field(default=1, index=True)
     kind: GenerationKind = Field(index=True)
     provider_name: str
     effective_provider_id: str | None = Field(default=None, index=True)
@@ -419,6 +455,27 @@ class GenerationTaskResult(SQLModel, table=True):
     error_details_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class QualityCheckResult(SQLModel, table=True):
+    __table_args__ = (
+        Index("ix_qualitycheck_project_shot_created", "project_id", "shot_id", "created_at"),
+        Index("ix_qualitycheck_asset_type_created", "asset_id", "check_type", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    shot_id: int | None = Field(default=None, foreign_key="shot.id", index=True)
+    asset_id: int | None = Field(default=None, foreign_key="asset.id", index=True)
+    reference_asset_id: int | None = Field(default=None, foreign_key="asset.id", index=True)
+    check_type: str = Field(index=True)
+    severity: QualityCheckSeverity = Field(default=QualityCheckSeverity.INFO, index=True)
+    score: float | None = None
+    threshold: float | None = None
+    message: str
+    details_json: str = Field(default="{}")
+    algorithm_version: str = Field(default="quality-v1", index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
 class TaskCommand(SQLModel, table=True):

@@ -3,6 +3,11 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+import pytest
+from sqlmodel import Session, select
+
+from app.models.entities import Asset, AssetStatus, Shot
+from app.services import studio
 
 
 def alembic_config(db_path: Path) -> Config:
@@ -179,7 +184,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260719_0007"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0009"
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
     assert "job_deadline_at" in columns(db_path, "generationtask")
@@ -234,3 +239,357 @@ def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(t
             sa.text("SELECT sort_order FROM shot WHERE project_id = 1 ORDER BY sort_order")
         ).scalars().all()
         assert orders == [0, 1, 2]
+
+
+def test_continuity_revision_migration_backfills_completed_shot_asset_pointers(tmp_path: Path) -> None:
+    db_path = tmp_path / "continuity-backfill.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260719_0007")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO project (id, name, description, created_at, updated_at)
+                VALUES (1, 'Migrated Project', '', '2026-07-19 00:00:00', '2026-07-19 00:00:00')
+                """
+            )
+        )
+        for shot_id, title, status, sort_order, start_frame_asset_id in [
+            (1, "Complete", "COMPLETED", 0, None),
+            (2, "Keyframe Only", "KEYFRAME_APPROVED", 1, 7),
+            (3, "Draft", "DRAFT", 2, None),
+        ]:
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO shot (
+                        id, project_id, title, description, duration_seconds, prompt,
+                        negative_prompt, sort_order, status, start_frame_asset_id,
+                        created_at, updated_at
+                    )
+                    VALUES (:id, 1, :title, '', 4.0, '', '', :sort_order, :status,
+                            :start_frame_asset_id, '2026-07-19 00:00:00', '2026-07-19 00:00:00')
+                    """
+                ),
+                {
+                    "id": shot_id,
+                    "title": title,
+                    "status": status,
+                    "sort_order": sort_order,
+                    "start_frame_asset_id": start_frame_asset_id,
+                },
+            )
+        for asset_id, shot_id, asset_type, source_asset_id, created_at in [
+            (1, 1, "KEYFRAME", None, "2026-07-19 00:01:00"),
+            (2, 1, "KEYFRAME", None, "2026-07-19 00:02:00"),
+            (3, 1, "VIDEO", None, "2026-07-19 00:03:00"),
+            (4, 1, "VIDEO", None, "2026-07-19 00:04:00"),
+            (5, 1, "TAIL_FRAME", 4, "2026-07-19 00:05:00"),
+            (6, 1, "TAIL_FRAME", 3, "2026-07-19 00:06:00"),
+            (7, 2, "START_FRAME", 5, "2026-07-19 00:07:00"),
+            (8, 2, "KEYFRAME", None, "2026-07-19 00:08:00"),
+        ]:
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO asset (
+                        id, project_id, shot_id, type, path, mime_type, source_asset_id,
+                        created_at, sha256
+                    )
+                    VALUES (
+                        :id, 1, :shot_id, :type, :path, :mime_type, :source_asset_id,
+                        :created_at, :sha256
+                    )
+                    """
+                ),
+                {
+                    "id": asset_id,
+                    "shot_id": shot_id,
+                    "type": asset_type,
+                    "path": f"asset-{asset_id}",
+                    "mime_type": "video/mp4" if asset_type == "VIDEO" else "image/png",
+                    "source_asset_id": source_asset_id,
+                    "created_at": created_at,
+                    "sha256": f"sha-{asset_id}",
+                },
+            )
+        for request_id, shot_id, kind, status, input_ids, output_ids, updated_at in [
+            (1, 1, "KEYFRAME", "FAILED", "[]", "[1]", "2026-07-19 00:01:30"),
+            (2, 1, "KEYFRAME", "SUCCEEDED", "[]", "[2]", "2026-07-19 00:02:30"),
+            (3, 1, "VIDEO", "FAILED", "[2]", "[3]", "2026-07-19 00:03:30"),
+            (4, 1, "VIDEO", "SUCCEEDED", "[2]", "[4]", "2026-07-19 00:04:30"),
+            (5, 2, "KEYFRAME", "SUCCEEDED", "[7]", "[8]", "2026-07-19 00:08:30"),
+        ]:
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO generationrequest (
+                        id, project_id, shot_id, kind, provider_name, status,
+                        prompt_snapshot, negative_prompt_snapshot, input_asset_ids,
+                        output_asset_ids, created_at, updated_at
+                    )
+                    VALUES (:id, 1, :shot_id, :kind, 'mock', :status, '', '', :input_ids,
+                            :output_ids, '2026-07-19 00:00:00', :updated_at)
+                    """
+                ),
+                {
+                    "id": request_id,
+                    "shot_id": shot_id,
+                    "kind": kind,
+                    "status": status,
+                    "input_ids": input_ids,
+                    "output_ids": output_ids,
+                    "updated_at": updated_at,
+                },
+            )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        completed = connection.execute(
+            sa.text(
+                """
+                SELECT approved_keyframe_asset_id, approved_video_asset_id, locked_tail_frame_asset_id
+                FROM shot
+                WHERE id = 1
+                """
+            )
+        ).one()
+        assert tuple(completed) == (2, 4, 5)
+        keyframe_only = connection.execute(
+            sa.text(
+                """
+                SELECT approved_keyframe_asset_id, approved_video_asset_id, locked_tail_frame_asset_id,
+                       start_frame_source_type
+                FROM shot
+                WHERE id = 2
+                """
+            )
+        ).one()
+        assert tuple(keyframe_only) == (8, None, None, "INHERITED")
+        assert connection.execute(
+            sa.text("SELECT status FROM asset WHERE id IN (2, 4, 5) ORDER BY id")
+        ).scalars().all() == ["APPROVED", "APPROVED", "APPROVED"]
+        assert connection.execute(
+            sa.text("SELECT status FROM asset WHERE id IN (1, 3, 6) ORDER BY id")
+        ).scalars().all() == ["ACTIVE", "ACTIVE", "ACTIVE"]
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+        assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
+
+    with Session(engine) as session:
+        shot = session.get(Shot, 1)
+        assert shot is not None
+        assert studio.get_current_approved_video(session, shot) is not None
+        assets = list(session.exec(select(Asset).where(Asset.project_id == 1)).all())
+        completion = studio.project_completion([shot], assets)
+        assert completion["can_render"] is True
+        stale_failed_video = session.get(Asset, 3)
+        assert stale_failed_video is not None
+        assert stale_failed_video.status == AssetStatus.ACTIVE
+
+
+def test_asset_revision_identity_migration_allows_same_sha_across_revisions(tmp_path: Path) -> None:
+    db_path = tmp_path / "asset-identity.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260720_0008")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO project (id, name, description, created_at, updated_at)
+                VALUES (1, 'P', '', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO shot (
+                    id, project_id, title, description, duration_seconds, prompt,
+                    negative_prompt, sort_order, status, start_frame_asset_id, spec_revision,
+                    approved_keyframe_asset_id, approved_video_asset_id, locked_tail_frame_asset_id,
+                    start_frame_source_type, created_at, updated_at
+                )
+                VALUES (1, 1, 'S', '', 4.0, '', '', 0, 'DRAFT', NULL, 1, NULL, NULL, NULL,
+                        'NONE', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO asset (
+                    id, project_id, shot_id, type, status, revision, path, mime_type,
+                    source_asset_id, sha256, created_at
+                )
+                VALUES (1, 1, 1, 'KEYFRAME', 'APPROVED', 1, 'same.png', 'image/png',
+                        NULL, 'same-sha', '2026-07-20 00:00:00')
+                """
+            )
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO asset (
+                    id, project_id, shot_id, type, status, revision, path, mime_type,
+                    source_asset_id, sha256, created_at
+                )
+                VALUES (2, 1, 1, 'KEYFRAME', 'APPROVED', 2, 'same.png', 'image/png',
+                        NULL, 'same-sha', '2026-07-20 00:00:01')
+                """
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO asset (
+                        id, project_id, shot_id, type, status, revision, path, mime_type,
+                        source_asset_id, sha256, created_at
+                    )
+                    VALUES (3, 1, 1, 'KEYFRAME', 'ACTIVE', 2, 'same.png', 'image/png',
+                            NULL, 'same-sha', '2026-07-20 00:00:02')
+                    """
+                )
+            )
+
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+        assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
+        indexes = [row[1] for row in connection.execute(sa.text("PRAGMA index_list(asset)")).all()]
+        assert "ix_asset_project_shot_type_sha256" not in indexes
+        assert "ix_asset_project_shot_type_revision_sha256" in indexes
+
+
+def test_quality_result_identity_migration_rejects_duplicate_current_checks(tmp_path: Path) -> None:
+    db_path = tmp_path / "quality-identity.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO project (id, name, description, created_at, updated_at)
+                VALUES (1, 'P', '', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO shot (
+                    id, project_id, title, description, duration_seconds, prompt,
+                    negative_prompt, sort_order, status, start_frame_asset_id, spec_revision,
+                    approved_keyframe_asset_id, approved_video_asset_id, locked_tail_frame_asset_id,
+                    start_frame_source_type, created_at, updated_at
+                )
+                VALUES (1, 1, 'S', '', 4.0, '', '', 0, 'VIDEO_REVIEW', NULL, 1, NULL, NULL, NULL,
+                        'NONE', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO asset (
+                    id, project_id, shot_id, type, status, revision, path, mime_type,
+                    source_asset_id, sha256, created_at
+                )
+                VALUES (1, 1, 1, 'VIDEO', 'ACTIVE', 1, 'v.mp4', 'video/mp4',
+                        NULL, 'video-sha', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO qualitycheckresult (
+                    project_id, shot_id, asset_id, reference_asset_id, check_type, severity,
+                    score, threshold, message, details_json, algorithm_version, created_at
+                )
+                VALUES (1, 1, 1, NULL, 'DURATION_DEVIATION', 'INFO',
+                        0.0, 0.12, 'ok', '{}', 'quality-v1', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO qualitycheckresult (
+                        project_id, shot_id, asset_id, reference_asset_id, check_type, severity,
+                        score, threshold, message, details_json, algorithm_version, created_at
+                    )
+                    VALUES (1, 1, 1, NULL, 'DURATION_DEVIATION', 'INFO',
+                            0.0, 0.12, 'dupe', '{}', 'quality-v1', '2026-07-20 00:00:01')
+                    """
+                )
+            )
+
+
+def test_asset_revision_identity_migration_safe_downgrade(tmp_path: Path) -> None:
+    db_path = tmp_path / "asset-identity-downgrade.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    command.downgrade(config, "20260720_0008")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0008"
+        indexes = [row[1] for row in connection.execute(sa.text("PRAGMA index_list(asset)")).all()]
+        assert "ix_asset_project_shot_type_sha256" in indexes
+
+
+def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:
+    db_path = tmp_path / "asset-identity-unsafe-downgrade.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO project (id, name, description, created_at, updated_at)
+                VALUES (1, 'P', '', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO shot (
+                    id, project_id, title, description, duration_seconds, prompt,
+                    negative_prompt, sort_order, status, start_frame_asset_id, spec_revision,
+                    approved_keyframe_asset_id, approved_video_asset_id, locked_tail_frame_asset_id,
+                    start_frame_source_type, created_at, updated_at
+                )
+                VALUES (1, 1, 'S', '', 4.0, '', '', 0, 'DRAFT', NULL, 2, NULL, NULL, NULL,
+                        'NONE', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        for asset_id, revision in [(1, 1), (2, 2)]:
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO asset (
+                        id, project_id, shot_id, type, status, revision, path, mime_type,
+                        source_asset_id, sha256, created_at
+                    )
+                    VALUES (:asset_id, 1, 1, 'KEYFRAME', 'APPROVED', :revision, 'same.png',
+                            'image/png', NULL, 'same-sha', '2026-07-20 00:00:00')
+                    """
+                ),
+                {"asset_id": asset_id, "revision": revision},
+            )
+    with pytest.raises(RuntimeError, match="Cannot downgrade asset identity"):
+        command.downgrade(config, "20260720_0008")
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0009"

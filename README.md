@@ -1,8 +1,8 @@
 # Frame Chain Studio
 
-Frame Chain Studio is a local release-candidate implementation for long-form AI storyboard video generation. It models a workflow of keyframe review, asynchronous provider execution, result processing, video generation, tail-frame extraction, start-frame inheritance across ordered shots, and final project rendering.
+Frame Chain Studio is a local release-candidate implementation for long-form AI storyboard video generation. It models a workflow of Shot spec revisions, keyframe review, explicit approved asset pointers, asynchronous provider execution, safe result processing, video generation, tail-frame extraction, start-frame inheritance across ordered shots, manual image anchors, quality-check warnings, task visibility, and final project rendering.
 
-This stage intentionally does not integrate paid AI APIs, large models, or authentication.
+This stage intentionally does not bundle paid AI APIs, large models, or authentication. Real HTTP providers are configured through the existing mapped Provider protocol and remain contract-verified unless live credentials and endpoints are supplied locally.
 
 ## Stack
 
@@ -33,6 +33,12 @@ Rejection paths:
 
 All generation requests, assets, task logs, state changes, and errors are persisted in SQLite.
 
+Shot specs carry a `spec_revision`. Generation requests snapshot that revision, and late asynchronous results from older revisions are registered as stale history instead of advancing the Shot or replacing the current approved assets. Approved keyframes, approved videos, and locked tail frames are explicit Shot pointers; history remains queryable through Asset records with `ACTIVE`, `APPROVED`, `REJECTED`, `STALE`, or `SUPERSEDED` lifecycle status.
+
+Asset identity includes the Shot revision. The same SHA-256 may legitimately appear in different revisions, for example when a duration-only Shot revision carries forward the approved keyframe. Within one project, Shot, asset type, revision, and SHA-256 tuple remains unique. Quality check rows are likewise tied to the current video asset, optional reference asset, check type, and algorithm version so re-runs replace current evidence instead of accumulating duplicates.
+
+Video review runs best-effort quality checks for the current video asset. Checks record duration deviation, video metadata, decode health, black/freeze segments, tail-vs-target-keyframe comparison, and start-anchor comparison when a start frame exists. Results are persisted as `INFO`, `WARNING`, or `ERROR` evidence for reviewers; they do not automatically approve, reject, or advance a Shot.
+
 ## Shot Deletion Strategy
 
 Shot deletion is supported in the first stage. The backend deletes database records for the selected Shot inside one rollback-safe operation:
@@ -44,7 +50,7 @@ Shot deletion is supported in the first stage. The backend deletes database reco
 - If no previous locked tail frame exists, the next Shot's automatic start frame is cleared.
 - Remaining Shot `sort_order` values are reindexed to be continuous and stable.
 
-Manual start-frame assignment is not implemented in this stage. Existing automatic start-frame records can be rebuilt or cleared by deletion; there is no manual upload/assignment API yet.
+Manual start-frame assignment is supported through safe project image upload and `POST /api/shots/{shot_id}/start-frame`. Existing automatic start-frame records can be rebuilt, cleared, or restored to inherited mode.
 
 ## Asset Summary Structure
 
@@ -83,8 +89,8 @@ The media endpoint only serves database-registered files under the configured st
 - The default generated media storage is `backend/data/storage/`.
 - `scripts/e2e-local.ps1` uses isolated temporary runtime paths under `.run/e2e/` instead of `backend/data/`.
 - Runtime databases, generated media, logs, caches, and temporary files are ignored by Git.
-- The first stage does not support manual start-frame upload or manual start-frame assignment.
-- The first stage only includes the local Mock Provider and does not integrate a real asynchronous AI generation platform.
+- Safe image uploads support PNG, JPEG, and WebP with byte, pixel, MIME, and decode validation.
+- The local Mock Provider remains available by default; real asynchronous HTTP providers can be configured without storing secrets in projects or API payloads.
 
 ## Frontend Refresh And Polling
 
@@ -313,7 +319,7 @@ For release-candidate smoke validation, `scripts/e2e-local.ps1` starts its own i
 .\scripts\e2e-local.ps1 -BackendPort 8100 -FrontendPort 5174 -FakeProviderPort 8091
 ```
 
-The E2E script verifies one three-Shot project end to end, including keyframe review, video review, locked tail frames, Shot 2/3 start-frame inheritance, Fake Provider upload references in first/last-frame video requests, GenerationWorker restart recovery without duplicate submit, final render, media full download, HTTP Range `206`, FFprobe metadata, backup, restore, and restored media access. Its JSON summary uses the same `project_id` and `render_id` for E2E, backup, and restore evidence.
+The E2E script verifies one three-Shot project end to end, including keyframe review, video review, persisted quality-check evidence, locked tail frames, Shot 2/3 start-frame inheritance, Fake Provider upload references in first/last-frame video requests, GenerationWorker restart recovery without duplicate submit, final render, media full download, HTTP Range `206`, FFprobe metadata, backup, restore, restored quality rows, and restored media access. Its JSON summary uses the same `project_id` and `render_id` for E2E, backup, and restore evidence and includes per-Shot quality result counts, check types, algorithm versions, asset revision counts, and duplicate-check guards.
 
 Backup and restore scripts operate on the configured SQLite database:
 

@@ -189,6 +189,7 @@ vi.mock("@/api/client", () => ({
     generateVideo: vi.fn(),
     approveVideo: vi.fn(),
     rejectVideo: vi.fn(),
+    runQualityChecks: vi.fn(),
     createProjectRender: vi.fn(),
   },
 }));
@@ -381,5 +382,76 @@ describe("ProjectDetailView", () => {
 
     expect(wrapper.find('img[src="/api/media/5"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("继承自 Shot 1");
+  });
+
+  it("shows only current video quality results and reruns checks", async () => {
+    const current = project([shot(1, "Shot 1")]);
+    current.shots[0].status = "VIDEO_REVIEW";
+    current.shots[0].spec_revision = 2;
+    current.assets = [
+      {
+        id: 11,
+        project_id: 1,
+        shot_id: 1,
+        type: "VIDEO",
+        status: "ACTIVE",
+        revision: 2,
+        url: "/api/media/11",
+        file_name: "current.mp4",
+        mime_type: "video/mp4",
+        source_asset_id: null,
+        sha256: "current",
+        file_size: 12,
+        width: 1280,
+        height: 720,
+        duration_seconds: 4,
+        fps: 24,
+      },
+    ];
+    current.quality_checks = [
+      {
+        id: 1,
+        project_id: 1,
+        shot_id: 1,
+        asset_id: 11,
+        reference_asset_id: null,
+        check_type: "DURATION_DEVIATION",
+        severity: "WARNING",
+        score: 0.2,
+        threshold: 0.12,
+        message: "Current warning",
+        details_json: "{}",
+        details: {},
+        algorithm_version: "quality-v1",
+        created_at: "",
+      },
+      {
+        id: 2,
+        project_id: 1,
+        shot_id: 1,
+        asset_id: 99,
+        reference_asset_id: null,
+        check_type: "DURATION_DEVIATION",
+        severity: "ERROR",
+        score: 1,
+        threshold: 0.12,
+        message: "Old error",
+        details_json: "{}",
+        details: {},
+        algorithm_version: "quality-v1",
+        created_at: "",
+      },
+    ];
+    vi.mocked(api.getProject).mockResolvedValue(current);
+    vi.mocked(api.runQualityChecks).mockResolvedValue([]);
+
+    const wrapper = await mountView();
+
+    expect(wrapper.text()).toContain("Quality checks: 1 warnings, 0 errors");
+    expect(wrapper.text()).toContain("Current warning");
+    expect(wrapper.text()).not.toContain("Old error");
+    await wrapper.findAll("button").find((button) => button.text().includes("Rerun"))?.trigger("click");
+    await flushPromises();
+    expect(api.runQualityChecks).toHaveBeenCalledWith(1);
   });
 });
