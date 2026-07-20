@@ -1,39 +1,40 @@
 param(
-    [switch]$EnableLive
+    [switch]$ConfirmLive,
+    [decimal]$MaxCost,
+    [switch]$AutoApproveForVerification
 )
 
 $ErrorActionPreference = "Stop"
-
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendRoot = Join-Path $repoRoot "backend"
-$providerConfig = $env:FCS_PROVIDER_CONFIG_FILE
 
-if (-not $EnableLive -and $env:FCS_ENABLE_REAL_PROVIDER_E2E -ne "1") {
+Write-Host "Provider: TOAPIS"
+Write-Host "Image model: doubao-seedream-5-0"
+Write-Host "Video model: viduq3-pro"
+Write-Host "Shots: 2; image tasks: max 2; video tasks: max 2"
+Write-Host "Video duration: 4s; resolution: 720p; audio: false; image resolution: 2K"
+
+if (-not $ConfirmLive) {
+    Push-Location $backendRoot
+    try {
+        python -m pytest tests/test_toapis_provider.py -q
+        if ($LASTEXITCODE -ne 0) { throw "TOAPIS offline contract tests failed." }
+    }
+    finally { Pop-Location }
+    Write-Host "TOAPIS contract verified"
     Write-Host "BLOCKED_LIVE_VERIFICATION"
-    Write-Host "Set FCS_ENABLE_REAL_PROVIDER_E2E=1 or pass -EnableLive after configuring FCS_PROVIDER_CONFIG_FILE and provider credentials locally."
+    Write-Host "networkCalled=false"
+    Write-Host "uploadCalled=false"
+    Write-Host "submitCalled=false"
+    Write-Host "pollCalled=false"
     exit 0
 }
 
-if (-not $providerConfig) {
-    throw "FCS_PROVIDER_CONFIG_FILE is required for real provider verification."
-}
+if (-not $env:TOAPIS_API_KEY) { throw "TOAPIS_API_KEY must be set in the environment." }
+if (-not $PSBoundParameters.ContainsKey("MaxCost") -or $MaxCost -le 0) { throw "-MaxCost must be explicitly provided and greater than zero." }
 
-$resolvedConfig = if ([System.IO.Path]::IsPathRooted($providerConfig)) {
-    $providerConfig
-} else {
-    Join-Path $backendRoot $providerConfig
+Write-Host "Maximum cost: $MaxCost"
+if ($AutoApproveForVerification) {
+    Write-Warning "Auto approval only continues the isolated verification workflow; it is not visual-quality or human-review approval."
 }
-
-if (-not (Test-Path -LiteralPath $resolvedConfig)) {
-    throw "Provider config was not found: $providerConfig"
-}
-
-Push-Location $backendRoot
-try {
-    python -m pytest tests/test_provider_http.py tests/test_provider_mapping.py tests/test_provider_registry.py
-    Write-Host "CONTRACT_VERIFIED_ONLY"
-    Write-Host "Live provider workflow execution is intentionally not automated without a provider-specific documented contract and non-production credentials."
-}
-finally {
-    Pop-Location
-}
+throw "Confirmed live TOAPIS orchestration is not enabled until the account contract and pricing snapshot have been reviewed. No network request was made."

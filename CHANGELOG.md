@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add the dedicated TOAPIS adapter, default Seedream 5.0/Vidu Q3 Pro profiles, strict two-anchor ordering, safe upload validation, offline contract checks, and a network-free real-provider dry run.
+
 ## v0.2.0-rc5
 
 - Adds script import for pasted text, TXT, Markdown, Fountain, and safe DOCX extraction.

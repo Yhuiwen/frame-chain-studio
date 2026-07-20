@@ -45,6 +45,7 @@ from app.providers.config_loader import load_registry_from_env
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import MappedHttpProviderConfig, ProviderCapabilities
 from app.providers.registry import ProviderRegistry
+from app.providers.toapis import TOAPIS_BASE_URL, ToApisProvider
 
 
 SAFE_CONFIG_KEYS = {
@@ -149,6 +150,7 @@ def create_provider_model(session: Session, provider_id: int, payload: ProviderM
     model = ProviderModelProfile(
         provider_profile_id=provider_id,
         model_key=payload.model_key,
+        remote_model=payload.remote_model,
         display_name=payload.display_name or payload.model_key,
         generation_type=payload.generation_type,
         enabled=payload.enabled,
@@ -222,14 +224,26 @@ def validate_provider_profile(session: Session, provider_id: int) -> dict[str, A
 def verify_contract(session: Session, provider_id: int) -> dict[str, Any]:
     profile = get_provider_profile_or_404(session, provider_id)
     validation = validate_provider_profile(session, provider_id)
-    status = ProviderVerificationStatus.PASSED if validation["configuration_valid"] else ProviderVerificationStatus.FAILED
+    toapis_errors: list[str] = []
+    if profile.adapter_type == ProviderAdapterType.TOAPIS:
+        if profile.provider_key != "toapis":
+            toapis_errors.append("provider_key_must_be_toapis")
+        if profile.base_url.rstrip("/") != TOAPIS_BASE_URL:
+            toapis_errors.append("base_url_must_be_official_toapis_v1")
+        if profile.secret_env_var != "TOAPIS_API_KEY":
+            toapis_errors.append("secret_env_var_must_be_TOAPIS_API_KEY")
+        models = list_provider_models(session, provider_id)
+        keys = {item["model_key"] for item in models if item["enabled"]}
+        if not {"toapis-seedream-5", "toapis-viduq3-pro"}.issubset(keys):
+            toapis_errors.append("required_model_profiles_missing")
+    status = ProviderVerificationStatus.PASSED if validation["configuration_valid"] and not toapis_errors else ProviderVerificationStatus.FAILED
     run = ProviderVerificationRun(
         provider_profile_id=profile.id or 0,
         verification_type=ProviderVerificationType.CONTRACT,
         status=status,
         started_at=utcnow(),
         completed_at=utcnow(),
-        summary_json=dumps({"validation": validation, "offline": True}),
+        summary_json=dumps({"validation": validation, "offline": True, "adapter": profile.adapter_type.value, "contract_errors": toapis_errors}),
         error_code=None if status == ProviderVerificationStatus.PASSED else "CONTRACT_FAILED",
         error_message="" if status == ProviderVerificationStatus.PASSED else "Provider contract validation failed.",
     )
@@ -279,8 +293,15 @@ def load_registry_with_db(session: Session) -> ProviderRegistry:
     ).all():
         if profile.adapter_type == ProviderAdapterType.FAKE:
             continue
-        config = db_profile_to_http_config(session, profile)
-        registry.register(MappedAsyncHttpProvider(config))
+        if profile.adapter_type == ProviderAdapterType.TOAPIS:
+            api_key = os.getenv(profile.secret_env_var) if profile.secret_env_var else None
+            if api_key:
+                registry.register(ToApisProvider(api_key, base_url=profile.base_url))
+            else:
+                registry.register_configuration_error(profile.provider_key, profile.display_name, "TOAPIS_API_KEY is not configured.")
+        else:
+            config = db_profile_to_http_config(session, profile)
+            registry.register(MappedAsyncHttpProvider(config))
     return registry
 
 

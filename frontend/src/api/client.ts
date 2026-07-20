@@ -526,7 +526,7 @@ export interface ProviderInfo {
   defaults: ProviderDefaults;
 }
 
-export type ProviderAdapterType = "FAKE" | "MAPPED_ASYNC_HTTP";
+export type ProviderAdapterType = "FAKE" | "MAPPED_ASYNC_HTTP" | "TOAPIS";
 export type ProviderModelGenerationType = "IMAGE" | "VIDEO";
 export type UsageRecordType = "ESTIMATE" | "PROVIDER_REPORTED" | "MANUAL_ADJUSTMENT";
 export type UsageRecordStatus = "ESTIMATED" | "ACTUAL" | "UNKNOWN" | "WAIVED";
@@ -558,6 +558,7 @@ export interface ProviderModelProfile {
   id: number;
   provider_profile_id: number;
   model_key: string;
+  remote_model: string;
   display_name: string;
   generation_type: ProviderModelGenerationType;
   enabled: boolean;

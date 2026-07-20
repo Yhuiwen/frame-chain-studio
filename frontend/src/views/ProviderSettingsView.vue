@@ -30,6 +30,7 @@ const profileForm = ref({
 });
 const modelForm = ref({
   model_key: "",
+  remote_model: "",
   display_name: "",
   generation_type: "IMAGE" as ProviderModelGenerationType,
   enabled: true,
@@ -184,6 +185,7 @@ async function archiveProfile(profile: ProviderProfile) {
           <el-form-item label="Adapter">
             <el-select v-model="profileForm.adapter_type">
               <el-option label="Mapped HTTP" value="MAPPED_ASYNC_HTTP" />
+              <el-option label="TOAPIS" value="TOAPIS" />
               <el-option label="Fake" value="FAKE" />
             </el-select>
           </el-form-item>
@@ -195,6 +197,13 @@ async function archiveProfile(profile: ProviderProfile) {
       </aside>
 
       <section class="content">
+        <el-alert
+          v-if="selectedProfile?.adapter_type === 'TOAPIS'"
+          type="info"
+          :closable="false"
+          title="Set TOAPIS_API_KEY before starting Frame Chain Studio. The application never stores or displays the API key."
+          description="TOAPIS · https://toapis.com/v1 · Seedream 5.0 (2K) · Vidu Q3 Pro (720p, audio off, two ordered anchors). Remote cancellation and live verification remain unverified."
+        />
         <el-table :data="profiles" highlight-current-row @current-change="(row: ProviderProfile | null) => row && loadModels(row.id)">
           <el-table-column prop="provider_key" label="Provider" min-width="150" />
           <el-table-column prop="display_name" label="Display" min-width="150" />
@@ -228,6 +237,7 @@ async function archiveProfile(profile: ProviderProfile) {
           </header>
           <el-form label-position="top" class="model-form">
             <el-form-item label="Model Key"><el-input v-model="modelForm.model_key" /></el-form-item>
+            <el-form-item label="Remote Model"><el-input v-model="modelForm.remote_model" /></el-form-item>
             <el-form-item label="Type">
               <el-select v-model="modelForm.generation_type">
                 <el-option label="Image" value="IMAGE" />
@@ -239,6 +249,7 @@ async function archiveProfile(profile: ProviderProfile) {
           </el-form>
           <el-table :data="models" stripe>
             <el-table-column prop="model_key" label="Model" min-width="160" />
+            <el-table-column prop="remote_model" label="Remote Model" min-width="180" />
             <el-table-column prop="generation_type" label="Type" width="110" />
             <el-table-column prop="currency" label="Currency" width="110" />
             <el-table-column label="Pricing" min-width="240">

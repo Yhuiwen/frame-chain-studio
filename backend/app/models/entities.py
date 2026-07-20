@@ -228,6 +228,7 @@ class ShotDraftStatus(str, Enum):
 class ProviderAdapterType(str, Enum):
     FAKE = "FAKE"
     MAPPED_ASYNC_HTTP = "MAPPED_ASYNC_HTTP"
+    TOAPIS = "TOAPIS"
 
 
 class ProviderModelGenerationType(str, Enum):
@@ -665,6 +666,7 @@ class ProviderModelProfile(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     provider_profile_id: int = Field(foreign_key="providerprofile.id", index=True)
     model_key: str = Field(min_length=1, max_length=160, index=True)
+    remote_model: str = Field(default="", max_length=160)
     display_name: str = Field(default="", max_length=160)
     generation_type: ProviderModelGenerationType = Field(index=True)
     enabled: bool = Field(default=True, index=True)

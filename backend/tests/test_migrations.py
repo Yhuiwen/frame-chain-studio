@@ -185,7 +185,9 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0012"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0013"
+        assert connection.execute(sa.text("SELECT COUNT(*) FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 1
+        assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE remote_model IN ('doubao-seedream-5-0', 'viduq3-pro')")).scalar_one() == 2
         for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
             assert connection.execute(sa.text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
     assert "task_id" in columns(db_path, "tasklog")

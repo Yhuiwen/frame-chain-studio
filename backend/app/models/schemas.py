@@ -125,6 +125,7 @@ class ProviderProfileRead(ProviderProfileBase):
 
 class ProviderModelProfileBase(BaseModel):
     model_key: str = Field(min_length=1, max_length=160)
+    remote_model: str = Field(default="", max_length=160)
     display_name: str = Field(default="", max_length=160)
     generation_type: ProviderModelGenerationType
     enabled: bool = True
@@ -139,6 +140,7 @@ class ProviderModelProfileCreate(ProviderModelProfileBase):
 
 
 class ProviderModelProfileUpdate(BaseModel):
+    remote_model: str | None = Field(default=None, max_length=160)
     display_name: str | None = Field(default=None, max_length=160)
     enabled: bool | None = None
     capabilities: dict[str, object] | None = None

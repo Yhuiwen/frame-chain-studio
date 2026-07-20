@@ -10,6 +10,7 @@ from app.providers.exceptions import ProviderConfigurationError
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import MappedHttpProviderConfig
 from app.providers.registry import ProviderRegistry
+from app.providers.toapis import ToApisProvider
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -69,5 +70,12 @@ def load_registry(session: "Session | None" = None) -> ProviderRegistry:
         )
     ).all()
     for profile in profiles:
-        registry.register(MappedAsyncHttpProvider(db_profile_to_http_config(session, profile)))
+        if profile.adapter_type == ProviderAdapterType.TOAPIS:
+            api_key = os.getenv(profile.secret_env_var) if profile.secret_env_var else None
+            if api_key:
+                registry.register(ToApisProvider(api_key, base_url=profile.base_url))
+            else:
+                registry.register_configuration_error(profile.provider_key, profile.display_name, "TOAPIS_API_KEY is not configured.")
+        else:
+            registry.register(MappedAsyncHttpProvider(db_profile_to_http_config(session, profile)))
     return registry

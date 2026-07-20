@@ -24,6 +24,21 @@ class ProviderRequestFactory:
         prompt = str(payload.get("prompt") or generation_request.prompt_snapshot or "")
         negative_prompt = str(payload.get("negative_prompt") or generation_request.negative_prompt_snapshot or "")
         if task.task_type == GenerationTaskType.KEYFRAME_GENERATION or generation_request.kind == GenerationKind.KEYFRAME:
+            reference_ids = self._bounded_reference_ids(
+                self._int_list(payload.get("reference_asset_ids")), capabilities.max_reference_images
+            )
+            image_metadata = self._metadata_with_reference_downgrade(
+                self._dict(payload.get("metadata")),
+                requested_reference_count=len(self._int_list(payload.get("reference_asset_ids"))),
+                used_reference_count=len(reference_ids),
+                reference_limit=capabilities.max_reference_images,
+                reserved_reference_count=0,
+            )
+            if prepared_assets:
+                image_metadata = {
+                    **image_metadata,
+                    "reference_urls": [prepared_assets[item].url for item in reference_ids if item in prepared_assets],
+                }
             request = ImageGenerationRequest(
                 provider_id=task.provider_id,
                 model=str(payload.get("model") or ""),
@@ -33,22 +48,8 @@ class ProviderRequestFactory:
                 height=int(payload.get("height") or 576),
                 aspect_ratio=payload.get("aspect_ratio") if isinstance(payload.get("aspect_ratio"), str) else "16:9",
                 seed=payload.get("seed") if isinstance(payload.get("seed"), int) else None,
-                reference_asset_ids=self._bounded_reference_ids(
-                    self._int_list(payload.get("reference_asset_ids")),
-                    capabilities.max_reference_images,
-                ),
-                metadata=self._metadata_with_reference_downgrade(
-                    self._dict(payload.get("metadata")),
-                    requested_reference_count=len(self._int_list(payload.get("reference_asset_ids"))),
-                    used_reference_count=len(
-                        self._bounded_reference_ids(
-                            self._int_list(payload.get("reference_asset_ids")),
-                            capabilities.max_reference_images,
-                        )
-                    ),
-                    reference_limit=capabilities.max_reference_images,
-                    reserved_reference_count=0,
-                ),
+                reference_asset_ids=reference_ids,
+                metadata=image_metadata,
                 client_request_id=task.idempotency_key,
             )
             validate_request_capabilities(request, capabilities)
@@ -62,9 +63,12 @@ class ProviderRequestFactory:
         )
         reserved_reference_count = int(start_frame is not None) + int(end_frame is not None)
         requested_reference_ids = self._int_list(payload.get("reference_asset_ids"))
+        available_reference_capacity = (
+            0 if task.provider_id == "toapis" else max(capabilities.max_reference_images - reserved_reference_count, 0)
+        )
         reference_asset_ids = self._bounded_reference_ids(
             requested_reference_ids,
-            max(capabilities.max_reference_images - reserved_reference_count, 0),
+            available_reference_capacity,
         )
         video_request = VideoGenerationRequest(
             provider_id=task.provider_id,
@@ -85,7 +89,7 @@ class ProviderRequestFactory:
                 self._dict(payload.get("metadata")),
                 requested_reference_count=len(requested_reference_ids),
                 used_reference_count=len(reference_asset_ids),
-                reference_limit=capabilities.max_reference_images,
+                reference_limit=available_reference_capacity,
                 reserved_reference_count=reserved_reference_count,
             ),
             client_request_id=task.idempotency_key,
@@ -125,7 +129,7 @@ class ProviderRequestFactory:
         dropped_reference_count = max(requested_reference_count - used_reference_count, 0)
         if dropped_reference_count == 0:
             return metadata
-        return {
+        downgraded = {
             **metadata,
             "reference_asset_ids_truncated": True,
             "requested_reference_asset_count": requested_reference_count,
@@ -134,6 +138,9 @@ class ProviderRequestFactory:
             "reference_asset_limit": reference_limit,
             "reserved_reference_asset_count": reserved_reference_count,
         }
+        if reference_limit == 0 and reserved_reference_count:
+            downgraded["structured_references_dropped_for_anchor_capacity"] = True
+        return downgraded
 
     def _asset_ref(
         self,

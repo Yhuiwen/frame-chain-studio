@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     quality_black_min_duration: float = Field(default=0.5, ge=0, le=60)
     quality_freeze_min_duration: float = Field(default=0.75, ge=0, le=60)
     quality_check_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    toapis_image_poll_interval_seconds: float = Field(default=5, gt=0, le=60)
+    toapis_image_timeout_seconds: float = Field(default=120, gt=0, le=1800)
+    toapis_video_poll_interval_seconds: float = Field(default=10, gt=0, le=120)
+    toapis_video_timeout_seconds: float = Field(default=600, gt=0, le=7200)
+    toapis_http_timeout_seconds: float = Field(default=30, gt=0, le=300)
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="FCS_")
 

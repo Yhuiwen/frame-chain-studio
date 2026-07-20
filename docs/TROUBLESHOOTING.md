@@ -1,5 +1,9 @@
 # Troubleshooting
 
+## TOAPIS is shown as missing
+
+Set `TOAPIS_API_KEY` in the process environment before starting the API and Worker. Do not put the real value in a Git-managed file. The default real-provider script is intentionally offline even when the variable exists; live mode additionally requires `-ConfirmLive` and `-MaxCost`.
+
 ## Port In Use
 
 Run `scripts/dev-status.ps1` first. The dev scripts only stop PIDs recorded in `.run/dev-processes.json`; they do not kill unrelated Python or Node processes. Change ports with `scripts/dev-start.ps1 -BackendPort 8100 -FrontendPort 5174 -FakeProviderPort 8091`.
