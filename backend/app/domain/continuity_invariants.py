@@ -1,7 +1,19 @@
 from sqlmodel import Session, col, select
 
 from app.core.errors import AppError
-from app.models.entities import Asset, AssetStatus, AssetType, Shot, ShotStatus, StartFrameSourceType
+from app.models.entities import (
+    Asset,
+    AssetStatus,
+    AssetType,
+    Character,
+    Location,
+    Shot,
+    ShotCharacter,
+    ShotSpec,
+    ShotStatus,
+    StartFrameSourceType,
+    StyleProfile,
+)
 
 VALID_CURRENT_STATUSES = {AssetStatus.ACTIVE, AssetStatus.APPROVED}
 INVALID_CURRENT_STATUSES = {AssetStatus.REJECTED, AssetStatus.STALE, AssetStatus.SUPERSEDED}
@@ -9,6 +21,7 @@ IMAGE_ASSET_TYPES = {AssetType.KEYFRAME, AssetType.START_FRAME, AssetType.TAIL_F
 
 
 def validate_shot_invariants(session: Session, shot: Shot) -> None:
+    _validate_current_shot_spec(session, shot)
     _validate_start_frame(session, shot)
     if shot.status == ShotStatus.DRAFT:
         _require_no_approved_pointers(shot)
@@ -52,6 +65,33 @@ def validate_project_continuity_invariants(session: Session, project_id: int) ->
 def _require_no_approved_pointers(shot: Shot) -> None:
     if shot.approved_keyframe_asset_id or shot.approved_video_asset_id or shot.locked_tail_frame_asset_id:
         _violation(shot, "draft shot cannot have current approved asset pointers")
+
+
+def _validate_current_shot_spec(session: Session, shot: Shot) -> None:
+    specs = session.exec(
+        select(ShotSpec).where(ShotSpec.shot_id == shot.id, ShotSpec.revision == shot.spec_revision)
+    ).all()
+    if len(specs) != 1:
+        _violation(shot, "current revision must have exactly one ShotSpec")
+    spec = specs[0]
+    if spec.revision != shot.spec_revision:
+        _violation(shot, "ShotSpec revision must match Shot revision")
+    if not spec.compiler_version:
+        _violation(shot, "ShotSpec compiler version is required")
+    if spec.compiled_prompt is None:
+        _violation(shot, "ShotSpec compiled prompt is required")
+    if spec.location_id:
+        location = session.get(Location, spec.location_id)
+        if location is None or location.project_id != shot.project_id:
+            _violation(shot, "ShotSpec location must belong to the same project")
+    if spec.style_profile_id:
+        style = session.get(StyleProfile, spec.style_profile_id)
+        if style is None or style.project_id != shot.project_id:
+            _violation(shot, "ShotSpec style profile must belong to the same project")
+    for shot_character in session.exec(select(ShotCharacter).where(ShotCharacter.shot_spec_id == spec.id)).all():
+        character = session.get(Character, shot_character.character_id)
+        if character is None or character.project_id != shot.project_id:
+            _violation(shot, "ShotCharacter character must belong to the same project")
 
 
 def _require_no_video_pointers(shot: Shot) -> None:

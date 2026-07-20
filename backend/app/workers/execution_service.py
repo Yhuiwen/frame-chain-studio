@@ -420,7 +420,9 @@ class ProviderExecutionService:
         provider: AsyncGenerationProvider,
     ) -> dict[int, AssetReference]:
         payload = task_service.loads_json_object(task.request_payload_json)
-        asset_ids = [item for item in payload.get("input_asset_ids", []) if isinstance(item, int)] if isinstance(payload.get("input_asset_ids"), list) else []
+        input_asset_ids = [item for item in payload.get("input_asset_ids", []) if isinstance(item, int)] if isinstance(payload.get("input_asset_ids"), list) else []
+        reference_asset_ids = [item for item in payload.get("reference_asset_ids", []) if isinstance(item, int)] if isinstance(payload.get("reference_asset_ids"), list) else []
+        asset_ids = list(dict.fromkeys(input_asset_ids + reference_asset_ids))
         if task.provider_id == "mock" or not asset_ids:
             return {}
         upload = getattr(provider, "upload_asset", None)

@@ -39,6 +39,18 @@ Asset identity includes the Shot revision. The same SHA-256 may legitimately app
 
 Video review runs best-effort quality checks for the current video asset. Checks record duration deviation, video metadata, decode health, black/freeze segments, tail-vs-target-keyframe comparison, and start-anchor comparison when a start frame exists. Results are persisted as `INFO`, `WARNING`, or `ERROR` evidence for reviewers; they do not automatically approve, reject, or advance a Shot.
 
+## Structured Continuity Library
+
+The project library stores Character, Location, and StyleProfile records for local continuity planning. Characters and Locations can reference validated image Assets; primary references are unique per library object, and archived library records remain readable for historical ShotSpec display. New ShotSpecs should use active library records, while existing ShotSpec history is preserved through snapshots.
+
+ShotSpecs are revisioned per Shot. The current `Shot.spec_revision` must have exactly one matching ShotSpec, while older ShotSpecs remain immutable history. Editing generation-relevant structured fields creates a new revision, recompiles the prompt, invalidates current generation outputs through the existing asset lifecycle rules, and propagates downstream continuity invalidation. Sync is explicit; changing a Character, Location, or StyleProfile template does not silently change existing ShotSpecs. A sync with no effective changes is a no-op.
+
+The deterministic Prompt Compiler version is `structured-continuity-v1`. It compiles a fixed section order from style, location, shot summary/action/emotion/composition/camera/lighting/dialogue, character state, props, continuity notes, and the Shot free prompt. Negative prompts combine style and Shot negatives deterministically. The stored `structured_payload_json` is the authoritative snapshot used for audit and request creation; it includes the Shot revision, compiler version, style snapshot, location snapshot, Shot fields, character snapshots, reference Asset IDs, and provider override snapshot.
+
+GenerationRequest rows copy the compiled prompt, negative prompt, ShotSpec revision, compiler version, structured payload, and selected reference Asset IDs at request creation time. Workers build Provider DTOs from the persisted request/task snapshot and do not reread mutable Character, Location, StyleProfile, future ShotSpec revisions, or current Shot free-prompt values. Reference-image injection is constrained by Provider capability and remains `CONTRACT_VERIFIED_ONLY`; real vendor effectiveness for structured prompts has not been live-validated.
+
+Current limitations: template edits require explicit sync, structured prompts have not been validated against real generation models, reference-image support depends on Provider capability, live real-Provider acceptance is not complete, and there is no automatic script breakdown, CLIP/VLM scoring, FaceID matching, audio, subtitles, or timeline effects.
+
 ## Shot Deletion Strategy
 
 Shot deletion is supported in the first stage. The backend deletes database records for the selected Shot inside one rollback-safe operation:

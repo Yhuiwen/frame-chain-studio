@@ -49,6 +49,30 @@ class QualityCheckSeverity(str, Enum):
     ERROR = "ERROR"
 
 
+class CharacterReferenceType(str, Enum):
+    FACE = "FACE"
+    FULL_BODY = "FULL_BODY"
+    CLOTHING = "CLOTHING"
+    POSE = "POSE"
+    EXPRESSION = "EXPRESSION"
+    OTHER = "OTHER"
+
+
+class LocationReferenceType(str, Enum):
+    WIDE = "WIDE"
+    INTERIOR = "INTERIOR"
+    EXTERIOR = "EXTERIOR"
+    DETAIL = "DETAIL"
+    LIGHTING = "LIGHTING"
+    OTHER = "OTHER"
+
+
+class ShotCharacterRole(str, Enum):
+    PRIMARY = "PRIMARY"
+    SECONDARY = "SECONDARY"
+    BACKGROUND = "BACKGROUND"
+
+
 class GenerationKind(str, Enum):
     KEYFRAME = "KEYFRAME"
     VIDEO = "VIDEO"
@@ -240,6 +264,156 @@ class Asset(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class Character(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_character_project_name"),
+        Index("ix_character_project_archived", "project_id", "archived_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    appearance: str = Field(default="", max_length=4000)
+    personality: str = Field(default="", max_length=2000)
+    default_clothing: str = Field(default="", max_length=2000)
+    default_props_json: str = Field(default="[]")
+    continuity_notes: str = Field(default="", max_length=4000)
+    archived_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class CharacterReference(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("character_id", "asset_id", "reference_type", name="uq_characterreference_character_asset_type"),
+        Index("ix_characterreference_character_sort", "character_id", "sort_order"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    character_id: int = Field(foreign_key="character.id", index=True)
+    asset_id: int = Field(foreign_key="asset.id", index=True)
+    reference_type: CharacterReferenceType = Field(default=CharacterReferenceType.OTHER, index=True)
+    label: str = Field(default="", max_length=160)
+    is_primary: bool = Field(default=False, index=True)
+    sort_order: int = Field(default=0, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class Location(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_location_project_name"),
+        Index("ix_location_project_archived", "project_id", "archived_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    environment: str = Field(default="", max_length=2000)
+    architecture: str = Field(default="", max_length=2000)
+    time_of_day: str = Field(default="", max_length=120)
+    weather: str = Field(default="", max_length=120)
+    lighting: str = Field(default="", max_length=2000)
+    continuity_notes: str = Field(default="", max_length=4000)
+    archived_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class LocationReference(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("location_id", "asset_id", "reference_type", name="uq_locationreference_location_asset_type"),
+        Index("ix_locationreference_location_sort", "location_id", "sort_order"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    location_id: int = Field(foreign_key="location.id", index=True)
+    asset_id: int = Field(foreign_key="asset.id", index=True)
+    reference_type: LocationReferenceType = Field(default=LocationReferenceType.OTHER, index=True)
+    label: str = Field(default="", max_length=160)
+    is_primary: bool = Field(default=False, index=True)
+    sort_order: int = Field(default=0, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class StyleProfile(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_styleprofile_project_name"),
+        Index("ix_styleprofile_project_archived", "project_id", "archived_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    positive_prompt: str = Field(default="", max_length=4000)
+    negative_prompt: str = Field(default="", max_length=4000)
+    color_palette_json: str = Field(default="[]")
+    rendering_style: str = Field(default="", max_length=1000)
+    camera_language: str = Field(default="", max_length=1000)
+    aspect_ratio: str | None = None
+    fps: float | None = None
+    default_provider_options_json: str = Field(default="{}")
+    archived_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ShotSpec(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("shot_id", "revision", name="uq_shotspec_shot_revision"),
+        Index("ix_shotspec_location_revision", "location_id", "revision"),
+        Index("ix_shotspec_style_revision", "style_profile_id", "revision"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    shot_id: int = Field(foreign_key="shot.id", index=True)
+    revision: int = Field(index=True)
+    location_id: int | None = Field(default=None, foreign_key="location.id", index=True)
+    style_profile_id: int | None = Field(default=None, foreign_key="styleprofile.id", index=True)
+    summary: str = Field(default="", max_length=4000)
+    action: str = Field(default="", max_length=4000)
+    emotion: str = Field(default="", max_length=1000)
+    composition: str = Field(default="", max_length=2000)
+    shot_size: str = Field(default="", max_length=120)
+    camera_angle: str = Field(default="", max_length=240)
+    camera_movement: str = Field(default="", max_length=1000)
+    lighting: str = Field(default="", max_length=2000)
+    time_of_day: str = Field(default="", max_length=120)
+    weather: str = Field(default="", max_length=120)
+    dialogue: str = Field(default="", max_length=4000)
+    continuity_notes: str = Field(default="", max_length=4000)
+    props_json: str = Field(default="[]")
+    provider_overrides_json: str = Field(default="{}")
+    compiled_prompt: str = Field(default="", max_length=12000)
+    compiled_negative_prompt: str = Field(default="", max_length=6000)
+    structured_payload_json: str = Field(default="{}")
+    compiler_version: str = Field(default="structured-continuity-v1", max_length=80, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ShotCharacter(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("shot_spec_id", "character_id", name="uq_shotcharacter_spec_character"),
+        Index("ix_shotcharacter_spec_sort", "shot_spec_id", "sort_order"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    shot_spec_id: int = Field(foreign_key="shotspec.id", index=True)
+    character_id: int = Field(foreign_key="character.id", index=True)
+    role: ShotCharacterRole = Field(default=ShotCharacterRole.SECONDARY, index=True)
+    sort_order: int = Field(default=0, index=True)
+    appearance_override: str = Field(default="", max_length=4000)
+    clothing_override: str = Field(default="", max_length=2000)
+    expression: str = Field(default="", max_length=1000)
+    action: str = Field(default="", max_length=2000)
+    position: str = Field(default="", max_length=1000)
+    props_json: str = Field(default="[]")
+    continuity_notes: str = Field(default="", max_length=4000)
+    reference_asset_ids_json: str = Field(default="[]")
+
+
 class GenerationRequest(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
@@ -257,6 +431,8 @@ class GenerationRequest(SQLModel, table=True):
     status: GenerationTaskStatus = Field(default=GenerationTaskStatus.PENDING, index=True)
     prompt_snapshot: str = ""
     negative_prompt_snapshot: str = ""
+    structured_payload_json: str = Field(default="{}")
+    compiler_version: str = Field(default="legacy-v1", index=True)
     input_asset_ids: str = ""
     output_asset_ids: str = ""
     error_code: str | None = None

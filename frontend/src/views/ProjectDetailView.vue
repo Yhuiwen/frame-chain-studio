@@ -183,6 +183,10 @@ function selectedShotId() {
   return selected.value?.id ?? 0;
 }
 
+function navigateTo(path: string) {
+  globalThis.location.assign(path);
+}
+
 void [sourceLabel, assetFileName, assetIdLabel, assetCreatedAt];
 
 async function guarded(action: () => Promise<unknown>, pollAfter = false) {
@@ -366,6 +370,16 @@ async function uploadTargetKeyframe(event: Event) {
         <p>{{ store.current?.description || "Continuity-aware generation workflow with review, workers, providers, and render." }}</p>
       </div>
       <div class="header-actions">
+        <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/library`)">
+          Library
+        </el-button>
+        <el-button
+          v-if="selected"
+          native-type="button"
+          @click="navigateTo(`/projects/${projectId}/shot/${selected.id}/spec`)"
+        >
+          Shot Spec
+        </el-button>
         <el-button native-type="button" :icon="Refresh" :loading="store.refreshing" @click="refreshProjectDetail">
           鍒锋柊
         </el-button>

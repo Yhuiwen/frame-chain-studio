@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -184,7 +185,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0009"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0010"
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
     assert "job_deadline_at" in columns(db_path, "generationtask")
@@ -200,6 +201,10 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
     assert "workerheartbeat" in table_names(db_path)
     assert "projectrender" in table_names(db_path)
     assert "lock_version" in columns(db_path, "projectrender")
+    assert "shotspec" in table_names(db_path)
+    assert "character" in table_names(db_path)
+    assert "structured_payload_json" in columns(db_path, "generationrequest")
+    assert "compiler_version" in columns(db_path, "generationrequest")
 
 
 def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(tmp_path: Path) -> None:
@@ -533,6 +538,74 @@ def test_quality_result_identity_migration_rejects_duplicate_current_checks(tmp_
                     """
                 )
             )
+
+
+def test_structured_continuity_migration_backfills_current_shot_specs(tmp_path: Path) -> None:
+    db_path = tmp_path / "structured-continuity.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260720_0009")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO project (id, name, description, created_at, updated_at)
+                VALUES (1, 'P', '', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO shot (
+                    id, project_id, title, description, duration_seconds, prompt,
+                    negative_prompt, sort_order, status, start_frame_asset_id, spec_revision,
+                    approved_keyframe_asset_id, approved_video_asset_id, locked_tail_frame_asset_id,
+                    start_frame_source_type, created_at, updated_at
+                )
+                VALUES (1, 1, 'S', 'desc', 4.0, 'prompt', 'avoid blur', 0, 'DRAFT', NULL, 4,
+                        NULL, NULL, NULL, 'NONE', '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO generationrequest (
+                    id, project_id, shot_id, kind, provider_name, effective_provider_id,
+                    status, prompt_snapshot, negative_prompt_snapshot, input_asset_ids,
+                    output_asset_ids, shot_spec_revision, allow_capability_fallback,
+                    created_at, updated_at
+                )
+                VALUES (1, 1, 1, 'KEYFRAME', 'mock', 'mock', 'PENDING', 'prompt', 'avoid blur',
+                        '[]', '[]', 4, 0, '2026-07-20 00:00:00', '2026-07-20 00:00:00')
+                """
+            )
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        spec = connection.execute(
+            sa.text(
+                """
+                SELECT shot_id, revision, summary, compiled_prompt, compiled_negative_prompt,
+                       compiler_version
+                FROM shotspec
+                """
+            )
+        ).one()
+        assert tuple(spec) == (1, 4, "desc", "prompt", "avoid blur", "structured-continuity-v1")
+        request = connection.execute(
+            sa.text("SELECT structured_payload_json, compiler_version FROM generationrequest WHERE id = 1")
+        ).one()
+        payload = json.loads(request.structured_payload_json)
+        assert request.compiler_version == "structured-continuity-v1"
+        assert payload["compiler_version"] == "structured-continuity-v1"
+        assert payload["shot_revision"] == 4
+        assert payload["shot"]["summary"] == "desc"
+        assert payload["shot"]["free_prompt"] == "prompt"
+        assert payload["shot"]["negative_prompt"] == "avoid blur"
 
 
 def test_asset_revision_identity_migration_safe_downgrade(tmp_path: Path) -> None:

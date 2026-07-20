@@ -16,8 +16,18 @@ from app.db import engine, get_session
 from app.media.ffmpeg import require_binary
 from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, ProjectRender, Shot, TaskCommandType
 from app.models.schemas import (
+    CharacterCreate,
+    CharacterRead,
+    CharacterReferenceCreate,
+    CharacterReferenceRead,
+    CharacterUpdate,
     GenerationStartRequest,
     GenerationRequestRead,
+    LocationCreate,
+    LocationRead,
+    LocationReferenceCreate,
+    LocationReferenceRead,
+    LocationUpdate,
     ProjectCreate,
     ProjectDetail,
     ProjectRead,
@@ -25,11 +35,17 @@ from app.models.schemas import (
     ReorderShot,
     ShotCreate,
     ShotRead,
+    ShotSpecRead,
+    ShotSpecRevisionRequest,
+    ShotSpecSyncRequest,
     ShotRevisionRead,
     ShotRevisionRequest,
     ShotStartFrameRequest,
     ShotTargetKeyframeRequest,
     ShotUpdate,
+    StyleProfileCreate,
+    StyleProfileRead,
+    StyleProfileUpdate,
     TaskCancelRequest,
     TaskRetryRequest,
     GenerationTaskRead,
@@ -42,7 +58,7 @@ from app.providers.config_loader import load_registry_from_env
 from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
-from app.services import provider_resolution, quality_service, studio, task_service, worker_status
+from app.services import provider_resolution, quality_service, studio, structured, task_service, worker_status
 from app.workers import render_service
 
 router = APIRouter()
@@ -357,6 +373,138 @@ async def upload_project_image(
     return studio.asset_payload(asset)
 
 
+@router.get("/projects/{project_id}/characters", response_model=list[CharacterRead])
+def list_project_characters(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return structured.list_characters(session, project_id)
+
+
+@router.post("/projects/{project_id}/characters", response_model=CharacterRead, status_code=201)
+def create_project_character(
+    project_id: int,
+    payload: CharacterCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.create_character(session, project_id, payload)
+
+
+@router.get("/characters/{character_id}", response_model=CharacterRead)
+def read_character(character_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return structured.get_character_payload(session, character_id)
+
+
+@router.patch("/characters/{character_id}", response_model=CharacterRead)
+def update_character(
+    character_id: int,
+    payload: CharacterUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.update_character(session, character_id, payload)
+
+
+@router.delete("/characters/{character_id}", status_code=204)
+def delete_character(character_id: int, session: Session = Depends(get_session)) -> Response:
+    structured.archive_character(session, character_id)
+    return Response(status_code=204)
+
+
+@router.post("/characters/{character_id}/references", response_model=CharacterReferenceRead, status_code=201)
+def create_character_reference(
+    character_id: int,
+    payload: CharacterReferenceCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.add_character_reference(session, character_id, payload)
+
+
+@router.delete("/character-references/{reference_id}", status_code=204)
+def delete_character_reference(reference_id: int, session: Session = Depends(get_session)) -> Response:
+    structured.delete_character_reference(session, reference_id)
+    return Response(status_code=204)
+
+
+@router.get("/projects/{project_id}/locations", response_model=list[LocationRead])
+def list_project_locations(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return structured.list_locations(session, project_id)
+
+
+@router.post("/projects/{project_id}/locations", response_model=LocationRead, status_code=201)
+def create_project_location(
+    project_id: int,
+    payload: LocationCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.create_location(session, project_id, payload)
+
+
+@router.get("/locations/{location_id}", response_model=LocationRead)
+def read_location(location_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return structured.get_location_payload(session, location_id)
+
+
+@router.patch("/locations/{location_id}", response_model=LocationRead)
+def update_location(
+    location_id: int,
+    payload: LocationUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.update_location(session, location_id, payload)
+
+
+@router.delete("/locations/{location_id}", status_code=204)
+def delete_location(location_id: int, session: Session = Depends(get_session)) -> Response:
+    structured.archive_location(session, location_id)
+    return Response(status_code=204)
+
+
+@router.post("/locations/{location_id}/references", response_model=LocationReferenceRead, status_code=201)
+def create_location_reference(
+    location_id: int,
+    payload: LocationReferenceCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.add_location_reference(session, location_id, payload)
+
+
+@router.delete("/location-references/{reference_id}", status_code=204)
+def delete_location_reference(reference_id: int, session: Session = Depends(get_session)) -> Response:
+    structured.delete_location_reference(session, reference_id)
+    return Response(status_code=204)
+
+
+@router.get("/projects/{project_id}/style-profiles", response_model=list[StyleProfileRead])
+def list_project_style_profiles(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return structured.list_style_profiles(session, project_id)
+
+
+@router.post("/projects/{project_id}/style-profiles", response_model=StyleProfileRead, status_code=201)
+def create_project_style_profile(
+    project_id: int,
+    payload: StyleProfileCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.create_style_profile(session, project_id, payload)
+
+
+@router.get("/style-profiles/{style_profile_id}", response_model=StyleProfileRead)
+def read_style_profile(style_profile_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return structured.get_style_profile_payload(session, style_profile_id)
+
+
+@router.patch("/style-profiles/{style_profile_id}", response_model=StyleProfileRead)
+def update_style_profile(
+    style_profile_id: int,
+    payload: StyleProfileUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return structured.update_style_profile(session, style_profile_id, payload)
+
+
+@router.delete("/style-profiles/{style_profile_id}", status_code=204)
+def delete_style_profile(style_profile_id: int, session: Session = Depends(get_session)) -> Response:
+    structured.archive_style_profile(session, style_profile_id)
+    return Response(status_code=204)
+
+
 @router.patch("/shots/{shot_id}", response_model=ShotRead)
 def update_shot(shot_id: int, payload: ShotUpdate, session: Session = Depends(get_session)) -> Shot:
     return studio.update_shot(session, shot_id, payload)
@@ -369,6 +517,34 @@ def revise_shot(
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return studio.revise_shot_spec(session, shot_id, payload)
+
+
+@router.get("/shots/{shot_id}/spec", response_model=ShotSpecRead)
+def read_shot_spec(shot_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return structured.get_shot_spec_payload(session, shot_id)
+
+
+@router.get("/shots/{shot_id}/spec/history", response_model=list[ShotSpecRead])
+def read_shot_spec_history(shot_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return structured.list_shot_spec_history(session, shot_id)
+
+
+@router.post("/shots/{shot_id}/spec/revisions", response_model=ShotRevisionRead)
+def revise_shot_spec_structured(
+    shot_id: int,
+    payload: ShotSpecRevisionRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return studio.revise_structured_shot_spec(session, shot_id, payload)
+
+
+@router.post("/shots/{shot_id}/spec/sync", response_model=ShotRevisionRead)
+def sync_shot_spec(
+    shot_id: int,
+    payload: ShotSpecSyncRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return studio.sync_structured_shot_spec(session, shot_id, payload)
 
 
 @router.post("/shots/{shot_id}/start-frame", response_model=ShotRead)

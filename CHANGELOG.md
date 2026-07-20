@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0-rc4
+
+- Adds the Project continuity library for Characters, Locations, StyleProfiles, and image references.
+- Adds revisioned ShotSpecs with deterministic `structured-continuity-v1` prompt compilation and immutable structured snapshots.
+- Copies compiled prompt, negative prompt, compiler version, ShotSpec revision, structured payload, and reference Asset IDs into GenerationRequest snapshots.
+- Keeps template edits explicit: existing ShotSpecs do not change until sync, and no-change sync returns no-op.
+- Marks structured prompt and reference-image behavior as `CONTRACT_VERIFIED_ONLY`; live real-Provider effectiveness is not claimed.
+
 ## v0.2.0-rc3
 
 - Adds best-effort video quality-check persistence for review-stage videos: duration, decode health, black/freeze segments, FPS/aspect metadata, tail-target comparison, and start-anchor comparison.

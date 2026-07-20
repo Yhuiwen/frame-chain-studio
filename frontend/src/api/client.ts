@@ -105,6 +105,134 @@ export interface GenerationRequest {
   updated_at: string;
 }
 
+export type CharacterReferenceType = "FACE" | "FULL_BODY" | "CLOTHING" | "POSE" | "EXPRESSION" | "OTHER";
+export type LocationReferenceType = "WIDE" | "INTERIOR" | "EXTERIOR" | "DETAIL" | "LIGHTING" | "OTHER";
+export type ShotCharacterRole = "PRIMARY" | "SECONDARY" | "BACKGROUND";
+
+export interface Character {
+  id: number;
+  project_id: number;
+  name: string;
+  description: string;
+  appearance: string;
+  personality: string;
+  default_clothing: string;
+  default_props: string[];
+  continuity_notes: string;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+  usage_count: number;
+  reference_count: number;
+  primary_reference_asset_id: number | null;
+}
+
+export interface Location {
+  id: number;
+  project_id: number;
+  name: string;
+  description: string;
+  environment: string;
+  architecture: string;
+  time_of_day: string;
+  weather: string;
+  lighting: string;
+  continuity_notes: string;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+  usage_count: number;
+  reference_count: number;
+  primary_reference_asset_id: number | null;
+}
+
+export interface StyleProfile {
+  id: number;
+  project_id: number;
+  name: string;
+  description: string;
+  positive_prompt: string;
+  negative_prompt: string;
+  color_palette: string[];
+  rendering_style: string;
+  camera_language: string;
+  aspect_ratio: string | null;
+  fps: number | null;
+  default_provider_options: Record<string, unknown>;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+  usage_count: number;
+}
+
+export interface ShotCharacterSpec {
+  id?: number;
+  shot_spec_id?: number;
+  character_id: number;
+  role: ShotCharacterRole;
+  sort_order: number;
+  appearance_override: string;
+  clothing_override: string;
+  expression: string;
+  action: string;
+  position: string;
+  props: string[];
+  continuity_notes: string;
+  reference_asset_ids: number[];
+}
+
+export interface ShotSpec {
+  id: number;
+  shot_id: number;
+  revision: number;
+  location_id: number | null;
+  style_profile_id: number | null;
+  summary: string;
+  action: string;
+  emotion: string;
+  composition: string;
+  shot_size: string;
+  camera_angle: string;
+  camera_movement: string;
+  lighting: string;
+  time_of_day: string;
+  weather: string;
+  dialogue: string;
+  continuity_notes: string;
+  props: string[];
+  provider_overrides: Record<string, unknown>;
+  compiled_prompt: string;
+  compiled_negative_prompt: string;
+  structured_payload_json: string;
+  structured_payload: Record<string, unknown>;
+  compiler_version: string;
+  created_at: string;
+  characters: ShotCharacterSpec[];
+  reference_asset_ids: number[];
+}
+
+export type ShotSpecPatch = Partial<
+  Pick<
+    ShotSpec,
+    | "location_id"
+    | "style_profile_id"
+    | "summary"
+    | "action"
+    | "emotion"
+    | "composition"
+    | "shot_size"
+    | "camera_angle"
+    | "camera_movement"
+    | "lighting"
+    | "time_of_day"
+    | "weather"
+    | "dialogue"
+    | "continuity_notes"
+    | "props"
+    | "provider_overrides"
+  >
+>;
+
 export interface GenerationTask {
   id: number;
   generation_request_id: number;
@@ -400,6 +528,59 @@ export const api = {
     request<GenerationRequest>(`/api/shots/${shotId}/video/generate`, { method: "POST", body: JSON.stringify(body) }),
   approveVideo: (shotId: number) => request<Shot>(`/api/shots/${shotId}/video/approve`, { method: "POST" }),
   rejectVideo: (shotId: number) => request<Shot>(`/api/shots/${shotId}/video/reject`, { method: "POST" }),
+  listCharacters: (projectId: number) => request<Character[]>(`/api/projects/${projectId}/characters`),
+  createCharacter: (projectId: number, body: Partial<Character>) =>
+    request<Character>(`/api/projects/${projectId}/characters`, { method: "POST", body: JSON.stringify(body) }),
+  updateCharacter: (characterId: number, body: Partial<Character>) =>
+    request<Character>(`/api/characters/${characterId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteCharacter: (characterId: number) => request<void>(`/api/characters/${characterId}`, { method: "DELETE" }),
+  addCharacterReference: (
+    characterId: number,
+    body: { asset_id: number; reference_type?: CharacterReferenceType; label?: string; is_primary?: boolean; sort_order?: number },
+  ) =>
+    request<void>(`/api/characters/${characterId}/references`, { method: "POST", body: JSON.stringify(body) }),
+  listLocations: (projectId: number) => request<Location[]>(`/api/projects/${projectId}/locations`),
+  createLocation: (projectId: number, body: Partial<Location>) =>
+    request<Location>(`/api/projects/${projectId}/locations`, { method: "POST", body: JSON.stringify(body) }),
+  updateLocation: (locationId: number, body: Partial<Location>) =>
+    request<Location>(`/api/locations/${locationId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteLocation: (locationId: number) => request<void>(`/api/locations/${locationId}`, { method: "DELETE" }),
+  addLocationReference: (
+    locationId: number,
+    body: { asset_id: number; reference_type?: LocationReferenceType; label?: string; is_primary?: boolean; sort_order?: number },
+  ) =>
+    request<void>(`/api/locations/${locationId}/references`, { method: "POST", body: JSON.stringify(body) }),
+  listStyleProfiles: (projectId: number) => request<StyleProfile[]>(`/api/projects/${projectId}/style-profiles`),
+  createStyleProfile: (projectId: number, body: Partial<StyleProfile>) =>
+    request<StyleProfile>(`/api/projects/${projectId}/style-profiles`, { method: "POST", body: JSON.stringify(body) }),
+  updateStyleProfile: (styleProfileId: number, body: Partial<StyleProfile>) =>
+    request<StyleProfile>(`/api/style-profiles/${styleProfileId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteStyleProfile: (styleProfileId: number) => request<void>(`/api/style-profiles/${styleProfileId}`, { method: "DELETE" }),
+  getShotSpec: (shotId: number) => request<ShotSpec>(`/api/shots/${shotId}/spec`),
+  listShotSpecHistory: (shotId: number) => request<ShotSpec[]>(`/api/shots/${shotId}/spec/history`),
+  reviseShotSpec: (shotId: number, body: { reason?: string; changes: ShotSpecPatch; characters?: ShotCharacterSpec[] | null }) =>
+    request<{
+      shot_id: number;
+      old_spec_revision: number;
+      new_spec_revision: number;
+      old_state: ShotStatus;
+      new_state: ShotStatus;
+      invalidated_asset_ids: number[];
+      affected_downstream_shot_ids: number[];
+    }>(`/api/shots/${shotId}/spec/revisions`, { method: "POST", body: JSON.stringify(body) }),
+  syncShotSpec: (
+    shotId: number,
+    body: { reason?: string; sync_character_defaults?: boolean; sync_location_defaults?: boolean; sync_style_profile?: boolean },
+  ) =>
+    request<{
+      shot_id: number;
+      old_spec_revision: number;
+      new_spec_revision: number;
+      old_state: ShotStatus;
+      new_state: ShotStatus;
+      invalidated_asset_ids: number[];
+      affected_downstream_shot_ids: number[];
+    }>(`/api/shots/${shotId}/spec/sync`, { method: "POST", body: JSON.stringify(body) }),
   cancelTask: (taskId: number, reason: string, idempotencyKey: string) =>
     request<GenerationTask>(`/api/tasks/${taskId}/cancel`, {
       method: "POST",

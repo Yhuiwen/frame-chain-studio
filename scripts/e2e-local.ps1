@@ -30,6 +30,7 @@ $Summary = [ordered]@{
   shot_ids = @()
   shots = @()
   worker_restart = [ordered]@{ skipped = [bool]$SkipWorkerRestart }
+  structured_continuity = $null
   provider_requests = @()
   range = @()
   render = $null
@@ -167,6 +168,40 @@ function Invoke-Api($Method, $Path, $Body = $null, $Headers = $null) {
   return Invoke-RestMethod @parameters
 }
 
+function Get-StringSha256($Value) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$Value)
+    return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha.Dispose()
+  }
+}
+
+function Upload-ProjectImage($ProjectId, $Name) {
+  $imagePath = Join-Path $RunRoot "$Name.png"
+  $env:FCS_E2E_IMAGE_PATH = $imagePath
+  $env:FCS_E2E_IMAGE_NAME = $Name
+  Push-Location $BackendRoot
+  try {
+    @'
+import os
+from PIL import Image
+
+name = os.environ["FCS_E2E_IMAGE_NAME"]
+color = "red" if "character" in name else "blue"
+Image.new("RGB", (16, 16), color).save(os.environ["FCS_E2E_IMAGE_PATH"], format="PNG")
+'@ | python -
+  } finally {
+    Pop-Location
+    Remove-Item Env:FCS_E2E_IMAGE_PATH -ErrorAction SilentlyContinue
+    Remove-Item Env:FCS_E2E_IMAGE_NAME -ErrorAction SilentlyContinue
+  }
+  $output = & curl.exe -sS --max-time 20 -X POST -F "file=@$imagePath;type=image/png;filename=$Name.png" "http://127.0.0.1:$BackendPort/api/projects/$ProjectId/assets/images"
+  if ($LASTEXITCODE -ne 0) { Fail "upload" "Project image upload failed for $Name." }
+  return ($output | ConvertFrom-Json)
+}
+
 function Wait-Http($Name, $Url, [int]$TimeoutSeconds = 60) {
   for ($i = 0; $i -lt ($TimeoutSeconds * 2); $i++) {
     try {
@@ -247,6 +282,10 @@ function Get-Detail($ProjectId) {
 
 function Get-TaskForRequest($Detail, $RequestId) {
   return @($Detail.tasks | Where-Object { $_.generation_request_id -eq $RequestId } | Sort-Object id -Descending | Select-Object -First 1)[0]
+}
+
+function Get-RequestById($Detail, $RequestId) {
+  return @($Detail.requests | Where-Object { $_.id -eq $RequestId })[0]
 }
 
 function Wait-TaskStatus($ProjectId, $RequestId, [string[]]$Statuses, [int]$TimeoutSeconds = 120) {
@@ -346,6 +385,139 @@ function Assert-ProviderVideoRequest($VideoRequest, $ShotNumber) {
     client_request_id = $body.client_request_id
     first_frame_url = $body.input.first_frame_url
     last_frame_url = $body.input.last_frame_url
+  }
+}
+
+function Assert-ProviderKeyframeRequest($RequestId, $ExpectedText) {
+  $detail = Get-Detail $Summary.project_id
+  $task = Get-TaskForRequest $detail $RequestId
+  $stats = Get-FakeStats
+  $submission = @($stats.submissions | Where-Object { $_.job_id -eq $task.remote_job_id })[0]
+  if (-not $submission) { Fail "provider-request" "No Fake Provider submission found for keyframe request $RequestId." }
+  if ([string]$submission.body.input.text -notmatch [regex]::Escape($ExpectedText)) {
+    Fail "provider-request" "Keyframe provider request did not use the expected structured snapshot."
+  }
+}
+
+function Configure-StructuredShot($ProjectId, $ShotId) {
+  Write-Host "==> Structured continuity library"
+  $characterRef = Upload-ProjectImage $ProjectId "character-reference"
+  $locationRef = Upload-ProjectImage $ProjectId "location-reference"
+  $character = Invoke-Api "POST" "/projects/$ProjectId/characters" @{
+    name = "Mira"
+    appearance = "white coat"
+    default_clothing = "white coat"
+    continuity_notes = "keep the coat bright"
+  }
+  Invoke-Api "POST" "/characters/$($character.id)/references" @{
+    asset_id = $characterRef.id
+    reference_type = "FULL_BODY"
+    is_primary = $true
+    sort_order = 1
+  } | Out-Null
+  $location = Invoke-Api "POST" "/projects/$ProjectId/locations" @{
+    name = "Harbor Gate"
+    description = "misty dock"
+    lighting = "green sodium lamps"
+    time_of_day = "night"
+  }
+  Invoke-Api "POST" "/locations/$($location.id)/references" @{
+    asset_id = $locationRef.id
+    reference_type = "WIDE"
+    is_primary = $true
+    sort_order = 1
+  } | Out-Null
+  $style = Invoke-Api "POST" "/projects/$ProjectId/style-profiles" @{
+    name = "Ink Continuity"
+    positive_prompt = "delicate ink"
+    negative_prompt = "muddy colors"
+    rendering_style = "clean cinematic ink"
+    camera_language = "patient camera"
+  }
+  $revision = Invoke-Api "POST" "/shots/$ShotId/spec/revisions" @{
+    reason = "structured e2e setup"
+    changes = @{
+      location_id = $location.id
+      style_profile_id = $style.id
+      summary = "Mira approaches the harbor gate"
+      action = "raises the lantern"
+      composition = "center frame"
+      camera_movement = "slow dolly"
+      props = @("brass lantern")
+    }
+    characters = @(
+      @{
+        character_id = $character.id
+        role = "PRIMARY"
+        sort_order = 1
+        action = "holds the lantern near her face"
+        reference_asset_ids = @($characterRef.id)
+      }
+    )
+  }
+  if ($revision.new_spec_revision -ne 2) { Fail "structured" "Expected ShotSpec revision 2 after structured setup." }
+  $spec = Invoke-Api "GET" "/shots/$ShotId/spec"
+  if ($spec.compiler_version -ne "structured-continuity-v1") { Fail "structured" "Unexpected compiler version." }
+  if ([string]$spec.compiled_prompt -notmatch "white coat") { Fail "structured" "Compiled prompt does not include the character snapshot." }
+  if (@($spec.reference_asset_ids).Count -lt 2) { Fail "structured" "Expected character and location references in ShotSpec." }
+  $initialPromptHash = Get-StringSha256 $spec.compiled_prompt
+  $initialPayloadHash = Get-StringSha256 $spec.structured_payload_json
+
+  $oldRequest = Invoke-Api "POST" "/shots/$ShotId/keyframe/generate" @{ provider_id = "fake-http"; seed = 91 }
+  Wait-TaskStatus $ProjectId $oldRequest.id @("SUCCEEDED") 120 | Out-Null
+  Wait-ShotStatus $ProjectId $ShotId "KEYFRAME_REVIEW" 60 | Out-Null
+  Assert-ProviderKeyframeRequest $oldRequest.id "white coat"
+  $detail = Get-Detail $ProjectId
+  $oldRequestDetail = Get-RequestById $detail $oldRequest.id
+  if ($oldRequestDetail.shot_spec_revision -ne 2 -or $oldRequestDetail.compiler_version -ne "structured-continuity-v1") {
+    Fail "structured" "GenerationRequest did not persist the ShotSpec snapshot."
+  }
+  if ((Get-StringSha256 $oldRequestDetail.prompt_snapshot) -ne $initialPromptHash) {
+    Fail "structured" "GenerationRequest prompt snapshot does not match ShotSpec."
+  }
+  if ((Get-StringSha256 $oldRequestDetail.structured_payload_json) -ne $initialPayloadHash) {
+    Fail "structured" "GenerationRequest structured payload snapshot does not match ShotSpec."
+  }
+
+  Invoke-Api "PATCH" "/characters/$($character.id)" @{
+    appearance = "black coat"
+    default_clothing = "black coat"
+  } | Out-Null
+  $unchanged = Invoke-Api "GET" "/shots/$ShotId/spec"
+  if ((Get-StringSha256 $unchanged.compiled_prompt) -ne $initialPromptHash) {
+    Fail "structured" "Character template edit changed the current ShotSpec without sync."
+  }
+  if ([string]$unchanged.compiled_prompt -match "black coat") {
+    Fail "structured" "Current ShotSpec read mutable Character defaults after edit."
+  }
+
+  $synced = Invoke-Api "POST" "/shots/$ShotId/spec/sync" @{
+    reason = "sync character defaults"
+    sync_character_defaults = $true
+    sync_location_defaults = $false
+    sync_style_profile = $false
+  }
+  if ($synced.new_spec_revision -ne 3) { Fail "structured" "Expected explicit sync to create revision 3." }
+  $newSpec = Invoke-Api "GET" "/shots/$ShotId/spec"
+  if ([string]$newSpec.compiled_prompt -notmatch "black coat") { Fail "structured" "Synced ShotSpec did not use updated Character defaults." }
+  $Summary.structured_continuity = [ordered]@{
+    character_id = $character.id
+    character_reference_asset_id = $characterRef.id
+    location_id = $location.id
+    location_reference_asset_id = $locationRef.id
+    style_profile_id = $style.id
+    old_shot_spec_revision = 2
+    shot_spec_id = $newSpec.id
+    shot_spec_revision = $newSpec.revision
+    compiler_version = $newSpec.compiler_version
+    compiled_prompt_sha256 = Get-StringSha256 $newSpec.compiled_prompt
+    structured_payload_sha256 = Get-StringSha256 $newSpec.structured_payload_json
+    generation_request_id = $oldRequest.id
+    generation_request_revision = $oldRequestDetail.shot_spec_revision
+    old_request_prompt_sha256 = Get-StringSha256 $oldRequestDetail.prompt_snapshot
+    provider_reference_asset_ids = @($newSpec.reference_asset_ids)
+    sync_invalidated_asset_ids = @($synced.invalidated_asset_ids)
+    contract_status = "CONTRACT_VERIFIED_ONLY"
   }
 }
 
@@ -552,13 +724,13 @@ function Run-BackupRestoreVerification($ProjectId, $RenderId, $RenderUrl, $Rende
   $restoreOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "restore.ps1") -BackupPath $backupPath -Force
   if ($LASTEXITCODE -ne 0) { Fail "restore" "restore.ps1 failed." }
   $restoreCheck = Invoke-SqliteCheck $DatabasePath $ProjectId $RenderId
-  if ($restoreCheck.quick_check -ne "ok" -or $restoreCheck.project_count -ne 1 -or $restoreCheck.shot_count -ne 3 -or $restoreCheck.task_count -ne 6 -or $restoreCheck.render_count -ne 1 -or $restoreCheck.quality_count -lt 1 -or $restoreCheck.quality_duplicate_count -ne 0) {
+  if ($restoreCheck.quick_check -ne "ok" -or $restoreCheck.project_count -ne 1 -or $restoreCheck.shot_count -ne 3 -or $restoreCheck.task_count -ne 7 -or $restoreCheck.render_count -ne 1 -or $restoreCheck.quality_count -lt 1 -or $restoreCheck.quality_duplicate_count -ne 0) {
     Fail "restore" "Restored DB did not contain expected project/render/task/quality counts."
   }
 
   Restart-Stack
   $detail = Get-Detail $ProjectId
-  if ($detail.shots.Count -ne 3 -or $detail.tasks.Count -ne 6) { Fail "restore" "Restored API detail has unexpected shot/task counts." }
+  if ($detail.shots.Count -ne 3 -or $detail.tasks.Count -ne 7) { Fail "restore" "Restored API detail has unexpected shot/task counts." }
   if (@($detail.quality_checks).Count -lt 1) { Fail "restore" "Restored API detail is missing quality checks." }
   $render = Invoke-Api "GET" "/renders/$RenderId"
   if ($render.status -ne "SUCCEEDED" -or -not $render.output_asset_id) { Fail "restore" "Restored render did not remain succeeded." }
@@ -616,7 +788,7 @@ try {
 
   Write-Host "==> Create isolated 3-shot E2E project"
   $project = Invoke-Api "POST" "/projects" @{
-    name = "3A local E2E $(Get-Date -Format yyyyMMdd-HHmmss)"
+    name = "3C-1 local E2E $(Get-Date -Format yyyyMMdd-HHmmss)"
     description = "Created by scripts/e2e-local.ps1"
     image_provider_id = "fake-http"
     video_provider_id = "fake-http"
@@ -637,6 +809,7 @@ try {
   }
   $Summary.shot_ids = $shotIds
 
+  Configure-StructuredShot $project.id $shotIds[0]
   Complete-Shot $project.id $shotIds[0] 1 $true
   Complete-Shot $project.id $shotIds[1] 2 $false
   Complete-Shot $project.id $shotIds[2] 3 $false

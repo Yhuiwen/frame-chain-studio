@@ -23,28 +23,44 @@ from app.models.entities import (
     Asset,
     AssetStatus,
     AssetType,
+    Character,
+    CharacterReference,
     GenerationKind,
     GenerationRequest,
-    GenerationTaskStatus,
     GenerationTask,
+    GenerationTaskStatus,
     GenerationTaskResult,
+    Location,
+    LocationReference,
     Project,
     ProjectRender,
     ProviderAssetCache,
     ReliableTaskStatus,
     Shot,
+    ShotCharacter,
+    ShotSpec,
     ShotStateChange,
     ShotStatus,
     StartFrameSourceType,
+    StyleProfile,
     TaskCommand,
     TaskLog,
     TaskStateChange,
     WorkerHeartbeat,
     utcnow,
 )
-from app.models.schemas import ProjectCreate, ProjectUpdate, ReorderShot, ShotCreate, ShotRevisionRequest, ShotUpdate
+from app.models.schemas import (
+    ProjectCreate,
+    ProjectUpdate,
+    ReorderShot,
+    ShotCreate,
+    ShotRevisionRequest,
+    ShotSpecRevisionRequest,
+    ShotSpecSyncRequest,
+    ShotUpdate,
+)
 from app.providers.base import GenerationProvider
-from app.services import quality_service, task_service
+from app.services import quality_service, structured, task_service
 
 ACTIVE_GENERATION_STATUSES = task_service.ACTIVE_TASK_STATUSES
 ACTIVE_RENDER_STATUSES = {
@@ -123,6 +139,7 @@ def delete_project(session: Session, project_id: int) -> None:
             session.delete(render)
         for request in session.exec(select(GenerationRequest).where(GenerationRequest.project_id == project_id)).all():
             session.delete(request)
+        _delete_structured_project_records(session, project_id)
         for shot in session.exec(select(Shot).where(Shot.project_id == project_id)).all():
             shot.start_frame_asset_id = None
             shot.approved_keyframe_asset_id = None
@@ -163,6 +180,8 @@ def create_shot(session: Session, project_id: int, payload: ShotCreate) -> Shot:
         **payload.model_dump(),
     )
     session.add(shot)
+    session.flush()
+    structured.create_initial_shot_spec(session, shot, commit=False)
     session.commit()
     session.refresh(shot)
     log_state(session, shot, None, shot.status, "shot_created")
@@ -233,6 +252,12 @@ def revise_shot_spec(session: Session, shot_id: int, payload: ShotRevisionReques
         previous = shot.status
         shot.status = new_state
         session.add(ShotStateChange(shot_id=shot.id or 0, from_status=previous, to_status=new_state, reason="shot_revised"))
+        structured.create_revised_shot_spec(
+            session,
+            shot,
+            previous_revision=old_revision,
+            payload=legacy_shot_revision_to_structured(payload),
+        )
     shot.updated_at = utcnow()
     session.add(shot)
     affected = invalidate_downstream_shots(session, shot, reason=payload.reason or "shot_revised")
@@ -242,6 +267,124 @@ def revise_shot_spec(session: Session, shot_id: int, payload: ShotRevisionReques
         None,
         shot,
         f"Shot revised from spec {old_revision} to {shot.spec_revision}: {payload.reason}",
+        commit=False,
+    )
+    validate_project_continuity_invariants(session, shot.project_id)
+    session.commit()
+    session.refresh(shot)
+    return {
+        "shot_id": shot.id,
+        "old_spec_revision": old_revision,
+        "new_spec_revision": shot.spec_revision,
+        "old_state": old_state,
+        "new_state": shot.status,
+        "invalidated_asset_ids": sorted(set(invalidated)),
+        "affected_downstream_shot_ids": sorted(set(affected)),
+    }
+
+
+def legacy_shot_revision_to_structured(payload: ShotRevisionRequest) -> ShotSpecRevisionRequest:
+    changes: dict[str, object] = {}
+    if "description" in payload.changes:
+        changes["summary"] = payload.changes["description"]
+    return ShotSpecRevisionRequest(reason=payload.reason, changes=changes)
+
+
+def revise_structured_shot_spec(
+    session: Session, shot_id: int, payload: ShotSpecRevisionRequest
+) -> dict[str, object]:
+    shot = get_shot_or_404(session, shot_id)
+    old_revision = shot.spec_revision
+    old_state = shot.status
+    shot.spec_revision += 1
+    invalidated = invalidate_shot_assets(
+        session,
+        shot,
+        asset_types={AssetType.KEYFRAME, AssetType.VIDEO, AssetType.TAIL_FRAME},
+        clear_keyframe=True,
+        clear_video=True,
+        clear_tail=True,
+    )
+    previous = shot.status
+    shot.status = ShotStatus.DRAFT
+    shot.updated_at = utcnow()
+    session.add(shot)
+    session.add(ShotStateChange(shot_id=shot.id or 0, from_status=previous, to_status=shot.status, reason="shot_spec_revised"))
+    structured.create_revised_shot_spec(session, shot, previous_revision=old_revision, payload=payload)
+    affected = invalidate_downstream_shots(session, shot, reason=payload.reason or "shot_spec_revised")
+    rebuild_project_continuity_chain(session, shot.project_id, reason=payload.reason or "shot_spec_revised")
+    log_task(
+        session,
+        None,
+        shot,
+        f"Structured ShotSpec revised from {old_revision} to {shot.spec_revision}: {payload.reason}",
+        commit=False,
+    )
+    validate_project_continuity_invariants(session, shot.project_id)
+    session.commit()
+    session.refresh(shot)
+    return {
+        "shot_id": shot.id,
+        "old_spec_revision": old_revision,
+        "new_spec_revision": shot.spec_revision,
+        "old_state": old_state,
+        "new_state": shot.status,
+        "invalidated_asset_ids": sorted(set(invalidated)),
+        "affected_downstream_shot_ids": sorted(set(affected)),
+    }
+
+
+def sync_structured_shot_spec(
+    session: Session, shot_id: int, payload: ShotSpecSyncRequest
+) -> dict[str, object]:
+    shot = get_shot_or_404(session, shot_id)
+    old_revision = shot.spec_revision
+    old_state = shot.status
+    if structured.synced_spec_matches_current(
+        session,
+        shot,
+        sync_character_defaults=payload.sync_character_defaults,
+        sync_location_defaults=payload.sync_location_defaults,
+        sync_style_profile=payload.sync_style_profile,
+    ):
+        return {
+            "shot_id": shot.id,
+            "old_spec_revision": old_revision,
+            "new_spec_revision": old_revision,
+            "old_state": old_state,
+            "new_state": shot.status,
+            "invalidated_asset_ids": [],
+            "affected_downstream_shot_ids": [],
+        }
+    shot.spec_revision += 1
+    invalidated = invalidate_shot_assets(
+        session,
+        shot,
+        asset_types={AssetType.KEYFRAME, AssetType.VIDEO, AssetType.TAIL_FRAME},
+        clear_keyframe=True,
+        clear_video=True,
+        clear_tail=True,
+    )
+    previous = shot.status
+    shot.status = ShotStatus.DRAFT
+    shot.updated_at = utcnow()
+    session.add(shot)
+    session.add(ShotStateChange(shot_id=shot.id or 0, from_status=previous, to_status=shot.status, reason="shot_spec_synced"))
+    structured.sync_shot_spec(
+        session,
+        shot,
+        previous_revision=old_revision,
+        sync_character_defaults=payload.sync_character_defaults,
+        sync_location_defaults=payload.sync_location_defaults,
+        sync_style_profile=payload.sync_style_profile,
+    )
+    affected = invalidate_downstream_shots(session, shot, reason=payload.reason or "shot_spec_synced")
+    rebuild_project_continuity_chain(session, shot.project_id, reason=payload.reason or "shot_spec_synced")
+    log_task(
+        session,
+        None,
+        shot,
+        f"Structured ShotSpec synced from {old_revision} to {shot.spec_revision}: {payload.reason}",
         commit=False,
     )
     validate_project_continuity_invariants(session, shot.project_id)
@@ -288,6 +431,7 @@ def delete_shot(session: Session, shot_id: int) -> None:
             session.delete(log)
         for request in session.exec(select(GenerationRequest).where(GenerationRequest.shot_id == shot_id)).all():
             session.delete(request)
+        _delete_structured_shot_records(session, shot_id)
         assets_to_delete = list(session.exec(select(Asset).where(Asset.shot_id == shot_id)).all())
         asset_ids_to_delete = {asset.id for asset in assets_to_delete if asset.id is not None}
         for other_shot in session.exec(select(Shot).where(col(Shot.start_frame_asset_id).in_(asset_ids_to_delete))).all():
@@ -341,6 +485,60 @@ def _shot_ids(session: Session, project_id: int) -> list[int]:
         for shot_id in session.exec(select(Shot.id).where(Shot.project_id == project_id)).all()
         if shot_id is not None
     ]
+
+
+def _delete_structured_project_records(session: Session, project_id: int) -> None:
+    shot_ids = _shot_ids(session, project_id)
+    if shot_ids:
+        spec_ids = [
+            spec_id
+            for spec_id in session.exec(select(ShotSpec.id).where(col(ShotSpec.shot_id).in_(shot_ids))).all()
+            if spec_id is not None
+        ]
+        if spec_ids:
+            for item in session.exec(select(ShotCharacter).where(col(ShotCharacter.shot_spec_id).in_(spec_ids))).all():
+                session.delete(item)
+        for spec in session.exec(select(ShotSpec).where(col(ShotSpec.shot_id).in_(shot_ids))).all():
+            session.delete(spec)
+    character_ids = [
+        character_id
+        for character_id in session.exec(select(Character.id).where(Character.project_id == project_id)).all()
+        if character_id is not None
+    ]
+    if character_ids:
+        for character_reference in session.exec(
+            select(CharacterReference).where(col(CharacterReference.character_id).in_(character_ids))
+        ).all():
+            session.delete(character_reference)
+    location_ids = [
+        location_id
+        for location_id in session.exec(select(Location.id).where(Location.project_id == project_id)).all()
+        if location_id is not None
+    ]
+    if location_ids:
+        for location_reference in session.exec(
+            select(LocationReference).where(col(LocationReference.location_id).in_(location_ids))
+        ).all():
+            session.delete(location_reference)
+    for style in session.exec(select(StyleProfile).where(StyleProfile.project_id == project_id)).all():
+        session.delete(style)
+    for location in session.exec(select(Location).where(Location.project_id == project_id)).all():
+        session.delete(location)
+    for character in session.exec(select(Character).where(Character.project_id == project_id)).all():
+        session.delete(character)
+
+
+def _delete_structured_shot_records(session: Session, shot_id: int) -> None:
+    spec_ids = [
+        spec_id
+        for spec_id in session.exec(select(ShotSpec.id).where(ShotSpec.shot_id == shot_id)).all()
+        if spec_id is not None
+    ]
+    if spec_ids:
+        for item in session.exec(select(ShotCharacter).where(col(ShotCharacter.shot_spec_id).in_(spec_ids))).all():
+            session.delete(item)
+    for spec in session.exec(select(ShotSpec).where(ShotSpec.shot_id == shot_id)).all():
+        session.delete(spec)
 
 
 def _ensure_shot_deletable(session: Session, shot: Shot) -> None:
@@ -847,6 +1045,18 @@ def create_generation_request(
     provider_config_snapshot: dict[str, object] | None = None,
     commit: bool = True,
 ) -> GenerationRequest:
+    spec = structured.create_initial_shot_spec(session, shot, commit=False)
+    prompt_snapshot = spec.compiled_prompt or shot.prompt
+    negative_snapshot = spec.compiled_negative_prompt or shot.negative_prompt
+    structured_payload = structured.loads_dict(spec.structured_payload_json)
+    provider_payload = dict(request_payload or {})
+    provider_payload["prompt"] = prompt_snapshot
+    provider_payload["negative_prompt"] = negative_snapshot
+    provider_payload["structured_payload"] = structured_payload
+    provider_payload["compiler_version"] = spec.compiler_version
+    reference_asset_ids = [item for item in structured_payload.get("reference_asset_ids", []) if isinstance(item, int)]
+    if reference_asset_ids:
+        provider_payload["reference_asset_ids"] = reference_asset_ids
     request = task_service.create_generation_request(
         session,
         project_id=shot.project_id,
@@ -861,8 +1071,10 @@ def create_generation_request(
         seed=seed,
         duration_seconds=duration_seconds,
         allow_capability_fallback=allow_capability_fallback,
-        prompt_snapshot=shot.prompt,
-        negative_prompt_snapshot=shot.negative_prompt,
+        prompt_snapshot=prompt_snapshot,
+        negative_prompt_snapshot=negative_snapshot,
+        structured_payload_json=spec.structured_payload_json,
+        compiler_version=spec.compiler_version,
         input_asset_ids=input_asset_ids or [],
         commit=commit,
     )
@@ -870,18 +1082,20 @@ def create_generation_request(
         session,
         generation_request=request,
         provider_id=provider_id,
-        request_payload=request_payload
+        request_payload=provider_payload
         or {
             "provider_id": provider_id,
             "model": model,
-            "prompt": shot.prompt,
-            "negative_prompt": shot.negative_prompt,
+            "prompt": prompt_snapshot,
+            "negative_prompt": negative_snapshot,
             "input_asset_ids": input_asset_ids or [],
             "generation_mode": generation_mode,
             "aspect_ratio": aspect_ratio,
             "seed": seed,
             "duration_seconds": duration_seconds,
             "allow_capability_fallback": allow_capability_fallback,
+            "structured_payload": structured_payload,
+            "compiler_version": spec.compiler_version,
         },
         provider_config_snapshot=provider_config_snapshot or {"provider_id": provider_id, "mode": "local_fixture"},
         commit=commit,

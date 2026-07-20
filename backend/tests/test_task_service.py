@@ -8,11 +8,16 @@ from app.db import get_session
 from app.main import app
 from app.core.errors import AppError
 from app.models.entities import (
+    Asset,
+    AssetStatus,
+    AssetType,
     GenerationKind,
     GenerationTaskType,
     Project,
     ReliableTaskStatus,
+    ResultMediaKind,
     Shot,
+    ShotStatus,
     TaskCommand,
     TaskCommandType,
     TaskStateChange,
@@ -97,6 +102,77 @@ def test_different_shot_or_task_type_does_not_conflict(session: Session) -> None
     )
 
     assert one.id != two.id
+
+
+def test_register_result_asset_does_not_reuse_same_sha_from_old_revision(session: Session) -> None:
+    project = studio.create_project(session, ProjectCreate(name="Revisioned Result"))
+    shot = studio.create_shot(session, project.id or 0, ShotCreate(title="Shot 1"))
+    shot.spec_revision = 2
+    shot.status = ShotStatus.KEYFRAME_GENERATING
+    session.add(shot)
+    stale = Asset(
+        project_id=project.id or 0,
+        shot_id=shot.id,
+        type=AssetType.KEYFRAME,
+        status=AssetStatus.STALE,
+        revision=1,
+        path="old.png",
+        mime_type="image/png",
+        sha256="same-sha",
+    )
+    session.add(stale)
+    session.commit()
+    request = task_service.create_generation_request(
+        session,
+        project_id=project.id or 0,
+        shot_id=shot.id or 0,
+        shot_spec_revision=2,
+        kind=GenerationKind.KEYFRAME,
+        provider_name="mock",
+    )
+    task = task_service.create_task_attempt(session, generation_request=request)
+    task_service.mark_task_remote_submitted(
+        session,
+        task.id or 0,
+        remote_job_id="remote-1",
+        remote_status="running",
+        response_summary="{}",
+        poll_delay_seconds=0,
+    )
+    task_service.mark_task_result_ready(
+        session,
+        task.id or 0,
+        remote_status="succeeded",
+        result_urls=[{"url": "http://example.test/result.png"}],
+        response_summary="{}",
+    )
+    task_service.mark_task_processing_result(session, task.id or 0, max_result_attempts=1)
+    result = task_service.initialize_task_results(session, task.id or 0, max_attempts=1)[0]
+    result.sha256 = "same-sha"
+    result.mime_type = "image/png"
+    result.file_size = 10
+    result.media_kind = ResultMediaKind.IMAGE
+    session.add(result)
+    session.commit()
+
+    completed, asset = task_service.register_result_asset(
+        session,
+        task.id or 0,
+        result.id or 0,
+        final_path="new.png",
+        asset_type=AssetType.KEYFRAME,
+        shot_next_status=ShotStatus.KEYFRAME_REVIEW,
+        workflow_reason="test",
+    )
+
+    assert completed.status == ReliableTaskStatus.SUCCEEDED
+    assert asset is not None
+    assert asset.id != stale.id
+    assert asset.revision == 2
+    assert asset.sha256 == "same-sha"
+    old_asset = session.get(Asset, stale.id)
+    assert old_asset is not None
+    assert old_asset.status == AssetStatus.STALE
 
 
 def test_transition_task_logs_once_and_checks_expected_current(session: Session) -> None:

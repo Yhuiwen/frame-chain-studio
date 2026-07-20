@@ -6,13 +6,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.entities import (
     AssetStatus,
     AssetType,
+    CharacterReferenceType,
     GenerationKind,
     GenerationMode,
     GenerationTaskStatus,
     GenerationTaskType,
+    LocationReferenceType,
     ProjectRenderStatus,
     QualityCheckSeverity,
     ReliableTaskStatus,
+    ShotCharacterRole,
     ShotStatus,
     StartFrameSourceType,
     WorkerStatus,
@@ -66,6 +69,168 @@ class ProjectRead(ProjectCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CharacterBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    appearance: str = Field(default="", max_length=4000)
+    personality: str = Field(default="", max_length=2000)
+    default_clothing: str = Field(default="", max_length=2000)
+    default_props: list[str] = Field(default_factory=list)
+    continuity_notes: str = Field(default="", max_length=4000)
+
+
+class CharacterCreate(CharacterBase):
+    pass
+
+
+class CharacterUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=4000)
+    appearance: str | None = Field(default=None, max_length=4000)
+    personality: str | None = Field(default=None, max_length=2000)
+    default_clothing: str | None = Field(default=None, max_length=2000)
+    default_props: list[str] | None = None
+    continuity_notes: str | None = Field(default=None, max_length=4000)
+
+
+class CharacterRead(CharacterBase):
+    id: int
+    project_id: int
+    archived_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    usage_count: int = 0
+    reference_count: int = 0
+    primary_reference_asset_id: int | None = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LocationBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    environment: str = Field(default="", max_length=2000)
+    architecture: str = Field(default="", max_length=2000)
+    time_of_day: str = Field(default="", max_length=120)
+    weather: str = Field(default="", max_length=120)
+    lighting: str = Field(default="", max_length=2000)
+    continuity_notes: str = Field(default="", max_length=4000)
+
+
+class LocationCreate(LocationBase):
+    pass
+
+
+class LocationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=4000)
+    environment: str | None = Field(default=None, max_length=2000)
+    architecture: str | None = Field(default=None, max_length=2000)
+    time_of_day: str | None = Field(default=None, max_length=120)
+    weather: str | None = Field(default=None, max_length=120)
+    lighting: str | None = Field(default=None, max_length=2000)
+    continuity_notes: str | None = Field(default=None, max_length=4000)
+
+
+class LocationRead(LocationBase):
+    id: int
+    project_id: int
+    archived_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    usage_count: int = 0
+    reference_count: int = 0
+    primary_reference_asset_id: int | None = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StyleProfileBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    positive_prompt: str = Field(default="", max_length=4000)
+    negative_prompt: str = Field(default="", max_length=4000)
+    color_palette: list[str] = Field(default_factory=list)
+    rendering_style: str = Field(default="", max_length=1000)
+    camera_language: str = Field(default="", max_length=1000)
+    aspect_ratio: str | None = None
+    fps: float | None = Field(default=None, gt=0)
+    default_provider_options: dict[str, object] = Field(default_factory=dict)
+
+
+class StyleProfileCreate(StyleProfileBase):
+    pass
+
+
+class StyleProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=4000)
+    positive_prompt: str | None = Field(default=None, max_length=4000)
+    negative_prompt: str | None = Field(default=None, max_length=4000)
+    color_palette: list[str] | None = None
+    rendering_style: str | None = Field(default=None, max_length=1000)
+    camera_language: str | None = Field(default=None, max_length=1000)
+    aspect_ratio: str | None = None
+    fps: float | None = Field(default=None, gt=0)
+    default_provider_options: dict[str, object] | None = None
+
+
+class StyleProfileRead(StyleProfileBase):
+    id: int
+    project_id: int
+    archived_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    usage_count: int = 0
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReferenceCreate(BaseModel):
+    asset_id: int
+    reference_type: CharacterReferenceType | LocationReferenceType
+    label: str = Field(default="", max_length=160)
+    is_primary: bool = False
+    sort_order: int = 0
+
+
+class CharacterReferenceCreate(BaseModel):
+    asset_id: int
+    reference_type: CharacterReferenceType = CharacterReferenceType.OTHER
+    label: str = Field(default="", max_length=160)
+    is_primary: bool = False
+    sort_order: int = 0
+
+
+class CharacterReferenceRead(BaseModel):
+    id: int
+    character_id: int
+    asset_id: int
+    reference_type: CharacterReferenceType
+    label: str
+    is_primary: bool
+    sort_order: int
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LocationReferenceCreate(BaseModel):
+    asset_id: int
+    reference_type: LocationReferenceType = LocationReferenceType.OTHER
+    label: str = Field(default="", max_length=160)
+    is_primary: bool = False
+    sort_order: int = 0
+
+
+class LocationReferenceRead(BaseModel):
+    id: int
+    location_id: int
+    asset_id: int
+    reference_type: LocationReferenceType
+    label: str
+    is_primary: bool
+    sort_order: int
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ShotCreate(BaseModel):
     title: str
     description: str = ""
@@ -106,6 +271,74 @@ class ShotTargetKeyframeRequest(BaseModel):
     asset_id: int
 
 
+class ShotCharacterInput(BaseModel):
+    character_id: int
+    role: ShotCharacterRole = ShotCharacterRole.SECONDARY
+    sort_order: int = 0
+    appearance_override: str = Field(default="", max_length=4000)
+    clothing_override: str = Field(default="", max_length=2000)
+    expression: str = Field(default="", max_length=1000)
+    action: str = Field(default="", max_length=2000)
+    position: str = Field(default="", max_length=1000)
+    props: list[str] = Field(default_factory=list)
+    continuity_notes: str = Field(default="", max_length=4000)
+    reference_asset_ids: list[int] = Field(default_factory=list)
+
+
+class ShotCharacterRead(ShotCharacterInput):
+    id: int | None = None
+    shot_spec_id: int | None = None
+    name_snapshot: str = ""
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ShotSpecBase(BaseModel):
+    location_id: int | None = None
+    style_profile_id: int | None = None
+    summary: str = Field(default="", max_length=4000)
+    action: str = Field(default="", max_length=4000)
+    emotion: str = Field(default="", max_length=1000)
+    composition: str = Field(default="", max_length=2000)
+    shot_size: str = Field(default="", max_length=120)
+    camera_angle: str = Field(default="", max_length=240)
+    camera_movement: str = Field(default="", max_length=1000)
+    lighting: str = Field(default="", max_length=2000)
+    time_of_day: str = Field(default="", max_length=120)
+    weather: str = Field(default="", max_length=120)
+    dialogue: str = Field(default="", max_length=4000)
+    continuity_notes: str = Field(default="", max_length=4000)
+    props: list[str] = Field(default_factory=list)
+    provider_overrides: dict[str, object] = Field(default_factory=dict)
+
+
+class ShotSpecRevisionRequest(BaseModel):
+    reason: str = ""
+    changes: dict[str, object] = Field(default_factory=dict)
+    characters: list[ShotCharacterInput] | None = None
+
+
+class ShotSpecSyncRequest(BaseModel):
+    sync_character_defaults: bool = True
+    sync_location_defaults: bool = True
+    sync_style_profile: bool = True
+    reason: str = ""
+
+
+class ShotSpecRead(ShotSpecBase):
+    id: int
+    shot_id: int
+    revision: int
+    compiled_prompt: str
+    compiled_negative_prompt: str
+    structured_payload_json: str
+    structured_payload: dict[str, object] = Field(default_factory=dict)
+    compiler_version: str
+    created_at: datetime
+    characters: list[ShotCharacterRead] = Field(default_factory=list)
+    reference_asset_ids: list[int] = Field(default_factory=list)
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ShotAssetSummary(BaseModel):
     asset_id: int
     url: str
@@ -121,7 +354,7 @@ class ShotAssetSummary(BaseModel):
 class ShotActionState(BaseModel):
     can_generate_keyframe: bool
     can_generate_video: bool
-    reasons: list[str] = []
+    reasons: list[str] = Field(default_factory=list)
 
 
 class ShotRead(ShotCreate):
@@ -197,6 +430,8 @@ class GenerationRequestRead(BaseModel):
     status: GenerationTaskStatus
     prompt_snapshot: str
     negative_prompt_snapshot: str
+    structured_payload_json: str
+    compiler_version: str
     input_asset_ids: str
     output_asset_ids: str
     error_code: str | None
@@ -361,5 +596,3 @@ class ProjectDetail(ProjectRead):
     quality_checks: list[QualityCheckResultRead] = []
     completion: ProjectCompletionRead
     logs: list[TaskLogRead]
-    QualityCheckSeverity,
-    StartFrameSourceType,

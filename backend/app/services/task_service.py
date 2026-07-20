@@ -89,6 +89,8 @@ def create_generation_request(
     allow_capability_fallback: bool = False,
     prompt_snapshot: str = "",
     negative_prompt_snapshot: str = "",
+    structured_payload_json: str = "{}",
+    compiler_version: str = "legacy-v1",
     input_asset_ids: list[int] | None = None,
     commit: bool = True,
 ) -> GenerationRequest:
@@ -107,6 +109,8 @@ def create_generation_request(
         allow_capability_fallback=allow_capability_fallback,
         prompt_snapshot=prompt_snapshot,
         negative_prompt_snapshot=negative_prompt_snapshot,
+        structured_payload_json=structured_payload_json,
+        compiler_version=compiler_version,
         input_asset_ids=json.dumps(input_asset_ids or []),
     )
     session.add(request)
@@ -952,6 +956,7 @@ def register_result_asset(
                 Asset.project_id == task.project_id,
                 Asset.shot_id == task.shot_id,
                 Asset.type == asset_type,
+                Asset.revision == request.shot_spec_revision,
                 Asset.sha256 == result.sha256,
             )
         ).first()

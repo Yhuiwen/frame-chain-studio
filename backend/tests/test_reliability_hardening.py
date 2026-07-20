@@ -24,6 +24,7 @@ from app.models.entities import (
 )
 from app.models.schemas import ProjectCreate, ReorderShot, ShotCreate
 from app.providers.exceptions import ProviderUnsupportedCapabilityError
+from app.providers.models import AssetReference, ImageGenerationRequest, ProviderCapabilities, VideoGenerationRequest
 from app.services import studio, task_service
 from app.workers.request_factory import ProviderRequestFactory
 
@@ -513,6 +514,66 @@ def test_request_factory_rejects_asset_scheme_for_remote_provider(session: Sessi
     factory = ProviderRequestFactory()
     with pytest.raises(ProviderUnsupportedCapabilityError, match="PROVIDER_ASSET_UPLOAD_UNSUPPORTED"):
         factory.build(request, task, SimpleNamespace(image_to_video=True, max_reference_images=2))  # type: ignore[arg-type]
+
+
+def test_request_factory_truncates_image_references_to_provider_limit() -> None:
+    request = GenerationRequest(project_id=1, shot_id=1, kind=GenerationKind.KEYFRAME, provider_name="mock")
+    task = SimpleNamespace(
+        provider_id="mock",
+        task_type=SimpleNamespace(value="KEYFRAME_GENERATION"),
+        request_payload_json='{"reference_asset_ids":[1,2,3],"metadata":{"source":"test"}}',
+        idempotency_key="key",
+    )
+    capabilities = ProviderCapabilities(
+        provider_id="mock",
+        display_name="Mock",
+        text_to_image=True,
+        max_reference_images=2,
+    )
+
+    built = ProviderRequestFactory().build(request, task, capabilities)  # type: ignore[arg-type]
+
+    assert isinstance(built, ImageGenerationRequest)
+    assert built.reference_asset_ids == [1, 2]
+    assert built.metadata["source"] == "test"
+    assert built.metadata["reference_asset_ids_truncated"] is True
+    assert built.metadata["dropped_reference_asset_count"] == 1
+
+
+def test_request_factory_reserves_video_reference_slots_for_anchor_frames() -> None:
+    request = GenerationRequest(project_id=1, shot_id=1, kind=GenerationKind.VIDEO, provider_name="fake-http")
+    task = SimpleNamespace(
+        provider_id="fake-http",
+        task_type=SimpleNamespace(value="VIDEO_GENERATION"),
+        request_payload_json='{"input_asset_ids":[10],"reference_asset_ids":[1,2],"duration_seconds":2}',
+        idempotency_key="key",
+    )
+    capabilities = ProviderCapabilities(
+        provider_id="fake-http",
+        display_name="Fake HTTP",
+        image_to_video=True,
+        max_reference_images=2,
+    )
+
+    built = ProviderRequestFactory().build(
+        request,
+        task,  # type: ignore[arg-type]
+        capabilities,
+        prepared_assets={
+            1: AssetReference(asset_id=1, url="https://assets.example.test/1.png"),
+            2: AssetReference(asset_id=2, url="https://assets.example.test/2.png"),
+            10: AssetReference(asset_id=10, url="https://assets.example.test/10.png", role="start_frame"),
+        },
+    )
+
+    assert isinstance(built, VideoGenerationRequest)
+    assert built.start_frame is not None
+    assert built.start_frame.asset_id == 10
+    assert [asset.asset_id for asset in built.reference_assets] == [1]
+    assert built.metadata["reference_asset_ids_truncated"] is True
+    assert built.metadata["used_reference_asset_count"] == 1
+    assert built.metadata["dropped_reference_asset_count"] == 1
+    assert built.metadata["reserved_reference_asset_count"] == 1
 
 
 def test_sqlite_foreign_keys_enabled_on_app_engine() -> None:

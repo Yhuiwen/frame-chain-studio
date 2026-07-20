@@ -33,12 +33,39 @@ class ProviderRequestFactory:
                 height=int(payload.get("height") or 576),
                 aspect_ratio=payload.get("aspect_ratio") if isinstance(payload.get("aspect_ratio"), str) else "16:9",
                 seed=payload.get("seed") if isinstance(payload.get("seed"), int) else None,
-                reference_asset_ids=self._int_list(payload.get("reference_asset_ids")),
-                metadata=self._dict(payload.get("metadata")),
+                reference_asset_ids=self._bounded_reference_ids(
+                    self._int_list(payload.get("reference_asset_ids")),
+                    capabilities.max_reference_images,
+                ),
+                metadata=self._metadata_with_reference_downgrade(
+                    self._dict(payload.get("metadata")),
+                    requested_reference_count=len(self._int_list(payload.get("reference_asset_ids"))),
+                    used_reference_count=len(
+                        self._bounded_reference_ids(
+                            self._int_list(payload.get("reference_asset_ids")),
+                            capabilities.max_reference_images,
+                        )
+                    ),
+                    reference_limit=capabilities.max_reference_images,
+                    reserved_reference_count=0,
+                ),
                 client_request_id=task.idempotency_key,
             )
             validate_request_capabilities(request, capabilities)
             return request
+        input_asset_ids = self._int_list(payload.get("input_asset_ids"))
+        start_frame = self._asset_ref(input_asset_ids[0], task.provider_id, prepared_assets) if input_asset_ids else None
+        end_frame = (
+            self._asset_ref(input_asset_ids[1], task.provider_id, prepared_assets)
+            if payload.get("generation_mode") == "FIRST_LAST_FRAME" and len(input_asset_ids) > 1
+            else None
+        )
+        reserved_reference_count = int(start_frame is not None) + int(end_frame is not None)
+        requested_reference_ids = self._int_list(payload.get("reference_asset_ids"))
+        reference_asset_ids = self._bounded_reference_ids(
+            requested_reference_ids,
+            max(capabilities.max_reference_images - reserved_reference_count, 0),
+        )
         video_request = VideoGenerationRequest(
             provider_id=task.provider_id,
             model=str(payload.get("model") or ""),
@@ -48,13 +75,19 @@ class ProviderRequestFactory:
             fps=float(payload.get("fps") or 24),
             aspect_ratio=payload.get("aspect_ratio") if isinstance(payload.get("aspect_ratio"), str) else "16:9",
             seed=payload.get("seed") if isinstance(payload.get("seed"), int) else None,
-            start_frame=self._asset_ref(self._int_list(payload.get("input_asset_ids"))[0], task.provider_id, prepared_assets)
-            if self._int_list(payload.get("input_asset_ids"))
-            else None,
-            end_frame=self._asset_ref(self._int_list(payload.get("input_asset_ids"))[1], task.provider_id, prepared_assets)
-            if payload.get("generation_mode") == "FIRST_LAST_FRAME" and len(self._int_list(payload.get("input_asset_ids"))) > 1
-            else None,
-            metadata=self._dict(payload.get("metadata")),
+            start_frame=start_frame,
+            end_frame=end_frame,
+            reference_assets=[
+                self._asset_ref(asset_id, task.provider_id, prepared_assets)
+                for asset_id in reference_asset_ids
+            ],
+            metadata=self._metadata_with_reference_downgrade(
+                self._dict(payload.get("metadata")),
+                requested_reference_count=len(requested_reference_ids),
+                used_reference_count=len(reference_asset_ids),
+                reference_limit=capabilities.max_reference_images,
+                reserved_reference_count=reserved_reference_count,
+            ),
             client_request_id=task.idempotency_key,
         )
         validate_request_capabilities(video_request, capabilities)
@@ -74,6 +107,33 @@ class ProviderRequestFactory:
         if not isinstance(value, list):
             return []
         return [item for item in value if isinstance(item, int)]
+
+    def _bounded_reference_ids(self, asset_ids: list[int], limit: int) -> list[int]:
+        if limit <= 0:
+            return []
+        return asset_ids[:limit]
+
+    def _metadata_with_reference_downgrade(
+        self,
+        metadata: dict[str, Any],
+        *,
+        requested_reference_count: int,
+        used_reference_count: int,
+        reference_limit: int,
+        reserved_reference_count: int,
+    ) -> dict[str, Any]:
+        dropped_reference_count = max(requested_reference_count - used_reference_count, 0)
+        if dropped_reference_count == 0:
+            return metadata
+        return {
+            **metadata,
+            "reference_asset_ids_truncated": True,
+            "requested_reference_asset_count": requested_reference_count,
+            "used_reference_asset_count": used_reference_count,
+            "dropped_reference_asset_count": dropped_reference_count,
+            "reference_asset_limit": reference_limit,
+            "reserved_reference_asset_count": reserved_reference_count,
+        }
 
     def _asset_ref(
         self,
