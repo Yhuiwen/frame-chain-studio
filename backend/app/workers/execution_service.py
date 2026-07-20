@@ -32,7 +32,7 @@ from app.providers.models import (
     VideoGenerationRequest,
 )
 from app.providers.registry import ProviderRegistry
-from app.services import provider_management, task_service, worker_status
+from app.services import live_orchestration, provider_management, task_service, worker_status
 from app.workers.request_factory import ProviderRequestFactory
 from app.workers.settings import WorkerSettings
 from app.workers.lease_guard import LeaseLostError, TaskLeaseGuard, TaskLeaseGuardConfig
@@ -344,6 +344,12 @@ class ProviderExecutionService:
             try:
                 generation_request = session.get(GenerationRequest, task.generation_request_id)
                 if generation_request is not None:
+                    if task.provider_id == "toapis":
+                        if not generation_request.provider_live_enable_snapshot:
+                            raise AppError("LIVE_ORCHESTRATION_DISABLED", "Generation request was created without an enabled TOAPIS live gate.", 409)
+                        live_orchestration.validate_live_orchestration_gate(
+                            session, expected_snapshot_hash=generation_request.pricing_snapshot_hash
+                        )
                     provider_management.check_budget_before_task(session, generation_request)
                 provider_management.ensure_task_usage_estimate(session, task)
                 request = await self._build_provider_request(session, task, provider)

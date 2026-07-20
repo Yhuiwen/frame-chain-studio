@@ -35,7 +35,7 @@ async def test_seedream_submit_and_poll_contract() -> None:
             seen.append(json.loads(request.content))
             return httpx.Response(200, json={"success": True, "data": {"task_id": "img-1", "status": "queued"}})
         return httpx.Response(200, json={"status": "completed", "result": {"data": [{"url": "https://cdn.example/result.png"}]}, "expires_at": "2026-07-21T00:00:00Z"})
-    provider = ToApisProvider("test-secret", transport=httpx.MockTransport(handler))
+    provider = ToApisProvider("test-secret", transport=httpx.MockTransport(handler), allow_live_submit=True)
     submitted = await provider.submit_image(image_request())
     assert submitted.remote_job_id == "image:img-1"
     assert seen[0]["model"] == IMAGE_MODEL
@@ -55,7 +55,7 @@ async def test_vidu_anchor_order(anchors: int) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload.update(json.loads(request.content))
         return httpx.Response(200, json={"data": {"id": "vid-1", "status": "submitted"}})
-    provider = ToApisProvider("secret", transport=httpx.MockTransport(handler))
+    provider = ToApisProvider("secret", transport=httpx.MockTransport(handler), allow_live_submit=True)
     refs = [AssetReference(asset_id=1, url="https://cdn.example/start.png"), AssetReference(asset_id=2, url="https://cdn.example/end.png")]
     result = await provider.submit_video(video_request(start_frame=refs[0] if anchors else None, end_frame=refs[1] if anchors == 2 else None))
     assert result.remote_status == RemoteJobStatus.QUEUED
@@ -69,7 +69,7 @@ async def test_vidu_anchor_order(anchors: int) -> None:
 
 @pytest.mark.anyio
 async def test_unknown_status_and_cancel_are_not_guessed() -> None:
-    provider = ToApisProvider("secret", transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"data": {"id": "x", "status": "mystery"}})))
+    provider = ToApisProvider("secret", transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"data": {"id": "x", "status": "mystery"}})), allow_live_submit=True)
     with pytest.raises(ProviderInvalidResponseError):
         await provider.submit_image(image_request())
     with pytest.raises(ProviderCancellationError):
@@ -79,7 +79,7 @@ async def test_unknown_status_and_cancel_are_not_guessed() -> None:
 
 @pytest.mark.anyio
 async def test_rate_limit_is_retryable_and_secret_is_not_exposed() -> None:
-    provider = ToApisProvider("very-secret-token", transport=httpx.MockTransport(lambda request: httpx.Response(429, json={"error": {"message": "Bearer very-secret-token", "url": "https://x.test/file?signature=secret"}})))
+    provider = ToApisProvider("very-secret-token", transport=httpx.MockTransport(lambda request: httpx.Response(429, json={"error": {"message": "Bearer very-secret-token", "url": "https://x.test/file?signature=secret"}})), allow_live_submit=True)
     with pytest.raises(ProviderRateLimitError) as caught:
         await provider.submit_image(image_request())
     rendered = repr(caught.value.as_details())
@@ -95,7 +95,7 @@ async def test_png_upload(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert b'name="purpose"' in request.content and b"generation" in request.content
         return httpx.Response(200, json={"success": True, "data": {"id": "up-1", "url": "https://cdn.example/u.png", "mime_type": "image/png", "size": 28}})
-    provider = ToApisProvider("secret", transport=httpx.MockTransport(handler))
+    provider = ToApisProvider("secret", transport=httpx.MockTransport(handler), allow_live_submit=True)
     result = await provider.upload_asset(source, client_request_id="fcs-1-a1:asset:1")
     assert result.url == "https://cdn.example/u.png"
     await provider.aclose()

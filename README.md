@@ -2,6 +2,8 @@
 
 Phase 4A includes an offline-contract-verified dedicated TOAPIS adapter for Seedream 5.0 images and Vidu Q3 Pro first/last-frame video. See [TOAPIS Provider](docs/providers/toapis.md). Live verification remains opt-in, cost-bounded, and blocked by default.
 
+Live enable uses an auditable, expiring `TOAPIS_CREDIT` pricing review, read-only model-access preflight, manual capacity confirmation, and a centralized backend submit gate. It does not convert credits or token quota into USD.
+
 Frame Chain Studio is a local release-candidate implementation for long-form AI storyboard video generation. It models a workflow of Shot spec revisions, keyframe review, explicit approved asset pointers, asynchronous provider execution, safe result processing, video generation, tail-frame extraction, start-frame inheritance across ordered shots, manual image anchors, quality-check warnings, task visibility, and final project rendering.
 
 This stage intentionally does not bundle paid AI APIs, large models, or authentication. Real HTTP providers are configured through the existing mapped Provider protocol and remain contract-verified unless live credentials and endpoints are supplied locally.

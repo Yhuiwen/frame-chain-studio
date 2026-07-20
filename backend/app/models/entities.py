@@ -236,6 +236,13 @@ class ProviderModelGenerationType(str, Enum):
     VIDEO = "VIDEO"
 
 
+class PricingReviewStatus(str, Enum):
+    PENDING = "PENDING"
+    REVIEWED = "REVIEWED"
+    REJECTED = "REJECTED"
+    STALE = "STALE"
+
+
 class UsageRecordType(str, Enum):
     ESTIMATE = "ESTIMATE"
     PROVIDER_REPORTED = "PROVIDER_REPORTED"
@@ -653,6 +660,20 @@ class ProviderProfile(SQLModel, table=True):
     archived_at: datetime | None = Field(default=None, index=True)
     config_json: str = Field(default="{}")
     config_revision: int = Field(default=1, index=True)
+    live_orchestration_enabled: bool = Field(default=False, index=True)
+    live_enabled_at: datetime | None = None
+    live_enabled_by: str | None = Field(default=None, max_length=120)
+    live_enable_reason: str | None = Field(default=None, max_length=500)
+    contract_reviewed_at: datetime | None = None
+    contract_reviewed_by: str | None = Field(default=None, max_length=120)
+    contract_reference: str | None = Field(default=None, max_length=500)
+    preflight_checked_at: datetime | None = None
+    preflight_image_model_accessible: bool = False
+    preflight_video_model_accessible: bool = False
+    preflight_response_schema_valid: bool = False
+    account_balance_reviewed_at: datetime | None = None
+    account_balance_sufficient: bool = False
+    account_balance_note: str | None = Field(default=None, max_length=500)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -673,6 +694,14 @@ class ProviderModelProfile(SQLModel, table=True):
     capabilities_json: str = Field(default="{}")
     limits_json: str = Field(default="{}")
     pricing_json: str = Field(default="{}")
+    billing_unit: str = Field(default="USD", max_length=40, index=True)
+    pricing_version: str = Field(default="", max_length=120)
+    pricing_source: str = Field(default="", max_length=500)
+    pricing_effective_at: datetime | None = None
+    pricing_reviewed_at: datetime | None = None
+    pricing_reviewed_by: str | None = Field(default=None, max_length=120)
+    pricing_snapshot_hash: str | None = Field(default=None, max_length=64, index=True)
+    pricing_review_status: PricingReviewStatus = Field(default=PricingReviewStatus.PENDING, index=True)
     currency: str = Field(default="USD", max_length=12, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -701,6 +730,7 @@ class GenerationUsageRecord(SQLModel, table=True):
     record_type: UsageRecordType = Field(index=True)
     status: UsageRecordStatus = Field(index=True)
     currency: str = Field(default="USD", max_length=12, index=True)
+    billing_unit: str = Field(default="USD", max_length=40, index=True)
     estimated_units_json: str = Field(default="{}")
     actual_units_json: str = Field(default="{}")
     estimated_cost: str | None = Field(default=None, max_length=80)
@@ -720,6 +750,7 @@ class ProjectBudgetPolicy(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
     currency: str = Field(default="USD", max_length=12, index=True)
+    billing_unit: str = Field(default="USD", max_length=40, index=True)
     warning_limit: str | None = Field(default=None, max_length=80)
     hard_limit: str | None = Field(default=None, max_length=80)
     per_request_limit: str | None = Field(default=None, max_length=80)
@@ -772,6 +803,12 @@ class GenerationRequest(SQLModel, table=True):
     provider_config_revision: int | None = Field(default=None, index=True)
     provider_capability_snapshot_json: str = Field(default="{}")
     pricing_snapshot_json: str = Field(default="{}")
+    provider_live_enable_snapshot: bool = False
+    pricing_snapshot_hash: str | None = Field(default=None, max_length=64)
+    billing_unit: str | None = Field(default=None, max_length=40)
+    estimated_billing_units: str | None = Field(default=None, max_length=80)
+    contract_review_reference: str | None = Field(default=None, max_length=500)
+    preflight_checked_at: datetime | None = None
     input_asset_ids: str = ""
     output_asset_ids: str = ""
     error_code: str | None = None

@@ -56,10 +56,12 @@ class ToApisProvider(AsyncGenerationProvider):
         timeout_seconds: float = 30,
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        allow_live_submit: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._owned_client = client is None
+        self._allow_live_submit = allow_live_submit
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_seconds),
             transport=transport,
@@ -89,6 +91,7 @@ class ToApisProvider(AsyncGenerationProvider):
         )
 
     async def submit_image(self, request: ImageGenerationRequest) -> ProviderSubmitResult:
+        self._require_live_submit()
         validate_request_capabilities(request, self.get_capabilities())
         prompt = request.prompt
         if request.negative_prompt:
@@ -108,6 +111,7 @@ class ToApisProvider(AsyncGenerationProvider):
         return self._submit_result(raw, "image")
 
     async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
+        self._require_live_submit()
         validate_request_capabilities(request, self.get_capabilities())
         image_urls = []
         if request.start_frame:
@@ -162,6 +166,7 @@ class ToApisProvider(AsyncGenerationProvider):
         raise ProviderCancellationError("TOAPIS remote cancellation has not been verified.")
 
     async def upload_asset(self, path: Path, *, client_request_id: str) -> ProviderResultUrl:
+        self._require_live_submit()
         if path.stat().st_size > MAX_UPLOAD_BYTES:
             raise ProviderInvalidResponseError("TOAPIS image upload exceeds 10 MB.")
         mime = self._mime(path)
@@ -202,6 +207,11 @@ class ToApisProvider(AsyncGenerationProvider):
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
+
+    def _require_live_submit(self) -> None:
+        if not self._allow_live_submit:
+            from app.providers.exceptions import ProviderConfigurationError
+            raise ProviderConfigurationError("LIVE_ORCHESTRATION_DISABLED")
 
     def _decode(self, response: httpx.Response) -> dict[str, Any]:
         try:

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add the dedicated TOAPIS adapter, default Seedream 5.0/Vidu Q3 Pro profiles, strict two-anchor ordering, safe upload validation, offline contract checks, and a network-free real-provider dry run.
+- Add reviewed TOAPIS credit snapshots, expiring live-enable state, model-access preflight, manual capacity confirmation, billing-unit-aware budgets, Worker/Adapter submit gates, and Provider Settings controls.
 
 ## v0.2.0-rc5
 

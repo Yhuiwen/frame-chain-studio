@@ -20,6 +20,7 @@ from app.models.entities import (
     GenerationUsageRecord,
     Project,
     ProjectBudgetPolicy,
+    PricingReviewStatus,
     ProviderAdapterType,
     ProviderModelGenerationType,
     ProviderModelProfile,
@@ -157,6 +158,10 @@ def create_provider_model(session: Session, provider_id: int, payload: ProviderM
         capabilities_json=dumps(payload.capabilities),
         limits_json=dumps(payload.limits),
         pricing_json=dumps(validate_pricing(payload.pricing)),
+        billing_unit=payload.billing_unit.upper(),
+        pricing_version=payload.pricing_version,
+        pricing_source=payload.pricing_source,
+        pricing_review_status=payload.pricing_review_status,
         currency=payload.currency.upper(),
     )
     session.add(model)
@@ -177,6 +182,14 @@ def update_provider_model(session: Session, model_id: int, payload: ProviderMode
             model.limits_json = dumps(value or {})
         elif key == "pricing":
             model.pricing_json = dumps(validate_pricing(value or {}))
+            model.pricing_review_status = PricingReviewStatus.PENDING
+            model.pricing_snapshot_hash = None
+            model.pricing_reviewed_at = None
+            model.pricing_reviewed_by = None
+        elif key == "billing_unit" and value:
+            model.billing_unit = str(value).upper()
+            model.pricing_review_status = PricingReviewStatus.PENDING
+            model.pricing_snapshot_hash = None
         elif key == "currency" and value:
             model.currency = str(value).upper()
         else:
@@ -255,6 +268,9 @@ def verify_contract(session: Session, provider_id: int) -> dict[str, Any]:
 
 def verify_live(session: Session, provider_id: int, payload: LiveVerificationRequest) -> dict[str, Any]:
     profile = get_provider_profile_or_404(session, provider_id)
+    if profile.provider_key == "toapis" and payload.confirm_live:
+        from app.services import live_orchestration
+        live_orchestration.validate_live_orchestration_gate(session, profile=profile)
     blocked: list[str] = []
     max_cost = _decimal_or_none(payload.max_cost)
     if not payload.confirm_live:
@@ -296,7 +312,7 @@ def load_registry_with_db(session: Session) -> ProviderRegistry:
         if profile.adapter_type == ProviderAdapterType.TOAPIS:
             api_key = os.getenv(profile.secret_env_var) if profile.secret_env_var else None
             if api_key:
-                registry.register(ToApisProvider(api_key, base_url=profile.base_url))
+                registry.register(ToApisProvider(api_key, base_url=profile.base_url, allow_live_submit=profile.live_orchestration_enabled))
             else:
                 registry.register_configuration_error(profile.provider_key, profile.display_name, "TOAPIS_API_KEY is not configured.")
         else:
@@ -332,6 +348,12 @@ def snapshot_for_provider(session: Session, provider_key: str, model_key: str | 
         "revision": profile.config_revision,
         "pricing": loads_dict(model.pricing_json) if model else {},
         "currency": model.currency if model else "USD",
+        "billing_unit": model.billing_unit if model else "USD",
+        "pricing_version": model.pricing_version if model else "",
+        "pricing_snapshot_hash": model.pricing_snapshot_hash if model else None,
+        "provider_live_enable_snapshot": profile.live_orchestration_enabled,
+        "contract_review_reference": profile.contract_reference,
+        "preflight_checked_at": profile.preflight_checked_at.isoformat() if profile.preflight_checked_at else None,
         "capabilities": loads_dict(model.capabilities_json) if model else {},
         "limits": loads_dict(model.limits_json) if model else {},
     }
@@ -350,6 +372,7 @@ def create_estimate_for_request(session: Session, request: GenerationRequest) ->
     snapshot = loads_dict(request.pricing_snapshot_json)
     pricing = loads_dict(json.dumps(snapshot.get("pricing") or {}))
     currency = str(snapshot.get("currency") or "USD").upper()
+    billing_unit = str(snapshot.get("billing_unit") or currency).upper()
     units = estimated_units(request)
     cost = estimate_cost(units, pricing)
     status = UsageRecordStatus.ESTIMATED if cost is not None else UsageRecordStatus.UNKNOWN
@@ -366,6 +389,7 @@ def create_estimate_for_request(session: Session, request: GenerationRequest) ->
         record_type=UsageRecordType.ESTIMATE,
         status=status,
         currency=currency,
+        billing_unit=billing_unit,
         estimated_units_json=dumps(units),
         estimated_cost=format_decimal(cost) if cost is not None else None,
         cost_source=source,
@@ -400,6 +424,7 @@ def ensure_task_usage_estimate(session: Session, task: GenerationTask) -> None:
         record_type=UsageRecordType.ESTIMATE,
         status=base.status,
         currency=base.currency,
+        billing_unit=base.billing_unit,
         estimated_units_json=base.estimated_units_json,
         estimated_cost=base.estimated_cost,
         cost_source=base.cost_source,
@@ -422,6 +447,7 @@ def record_actual_from_provider(session: Session, task: GenerationTask, metadata
     provider_usage = sanitize_provider_usage(metadata or {})
     snapshot = loads_dict(request.pricing_snapshot_json if request else "{}")
     currency = str(provider_usage.get("currency") or snapshot.get("currency") or "USD").upper()
+    billing_unit = str(snapshot.get("billing_unit") or currency).upper()
     actual_cost = _decimal_or_none(provider_usage.get("provider_cost"))
     units = {key: value for key, value in provider_usage.items() if key in {"billed_seconds", "generated_images", "input_images", "output_pixels"}}
     if actual_cost is None and units:
@@ -447,6 +473,7 @@ def record_actual_from_provider(session: Session, task: GenerationTask, metadata
         record_type=UsageRecordType.PROVIDER_REPORTED,
         status=status,
         currency=currency,
+        billing_unit=billing_unit,
         actual_units_json=dumps(units),
         actual_cost=format_decimal(actual_cost) if actual_cost is not None else None,
         cost_source=source,
@@ -471,6 +498,7 @@ def budget_for_project(session: Session, project_id: int) -> dict[str, Any]:
             "id": None,
             "project_id": project_id,
             "currency": "USD",
+            "billing_unit": "USD",
             "warning_limit": None,
             "hard_limit": None,
             "per_request_limit": None,
@@ -495,6 +523,7 @@ def update_budget(session: Session, project_id: int, payload: ProjectBudgetPolic
     if policy is None:
         policy = ProjectBudgetPolicy(project_id=project_id)
     policy.currency = payload.currency.upper()
+    policy.billing_unit = payload.billing_unit.upper()
     policy.warning_limit = payload.warning_limit
     policy.hard_limit = payload.hard_limit
     policy.per_request_limit = payload.per_request_limit
@@ -519,6 +548,8 @@ def check_budget_before_task(session: Session, request: GenerationRequest) -> li
     if policy is None or request.effective_provider_id in {"mock", "fake-http"}:
         return []
     estimate = create_estimate_for_request(session, request)
+    if estimate.billing_unit != policy.billing_unit:
+        raise AppError("BILLING_UNIT_MISMATCH", "Budget billing unit does not match the Provider estimate.", 409)
     if estimate.estimated_cost is None:
         if policy.unknown_cost_policy == UnknownCostPolicy.BLOCK:
             raise AppError("BUDGET_UNKNOWN_COST_BLOCKED", "Budget policy blocks requests with unknown estimated cost.", 409)
@@ -529,7 +560,7 @@ def check_budget_before_task(session: Session, request: GenerationRequest) -> li
     committed = committed_estimated_total(
         session,
         request.project_id,
-        policy.currency,
+        policy.billing_unit,
         exclude_generation_request_id=request.id,
     )
     projected = committed + estimate_cost_value
@@ -700,13 +731,13 @@ def estimate_cost(units: dict[str, Any], pricing: dict[str, Any]) -> Decimal | N
 def committed_estimated_total(
     session: Session,
     project_id: int,
-    currency: str,
+    billing_unit: str,
     *,
     exclude_generation_request_id: int | None = None,
 ) -> Decimal:
     statement = select(GenerationUsageRecord).where(
         GenerationUsageRecord.project_id == project_id,
-        GenerationUsageRecord.currency == currency,
+        GenerationUsageRecord.billing_unit == billing_unit,
         GenerationUsageRecord.record_type == UsageRecordType.ESTIMATE,
         col(GenerationUsageRecord.generation_task_id).is_(None),
     )

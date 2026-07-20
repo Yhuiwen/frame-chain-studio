@@ -23,3 +23,9 @@ Live mode requires both explicit confirmation and a cost ceiling, and reads the 
 ```
 
 Current verification state: TOAPIS contract verified; live image, live video, first-last-frame, and two-shot chain are not verified.
+
+## Live enable and accounting units
+
+The candidate public pricing snapshot `toapis-public-2026-07` is Seedream 5.0 at 6.3 `TOAPIS_CREDIT` per `IMAGE_REQUEST` and Vidu Q3 Pro at 20 `TOAPIS_CREDIT` per `VIDEO_SECOND`. Two images plus two four-second videos estimate to 172.6 credits; the suggested isolated-test ceiling is 200 credits. This is a manually reviewed snapshot, not a permanent price guarantee.
+
+TOAPIS model credits, token `remain_quota`, and USD are distinct fields. The application never assumes a conversion between them. Candidate prices begin `PENDING`; a local operator must review the exact values, run the read-only model-access preflight, confirm sufficient account capacity without storing the balance, and explicitly enable live orchestration. Reviews become stale after the configured maximum age (seven days by default), disabling new submits.

@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     toapis_video_poll_interval_seconds: float = Field(default=10, gt=0, le=120)
     toapis_video_timeout_seconds: float = Field(default=600, gt=0, le=7200)
     toapis_http_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    toapis_pricing_snapshot_max_age_days: int = Field(default=7, ge=1, le=90)
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="FCS_")
 

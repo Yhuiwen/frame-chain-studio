@@ -96,6 +96,12 @@ def create_generation_request(
     provider_config_revision: int | None = None,
     provider_capability_snapshot_json: str = "{}",
     pricing_snapshot_json: str = "{}",
+    provider_live_enable_snapshot: bool = False,
+    pricing_snapshot_hash: str | None = None,
+    billing_unit: str | None = None,
+    estimated_billing_units: str | None = None,
+    contract_review_reference: str | None = None,
+    preflight_checked_at: datetime | None = None,
     input_asset_ids: list[int] | None = None,
     commit: bool = True,
 ) -> GenerationRequest:
@@ -121,6 +127,12 @@ def create_generation_request(
         provider_config_revision=provider_config_revision,
         provider_capability_snapshot_json=provider_capability_snapshot_json,
         pricing_snapshot_json=pricing_snapshot_json,
+        provider_live_enable_snapshot=provider_live_enable_snapshot,
+        pricing_snapshot_hash=pricing_snapshot_hash,
+        billing_unit=billing_unit,
+        estimated_billing_units=estimated_billing_units,
+        contract_review_reference=contract_review_reference,
+        preflight_checked_at=preflight_checked_at,
         input_asset_ids=json.dumps(input_asset_ids or []),
     )
     session.add(request)

@@ -549,6 +549,16 @@ export interface ProviderProfile {
   configuration_valid: boolean;
   contract_verified: boolean;
   live_verified: boolean;
+  live_orchestration_enabled: boolean;
+  live_enabled_at: string | null;
+  contract_reviewed_at: string | null;
+  contract_reference: string | null;
+  preflight_checked_at: string | null;
+  preflight_image_model_accessible: boolean;
+  preflight_video_model_accessible: boolean;
+  preflight_response_schema_valid: boolean;
+  account_balance_reviewed_at: string | null;
+  account_balance_sufficient: boolean;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
@@ -565,6 +575,12 @@ export interface ProviderModelProfile {
   capabilities: Record<string, unknown>;
   limits: Record<string, unknown>;
   pricing: Record<string, unknown>;
+  billing_unit: string;
+  pricing_version: string;
+  pricing_source: string;
+  pricing_review_status: "PENDING" | "REVIEWED" | "REJECTED" | "STALE";
+  pricing_reviewed_at: string | null;
+  pricing_snapshot_hash: string | null;
   currency: string;
   created_at: string;
   updated_at: string;
@@ -578,6 +594,21 @@ export interface ProviderValidation {
   live_verified: boolean;
   warnings: string[];
   errors: string[];
+}
+
+export interface ToApisGateState {
+  pricing_version: string;
+  billing_unit: string;
+  pricing_snapshot_hash: string | null;
+  pricing_reviewed: boolean;
+  live_orchestration_enabled: boolean;
+  contract_reviewed_at: string | null;
+  account_balance_sufficient: boolean;
+  estimated_two_shot_billing_units: string;
+  recommended_test_ceiling: string;
+  image: Record<string, unknown>;
+  video: Record<string, unknown>;
+  preflight: { checked_at: string | null; image_model_accessible: boolean; video_model_accessible: boolean; response_schema_valid: boolean; balance_check: string };
 }
 
 export interface ProviderVerificationRun {
@@ -751,6 +782,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  getToApisGate: () => request<ToApisGateState>("/api/provider-profiles/toapis/pricing-review"),
+  reviewToApisPricing: () => request<ToApisGateState>("/api/provider-profiles/toapis/pricing-review", { method: "POST", body: JSON.stringify({ pricing_version: "toapis-public-2026-07", image_price: "6.3", image_unit: "IMAGE_REQUEST", video_price: "20", video_unit: "VIDEO_SECOND", billing_unit: "TOAPIS_CREDIT", contract_reference: "TOAPIS public pricing reviewed by local operator", acknowledged: true }) }),
+  preflightToApis: () => request<Record<string, unknown>>("/api/provider-profiles/toapis/preflight", { method: "POST" }),
+  confirmToApisBalance: () => request<ToApisGateState>("/api/provider-profiles/toapis/account-balance-review", { method: "POST", body: JSON.stringify({ acknowledged: true, sufficient: true, note: "Confirmed sufficient in TOAPIS console by local operator." }) }),
+  enableToApisLive: (pricingSnapshotHash: string) => request<ToApisGateState>("/api/provider-profiles/toapis/live-enable", { method: "POST", body: JSON.stringify({ acknowledged: true, pricing_snapshot_hash: pricingSnapshotHash, reason: "Enable isolated two-shot TOAPIS verification" }) }),
+  disableToApisLive: () => request<ToApisGateState>("/api/provider-profiles/toapis/live-disable", { method: "POST" }),
   listProviderModels: (providerId: number) =>
     request<ProviderModelProfile[]>(`/api/provider-profiles/${providerId}/models`),
   createProviderModel: (providerId: number, body: Partial<ProviderModelProfile>) =>

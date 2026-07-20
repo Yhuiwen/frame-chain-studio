@@ -185,7 +185,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0013"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0014"
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE remote_model IN ('doubao-seedream-5-0', 'viduq3-pro')")).scalar_one() == 2
         for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
@@ -636,6 +636,23 @@ def test_asset_revision_identity_migration_safe_downgrade(tmp_path: Path) -> Non
         assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0008"
         indexes = [row[1] for row in connection.execute(sa.text("PRAGMA index_list(asset)")).all()]
         assert "ix_asset_project_shot_type_sha256" in indexes
+
+
+def test_toapis_live_enable_migration_round_trip(tmp_path: Path) -> None:
+    db_path = tmp_path / "toapis-live-enable-roundtrip.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("SELECT live_orchestration_enabled FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 0
+        assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE billing_unit='TOAPIS_CREDIT' AND pricing_review_status='PENDING'")).scalar_one() == 2
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+        assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
+    command.downgrade(config, "20260720_0013")
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+        assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:

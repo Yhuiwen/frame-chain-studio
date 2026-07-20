@@ -15,6 +15,7 @@ from app.models.entities import (
     BudgetPeriodType,
     ProviderAdapterType,
     ProviderModelGenerationType,
+    PricingReviewStatus,
     ProviderVerificationStatus,
     ProviderVerificationType,
     ProjectRenderStatus,
@@ -117,6 +118,16 @@ class ProviderProfileRead(ProviderProfileBase):
     configuration_valid: bool = False
     contract_verified: bool = False
     live_verified: bool = False
+    live_orchestration_enabled: bool = False
+    live_enabled_at: datetime | None = None
+    contract_reviewed_at: datetime | None = None
+    contract_reference: str | None = None
+    preflight_checked_at: datetime | None = None
+    preflight_image_model_accessible: bool = False
+    preflight_video_model_accessible: bool = False
+    preflight_response_schema_valid: bool = False
+    account_balance_reviewed_at: datetime | None = None
+    account_balance_sufficient: bool = False
     archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -132,6 +143,10 @@ class ProviderModelProfileBase(BaseModel):
     capabilities: dict[str, object] = Field(default_factory=dict)
     limits: dict[str, object] = Field(default_factory=dict)
     pricing: dict[str, object] = Field(default_factory=dict)
+    billing_unit: str = Field(default="USD", min_length=3, max_length=40)
+    pricing_version: str = Field(default="", max_length=120)
+    pricing_source: str = Field(default="", max_length=500)
+    pricing_review_status: PricingReviewStatus = PricingReviewStatus.PENDING
     currency: str = Field(default="USD", min_length=3, max_length=12)
 
 
@@ -146,12 +161,19 @@ class ProviderModelProfileUpdate(BaseModel):
     capabilities: dict[str, object] | None = None
     limits: dict[str, object] | None = None
     pricing: dict[str, object] | None = None
+    billing_unit: str | None = Field(default=None, min_length=3, max_length=40)
+    pricing_version: str | None = Field(default=None, max_length=120)
+    pricing_source: str | None = Field(default=None, max_length=500)
     currency: str | None = Field(default=None, min_length=3, max_length=12)
 
 
 class ProviderModelProfileRead(ProviderModelProfileBase):
     id: int
     provider_profile_id: int
+    pricing_effective_at: datetime | None = None
+    pricing_reviewed_at: datetime | None = None
+    pricing_reviewed_by: str | None = None
+    pricing_snapshot_hash: str | None = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -179,6 +201,7 @@ class GenerationUsageRecordRead(BaseModel):
     record_type: UsageRecordType
     status: UsageRecordStatus
     currency: str
+    billing_unit: str = "USD"
     estimated_units: dict[str, object]
     actual_units: dict[str, object]
     estimated_cost: str | None
@@ -208,6 +231,7 @@ class ProjectBudgetPolicyRead(BaseModel):
     id: int | None = None
     project_id: int
     currency: str = "USD"
+    billing_unit: str = "USD"
     warning_limit: str | None = None
     hard_limit: str | None = None
     per_request_limit: str | None = None
@@ -220,6 +244,7 @@ class ProjectBudgetPolicyRead(BaseModel):
 
 class ProjectBudgetPolicyUpdate(BaseModel):
     currency: str = Field(default="USD", min_length=3, max_length=12)
+    billing_unit: str = Field(default="USD", min_length=3, max_length=40)
     warning_limit: str | None = None
     hard_limit: str | None = None
     per_request_limit: str | None = None
@@ -257,6 +282,29 @@ class LiveVerificationRequest(BaseModel):
     confirm_live: bool = False
     model_profile_id: int | None = None
     max_cost: str | None = None
+
+
+class ToApisPricingReviewRequest(BaseModel):
+    pricing_version: str
+    image_price: str
+    image_unit: str
+    video_price: str
+    video_unit: str
+    billing_unit: str
+    contract_reference: str = Field(min_length=1, max_length=500)
+    acknowledged: bool = False
+
+
+class ToApisLiveEnableRequest(BaseModel):
+    acknowledged: bool = False
+    pricing_snapshot_hash: str = Field(min_length=64, max_length=64)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ToApisAccountBalanceRequest(BaseModel):
+    acknowledged: bool = False
+    sufficient: bool = False
+    note: str = Field(default="", max_length=500)
 
 
 class CharacterBase(BaseModel):

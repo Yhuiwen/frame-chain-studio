@@ -81,6 +81,9 @@ from app.models.schemas import (
     ProviderProfileUpdate,
     ProviderValidationRead,
     ProviderVerificationRunRead,
+    ToApisAccountBalanceRequest,
+    ToApisLiveEnableRequest,
+    ToApisPricingReviewRequest,
     UsageSummaryRead,
 )
 from app.providers.config_loader import load_registry, load_registry_from_env
@@ -88,7 +91,7 @@ from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
 from app.models.entities import ShotDraftStatus
-from app.services import provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, worker_status
+from app.services import live_orchestration, provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, worker_status
 from app.workers import render_service
 
 router = APIRouter()
@@ -184,6 +187,36 @@ def list_provider_profiles(
     session: Session = Depends(get_session),
 ) -> list[dict[str, object]]:
     return provider_management.list_provider_profiles(session, include_archived=include_archived)
+
+
+@router.get("/provider-profiles/toapis/pricing-review")
+def get_toapis_pricing_review(session: Session = Depends(get_session)) -> dict[str, object]:
+    return live_orchestration.pricing_review_state(session)
+
+
+@router.post("/provider-profiles/toapis/pricing-review")
+def review_toapis_pricing(payload: ToApisPricingReviewRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+    return live_orchestration.review_pricing(session, payload)
+
+
+@router.post("/provider-profiles/toapis/preflight")
+async def preflight_toapis(session: Session = Depends(get_session)) -> dict[str, object]:
+    return await live_orchestration.run_preflight(session)
+
+
+@router.post("/provider-profiles/toapis/account-balance-review")
+def confirm_toapis_account_balance(payload: ToApisAccountBalanceRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+    return live_orchestration.confirm_account_balance(session, payload)
+
+
+@router.post("/provider-profiles/toapis/live-enable")
+def enable_toapis_live(payload: ToApisLiveEnableRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+    return live_orchestration.enable_live(session, payload)
+
+
+@router.post("/provider-profiles/toapis/live-disable")
+def disable_toapis_live(session: Session = Depends(get_session)) -> dict[str, object]:
+    return live_orchestration.disable_live(session)
 
 
 @router.post("/provider-profiles", response_model=ProviderProfileRead)

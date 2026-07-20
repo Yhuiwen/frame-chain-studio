@@ -10,6 +10,7 @@ import {
   type ProviderModelGenerationType,
   type ProviderModelProfile,
   type ProviderProfile,
+  type ToApisGateState,
 } from "@/api/client";
 
 const profiles = ref<ProviderProfile[]>([]);
@@ -17,6 +18,7 @@ const models = ref<ProviderModelProfile[]>([]);
 const selectedId = ref<number | null>(null);
 const loading = ref(false);
 const busy = ref(false);
+const toapisGate = ref<ToApisGateState | null>(null);
 const profileForm = ref({
   name: "",
   provider_key: "",
@@ -48,6 +50,7 @@ async function loadProfiles() {
   loading.value = true;
   try {
     profiles.value = await api.listProviderProfiles();
+    if (profiles.value.some((item) => item.provider_key === "toapis")) toapisGate.value = await api.getToApisGate();
     if (!selectedId.value && profiles.value.length > 0) selectedId.value = profiles.value[0].id;
     if (selectedId.value) await loadModels(selectedId.value);
   } catch (error) {
@@ -55,6 +58,23 @@ async function loadProfiles() {
   } finally {
     loading.value = false;
   }
+}
+
+async function runToApisAction(action: "review" | "preflight" | "balance" | "enable" | "disable") {
+  busy.value = true;
+  try {
+    if (action === "review") toapisGate.value = await api.reviewToApisPricing();
+    if (action === "preflight") { await api.preflightToApis(); toapisGate.value = await api.getToApisGate(); }
+    if (action === "balance") toapisGate.value = await api.confirmToApisBalance();
+    if (action === "enable") {
+      if (!toapisGate.value?.pricing_snapshot_hash) throw new Error("Review pricing first");
+      toapisGate.value = await api.enableToApisLive(toapisGate.value.pricing_snapshot_hash);
+    }
+    if (action === "disable") toapisGate.value = await api.disableToApisLive();
+    await loadProfiles();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "TOAPIS gate operation failed");
+  } finally { busy.value = false; }
 }
 
 async function loadModels(providerId: number) {
@@ -204,6 +224,20 @@ async function archiveProfile(profile: ProviderProfile) {
           title="Set TOAPIS_API_KEY before starting Frame Chain Studio. The application never stores or displays the API key."
           description="TOAPIS · https://toapis.com/v1 · Seedream 5.0 (2K) · Vidu Q3 Pro (720p, audio off, two ordered anchors). Remote cancellation and live verification remain unverified."
         />
+        <el-card v-if="selectedProfile?.adapter_type === 'TOAPIS' && toapisGate" class="models-panel">
+          <template #header><strong>TOAPIS Live Gate</strong></template>
+          <p>Pricing: 6.3 credits/image request; 20 credits/video second · {{ toapisGate.billing_unit }} · {{ toapisGate.pricing_version }}</p>
+          <p>Two-shot estimate: 2 × 6.3 + 8 × 20 = {{ toapisGate.estimated_two_shot_billing_units }} credits; recommended ceiling {{ toapisGate.recommended_test_ceiling }}.</p>
+          <p>Pricing reviewed: {{ toapisGate.pricing_reviewed ? "Yes" : "Needs review" }} · Models: {{ toapisGate.preflight.image_model_accessible && toapisGate.preflight.video_model_accessible ? "Accessible" : "Not verified" }} · Balance confirmed: {{ toapisGate.account_balance_sufficient ? "Yes" : "No" }} · Live: {{ toapisGate.live_orchestration_enabled ? "Enabled" : "Disabled" }}</p>
+          <el-alert type="warning" :closable="false" title="TOAPIS model credits, token remain_quota, and USD are different units; Frame Chain Studio does not convert between them." />
+          <div class="gate-actions">
+            <el-button :loading="busy" @click="runToApisAction('review')">Review Pricing</el-button>
+            <el-button :loading="busy" @click="runToApisAction('preflight')">Run Model Preflight</el-button>
+            <el-button :loading="busy" @click="runToApisAction('balance')">Confirm Account Capacity</el-button>
+            <el-button type="primary" :loading="busy" @click="runToApisAction('enable')">Enable Live</el-button>
+            <el-button type="danger" :loading="busy" @click="runToApisAction('disable')">Disable Live</el-button>
+          </div>
+        </el-card>
         <el-table :data="profiles" highlight-current-row @current-change="(row: ProviderProfile | null) => row && loadModels(row.id)">
           <el-table-column prop="provider_key" label="Provider" min-width="150" />
           <el-table-column prop="display_name" label="Display" min-width="150" />

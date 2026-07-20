@@ -2,6 +2,7 @@
 
 - Run `.\scripts\e2e-real-provider.ps1` and confirm the default output reports `BLOCKED_LIVE_VERIFICATION` with all four network-operation flags false.
 - Do not claim TOAPIS live image, video, first-last-frame, or two-shot verification without sanitized evidence from an explicitly confirmed cost-bounded run.
+- Confirm TOAPIS pricing remains reviewed and unexpired, both target models passed preflight, account capacity was manually confirmed, and the supplied snapshot hash matches before enabling live orchestration.
 
 Use this before creating a `v0.2.0` tag. Do not tag until every required item is true.
 

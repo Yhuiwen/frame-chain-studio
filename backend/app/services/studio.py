@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import hashlib
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -1086,6 +1087,11 @@ def create_generation_request(
         provider_config_revision=provider_config_revision,
         provider_capability_snapshot_json=json.dumps(snapshot.get("capabilities") or {}, ensure_ascii=True, sort_keys=True),
         pricing_snapshot_json=json.dumps(snapshot, ensure_ascii=True, sort_keys=True),
+        provider_live_enable_snapshot=bool(snapshot.get("provider_live_enable_snapshot")),
+        pricing_snapshot_hash=str(snapshot["pricing_snapshot_hash"]) if snapshot.get("pricing_snapshot_hash") else None,
+        billing_unit=str(snapshot["billing_unit"]) if snapshot.get("billing_unit") else None,
+        contract_review_reference=str(snapshot["contract_review_reference"]) if snapshot.get("contract_review_reference") else None,
+        preflight_checked_at=(datetime.fromisoformat(str(snapshot["preflight_checked_at"])) if snapshot.get("preflight_checked_at") else None),
         input_asset_ids=input_asset_ids or [],
         commit=commit,
     )
