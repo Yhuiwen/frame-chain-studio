@@ -25,7 +25,7 @@ try {
   @'
 import shutil
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 import os
 from app.core.config import get_settings
@@ -36,7 +36,7 @@ source = Path(os.environ["FCS_RESTORE_SOURCE"])
 with sqlite3.connect(source) as connection:
     connection.execute("PRAGMA quick_check").fetchone()
 if target.exists():
-    safety = target.with_suffix(f".pre-restore-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.db")
+    safety = target.with_suffix(f".pre-restore-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}.db")
     shutil.copy2(target, safety)
     print(f"pre_restore_backup={safety}")
 target.parent.mkdir(parents=True, exist_ok=True)

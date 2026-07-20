@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlmodel import Session, select
 
+from app.core.redaction import redact_sensitive
 from app.domain.retry_policy import RetryPolicyConfig, decide_error
 from app.core.config import get_settings
 from app.models.entities import (
@@ -199,10 +200,13 @@ class ProviderExecutionService:
         try:
             result = await (lease_guard.run_cancellable(provider.get_job(remote_job_id)) if lease_guard else provider.get_job(remote_job_id))
         except ProviderError as exc:
-            self._record_cancel_provider_error(task_id, exc, now=now)
+            self._record_provider_error(task_id, exc, now=now)
             return True
         except LeaseLostError:
             return False
+        except Exception as exc:
+            self._record_unexpected_error(task_id, exc, now=now)
+            return True
         if not self._lease_owned(task_id, now=now):
             return False
         if lease_guard:
@@ -228,7 +232,14 @@ class ProviderExecutionService:
             remote_job_id = task.remote_job_id
             needs_submit_lookup = remote_job_id is None
             if needs_submit_lookup:
-                request = await self._build_provider_request(session, task, provider)
+                try:
+                    request = await self._build_provider_request(session, task, provider)
+                except ProviderError as exc:
+                    self._record_provider_error(task_id, exc, now=now)
+                    return True
+                except Exception as exc:
+                    self._record_unexpected_error(task_id, exc, now=now)
+                    return True
         if not self._lease_owned(task_id, now=now):
             return False
         if needs_submit_lookup:
@@ -250,6 +261,9 @@ class ProviderExecutionService:
                 return True
             except LeaseLostError:
                 return False
+            except Exception as exc:
+                self._record_unexpected_error(task_id, exc, now=now)
+                return True
             remote_job_id = submit.remote_job_id
             if lease_guard:
                 lease_guard.ensure_owned()
@@ -274,7 +288,7 @@ class ProviderExecutionService:
                     session,
                     task_id,
                     error_code=TaskErrorCode.CANCELLED,
-                    error_message=f"Provider does not support remote cancellation: {exc.message}",
+                    error_message=f"Provider does not support remote cancellation: {self._safe_message(exc.message)}",
                     error_details=exc.as_details(),
                     now=now,
                 )
@@ -285,6 +299,9 @@ class ProviderExecutionService:
             return True
         except LeaseLostError:
             return False
+        except Exception as exc:
+            self._record_unexpected_error(task_id, exc, now=now)
+            return True
         if lease_guard:
             lease_guard.ensure_owned()
         with self.session_factory() as session:
@@ -323,7 +340,14 @@ class ProviderExecutionService:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
             provider = self._provider_or_fail(session, task)
-            request = await self._build_provider_request(session, task, provider)
+            try:
+                request = await self._build_provider_request(session, task, provider)
+            except ProviderError as exc:
+                self._record_provider_error(task_id, exc, now=now)
+                return True
+            except Exception as exc:
+                self._record_unexpected_error(task_id, exc, now=now)
+                return True
         if not self._lease_owned(task_id, now=now):
             return False
         try:
@@ -344,6 +368,9 @@ class ProviderExecutionService:
             return True
         except LeaseLostError:
             return False
+        except Exception as exc:
+            self._record_unexpected_error(task_id, exc, now=now)
+            return True
         if not self._lease_owned(task_id, now=now):
             return False
         if lease_guard:
@@ -369,7 +396,7 @@ class ProviderExecutionService:
                 session,
                 task.id or 0,
                 error_code=exc.to_task_error_code(),
-                error_message=exc.message,
+                error_message=self._safe_message(exc.message),
                 error_details=exc.as_details(),
             )
             raise
@@ -465,7 +492,7 @@ class ProviderExecutionService:
         self._record_task_error(
             task_id,
             exc.to_task_error_code(),
-            exc.message,
+            self._safe_message(exc.message),
             retryable=exc.retryable,
             details=exc.as_details(),
             now=now,
@@ -490,7 +517,7 @@ class ProviderExecutionService:
                     task_id,
                     delay_seconds=decision.retry_after_seconds or self.settings.retry_base_seconds,
                     error_code=exc.to_task_error_code(),
-                    error_message=exc.message,
+                    error_message=self._safe_message(exc.message),
                     error_details=exc.as_details(),
                     now=now,
                 )
@@ -499,7 +526,7 @@ class ProviderExecutionService:
                     session,
                     task_id,
                     error_code=exc.to_task_error_code(),
-                    error_message=exc.message,
+                    error_message=self._safe_message(exc.message),
                     error_details=exc.as_details(),
                     now=now,
                 )
@@ -544,6 +571,24 @@ class ProviderExecutionService:
                     error_details=details,
                     now=now,
                 )
+
+    def _record_unexpected_error(self, task_id: int, exc: Exception, *, now: datetime | None = None) -> None:
+        safe_message = self._safe_message(str(exc)) or exc.__class__.__name__
+        with self.session_factory() as session:
+            task_service.mark_task_failed(
+                session,
+                task_id,
+                error_code=TaskErrorCode.UNKNOWN_ERROR,
+                error_message=str(safe_message),
+                error_details={"exception_type": exc.__class__.__name__},
+                now=now,
+            )
+
+    def _safe_message(self, message: str) -> str:
+        redacted = redact_sensitive({"message": message}).get("message")
+        if isinstance(redacted, str) and redacted != message:
+            return redacted
+        return " ".join(str(redact_sensitive(token)) for token in message.split())
 
     def _apply_poll_result(self, task_id: int, result: ProviderJobResult, *, now: datetime | None = None) -> None:
         with self.session_factory() as session:

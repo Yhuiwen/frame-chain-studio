@@ -40,6 +40,26 @@ Verify `VITE_API_PROXY_TARGET` points at the active backend port. The dev script
 
 Use `scripts/dev-start.ps1` so the generated provider config matches the fake provider port.
 
+## Isolated E2E Fails
+
+Run the release-candidate smoke script with unused ports:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e-local.ps1 -BackendPort 8100 -FrontendPort 5174 -FakeProviderPort 8091
+```
+
+The script creates a self-contained run directory under `.run/e2e/` with its own SQLite database, storage root, Provider config, logs, backups, and PID file. It starts and stops only the PIDs recorded in that run directory. Inspect `logs/*.err.log` and `logs/*.out.log` inside the retained run directory named at the end of the script output.
+
+The script intentionally fails fast when one of the requested ports is already listening. Pick alternate ports instead of stopping unrelated user processes.
+
+## Fake Provider Upload Missing
+
+First/last-frame video requests use the local Fake Provider upload endpoint, `POST /fake/v1/uploads`, and receive local HTTP references from `GET /fake/v1/uploads/{upload_id}`. If video request mapping fails, confirm the generated Provider config includes `upload_endpoint` and that the Fake Provider stats endpoint records submissions with `input.first_frame_url` and, for Shot 2/3, `input.last_frame_url`.
+
+## Backup Restore Evidence Mismatch
+
+For release validation, backup and restore evidence must refer to the same `project_id` and `render.id` that completed the E2E run. Prefer `scripts/e2e-local.ps1` because it performs backup, destructive restore smoke, API restart, restored project/render lookup, and restored media Range verification in one isolated run.
+
 ## PowerShell ExecutionPolicy
 
 Run scripts with `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\dev-start.ps1`.

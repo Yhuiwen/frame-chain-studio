@@ -18,10 +18,12 @@ from app.models.entities import (
     ProviderAssetCache,
     ReliableTaskStatus,
     Shot,
+    ShotStatus,
     TaskErrorCode,
     WorkerHeartbeat,
 )
 from app.providers.async_base import AsyncGenerationProvider
+from app.providers.exceptions import ProviderNetworkError
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import (
     MappedHttpProviderConfig,
@@ -179,6 +181,49 @@ class UploadProvider(AsyncGenerationProvider):
 
     async def cancel_job(self, remote_job_id: str) -> ProviderCancelResult:
         raise AssertionError("cancel should not be called")
+
+
+class FailingUploadProvider(UploadProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.submit_calls = 0
+
+    async def upload_asset(self, path: Path, *, client_request_id: str) -> ProviderResultUrl:
+        self.upload_calls += 1
+        raise ProviderNetworkError(
+            "upload failed https://provider.example.test/upload?token=secret",
+            details={"api_key": "secret-token"},
+        )
+
+    async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
+        self.submit_calls += 1
+        return await super().submit_video(request)
+
+
+class UnexpectedSubmitProvider(AsyncGenerationProvider):
+    def __init__(self) -> None:
+        self.submit_calls = 0
+
+    def get_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(provider_id="unexpected-submit", display_name="Unexpected", text_to_image=True)
+
+    async def submit_image(self, request: ImageGenerationRequest) -> ProviderSubmitResult:
+        self.submit_calls += 1
+        raise RuntimeError("mapping leaked https://provider.example.test/result?token=secret")
+
+    async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
+        raise AssertionError("video submit should not be called")
+
+    async def get_job(self, remote_job_id: str) -> ProviderJobResult:
+        raise AssertionError("poll should not be called")
+
+    async def cancel_job(self, remote_job_id: str) -> ProviderCancelResult:
+        raise AssertionError("cancel should not be called")
+
+
+class BrokenRequestFactory:
+    def build(self, *_args: object, **_kwargs: object) -> ImageGenerationRequest:
+        raise ValueError("bad dto https://provider.example.test/result?token=secret")
 
 
 class SlowSubmitProvider(AsyncGenerationProvider):
@@ -342,6 +387,299 @@ async def test_execution_service_uploads_remote_input_assets_and_reuses_cache(tm
 
 
 @pytest.mark.anyio
+async def test_execution_service_records_asset_prepare_error_without_timeout(tmp_path: Path) -> None:
+    settings = get_settings()
+    settings.storage_dir = tmp_path / "storage"
+    settings.storage_dir.mkdir(parents=True, exist_ok=True)
+    registry = ProviderRegistry()
+    registry.register(MappedAsyncHttpProvider(worker_config(), transport=httpx.ASGITransport(app=app)))
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="No Upload", description="")
+            session.add(project)
+            session.commit()
+            session.refresh(project)
+            shot = Shot(project_id=project.id or 0, title="Shot 1")
+            session.add(shot)
+            session.commit()
+            asset_path = settings.storage_dir / "project-1" / "shot-1" / "keyframe.png"
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            asset_path.write_bytes(b"asset-bytes")
+            asset = Asset(
+                project_id=project.id or 0,
+                shot_id=shot.id,
+                type=AssetType.KEYFRAME,
+                path=str(asset_path),
+                mime_type="image/png",
+            )
+            session.add(asset)
+            session.commit()
+            session.refresh(asset)
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.VIDEO,
+                provider_name="fake-http",
+                input_asset_ids=[asset.id or 0],
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="fake-http",
+                request_payload={"input_asset_ids": [asset.id or 0], "duration_seconds": 2, "prompt": "prompt"},
+            )
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=30)
+
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+        )
+
+        assert await service.process_task_once(task.id or 0)
+        with factory() as session:
+            failed = task_service.get_task(session, task.id or 0)
+            assert failed.status == ReliableTaskStatus.FAILED
+            assert failed.error_code == TaskErrorCode.CONFIGURATION_ERROR.value
+            assert failed.error_message
+            assert "UPLOAD_UNSUPPORTED" in failed.error_message
+            assert failed.remote_job_id is None
+
+
+@pytest.mark.anyio
+async def test_execution_service_fails_when_input_asset_is_missing_without_submit(tmp_path: Path) -> None:
+    provider = UploadProvider()
+    registry = ProviderRegistry()
+    registry.register(provider)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="Missing Asset", description="")
+            session.add(project)
+            session.commit()
+            shot = Shot(project_id=project.id or 0, title="Shot 1", status=ShotStatus.VIDEO_GENERATING)
+            session.add(shot)
+            session.commit()
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.VIDEO,
+                provider_name="upload-provider",
+                input_asset_ids=[9999],
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="upload-provider",
+                request_payload={"input_asset_ids": [9999], "duration_seconds": 2, "prompt": "prompt"},
+            )
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=30)
+
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+        )
+
+        assert await service.process_task_once(task.id or 0)
+        with factory() as session:
+            failed = task_service.get_task(session, task.id or 0)
+            loaded_shot = session.get(Shot, failed.shot_id)
+            assert failed.status == ReliableTaskStatus.FAILED
+            assert failed.error_code == TaskErrorCode.UNKNOWN_ERROR.value
+            assert failed.remote_job_id is None
+            assert loaded_shot is not None
+            assert loaded_shot.status == ShotStatus.VIDEO_GENERATING
+        assert provider.upload_calls == 0
+        assert provider.video_requests == []
+
+
+@pytest.mark.anyio
+async def test_execution_service_upload_failure_schedules_retry_without_submit(tmp_path: Path) -> None:
+    settings = get_settings()
+    settings.storage_dir = tmp_path / "storage"
+    settings.storage_dir.mkdir(parents=True, exist_ok=True)
+    provider = FailingUploadProvider()
+    registry = ProviderRegistry()
+    registry.register(provider)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="Upload Failure", description="")
+            session.add(project)
+            session.commit()
+            shot = Shot(project_id=project.id or 0, title="Shot 1", status=ShotStatus.VIDEO_GENERATING)
+            session.add(shot)
+            session.commit()
+            asset_path = settings.storage_dir / "project-1" / "shot-1" / "keyframe.png"
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            asset_path.write_bytes(b"asset-bytes")
+            asset = Asset(
+                project_id=project.id or 0,
+                shot_id=shot.id,
+                type=AssetType.KEYFRAME,
+                path=str(asset_path),
+                mime_type="image/png",
+            )
+            session.add(asset)
+            session.commit()
+            session.refresh(asset)
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.VIDEO,
+                provider_name="upload-provider",
+                input_asset_ids=[asset.id or 0],
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="upload-provider",
+                request_payload={"input_asset_ids": [asset.id or 0], "duration_seconds": 2, "prompt": "prompt"},
+            )
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=30)
+
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0, retry_jitter_ratio=0),
+        )
+
+        assert await service.process_task_once(task.id or 0)
+        with factory() as session:
+            retry = task_service.get_task(session, task.id or 0)
+            loaded_shot = session.get(Shot, retry.shot_id)
+            assert retry.status == ReliableTaskStatus.RETRY_WAIT
+            assert retry.error_code == TaskErrorCode.NETWORK_ERROR.value
+            assert retry.error_message is not None
+            assert "REDACTED" in retry.error_message
+            assert "secret" not in retry.error_details_json
+            assert retry.remote_job_id is None
+            assert loaded_shot is not None
+            assert loaded_shot.status == ShotStatus.VIDEO_GENERATING
+        assert provider.upload_calls == 1
+        assert provider.submit_calls == 0
+
+
+@pytest.mark.anyio
+async def test_execution_service_provider_config_error_marks_task_failed(tmp_path: Path) -> None:
+    registry = ProviderRegistry()
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            task = create_task(session, status=ReliableTaskStatus.QUEUED)
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=30)
+
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+        )
+
+        with pytest.raises(Exception, match="not registered"):
+            await service.process_task_once(task.id or 0)
+        with factory() as session:
+            failed = task_service.get_task(session, task.id or 0)
+            assert failed.status == ReliableTaskStatus.FAILED
+            assert failed.error_code == TaskErrorCode.CONFIGURATION_ERROR.value
+            assert failed.remote_job_id is None
+
+
+@pytest.mark.anyio
+async def test_execution_service_dto_build_exception_fails_without_secret_leak(tmp_path: Path) -> None:
+    provider = UnexpectedSubmitProvider()
+    registry = ProviderRegistry()
+    registry.register(provider)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            request = task_service.create_generation_request(
+                session,
+                project_id=1,
+                shot_id=1,
+                kind=GenerationKind.KEYFRAME,
+                provider_name="unexpected-submit",
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="unexpected-submit",
+                request_payload={"prompt": "prompt"},
+            )
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=30)
+
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+            request_factory=BrokenRequestFactory(),  # type: ignore[arg-type]
+        )
+
+        assert await service.process_task_once(task.id or 0)
+        with factory() as session:
+            failed = task_service.get_task(session, task.id or 0)
+            assert failed.status == ReliableTaskStatus.FAILED
+            assert failed.error_code == TaskErrorCode.UNKNOWN_ERROR.value
+            assert failed.error_message is not None
+            assert "REDACTED" in failed.error_message
+            assert "secret" not in failed.error_message
+            assert failed.remote_job_id is None
+        assert provider.submit_calls == 0
+
+
+@pytest.mark.anyio
+async def test_execution_service_submit_exception_fails_without_duplicate_submit(tmp_path: Path) -> None:
+    provider = UnexpectedSubmitProvider()
+    registry = ProviderRegistry()
+    registry.register(provider)
+    with file_session_factory(tmp_path) as (factory, _engine):
+        with factory() as session:
+            project = Project(name="Submit Exception", description="")
+            session.add(project)
+            session.commit()
+            shot = Shot(project_id=project.id or 0, title="Shot 1", status=ShotStatus.KEYFRAME_GENERATING)
+            session.add(shot)
+            session.commit()
+            request = task_service.create_generation_request(
+                session,
+                project_id=project.id or 0,
+                shot_id=shot.id or 0,
+                kind=GenerationKind.KEYFRAME,
+                provider_name="unexpected-submit",
+                prompt_snapshot="prompt",
+            )
+            task = task_service.create_task_attempt(
+                session,
+                generation_request=request,
+                provider_id="unexpected-submit",
+                request_payload={"prompt": "prompt"},
+            )
+            task_service.acquire_task_lease(session, task.id or 0, worker_id="worker-a", lease_seconds=30)
+
+        service = ProviderExecutionService(
+            session_factory=factory,
+            registry=registry,
+            settings=WorkerSettings(worker_id="worker-a", poll_interval_seconds=0),
+        )
+
+        assert await service.process_task_once(task.id or 0)
+        with factory() as session:
+            failed = task_service.get_task(session, task.id or 0)
+            loaded_shot = session.get(Shot, failed.shot_id)
+            assert failed.status == ReliableTaskStatus.FAILED
+            assert failed.error_code == TaskErrorCode.UNKNOWN_ERROR.value
+            assert failed.error_message is not None
+            assert "REDACTED" in failed.error_message
+            assert failed.remote_job_id is None
+            assert loaded_shot is not None
+            assert loaded_shot.status == ShotStatus.KEYFRAME_GENERATING
+        assert provider.submit_calls == 1
+
+
+@pytest.mark.anyio
 async def test_execution_service_stops_long_submit_when_lease_is_lost(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -458,7 +796,7 @@ async def test_generation_worker_long_poll_renews_lease_and_records_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = SlowPollProvider(delay_seconds=2.2)
+    provider = SlowPollProvider(delay_seconds=3.2)
     registry = ProviderRegistry()
     registry.register(provider)
     renew_count = 0

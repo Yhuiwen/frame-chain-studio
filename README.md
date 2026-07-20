@@ -1,6 +1,6 @@
 # Frame Chain Studio
 
-Frame Chain Studio is a first-stage mock implementation for long-form AI storyboard video generation. It models a workflow of keyframe review, video generation, tail-frame extraction, and start-frame inheritance across ordered shots.
+Frame Chain Studio is a local release-candidate implementation for long-form AI storyboard video generation. It models a workflow of keyframe review, asynchronous provider execution, result processing, video generation, tail-frame extraction, start-frame inheritance across ordered shots, and final project rendering.
 
 This stage intentionally does not integrate paid AI APIs, large models, or authentication.
 
@@ -81,6 +81,7 @@ The media endpoint only serves database-registered files under the configured st
 - Test fixtures live in `backend/tests/fixtures/` and are committed to Git.
 - The default SQLite database is `backend/data/frame_chain.db`.
 - The default generated media storage is `backend/data/storage/`.
+- `scripts/e2e-local.ps1` uses isolated temporary runtime paths under `.run/e2e/` instead of `backend/data/`.
 - Runtime databases, generated media, logs, caches, and temporary files are ignored by Git.
 - The first stage does not support manual start-frame upload or manual start-frame assignment.
 - The first stage only includes the local Mock Provider and does not integrate a real asynchronous AI generation platform.
@@ -235,6 +236,8 @@ Endpoints:
 - `POST /fake/v1/videos/generations`
 - `GET /fake/v1/jobs/{job_id}`
 - `POST /fake/v1/jobs/{job_id}/cancel`
+- `POST /fake/v1/uploads`
+- `GET /fake/v1/uploads/{upload_id}`
 - `GET /fake/v1/ready`
 - `GET /fake/v1/results/{job_id}.mp4`
 - `GET /fake/v1/results/{job_id}.png`
@@ -303,6 +306,14 @@ docker compose --profile development --profile worker up --build
 ```
 
 The default `migrate` service runs Alembic once before API/Workers start. The `development` profile starts the local Fake Provider, and the `worker` profile starts GenerationWorker, ResultWorker, and RenderWorker.
+
+For release-candidate smoke validation, `scripts/e2e-local.ps1` starts its own isolated Fake Provider, API, GenerationWorker, ResultWorker, RenderWorker, and frontend. It writes a temporary SQLite database, storage root, Provider config, logs, and PID file under one `.run/e2e/<run-id>/` directory, then stops only the PIDs recorded for that run. It does not depend on an existing `dev-start.ps1` stack and does not use `backend/data/`.
+
+```powershell
+.\scripts\e2e-local.ps1 -BackendPort 8100 -FrontendPort 5174 -FakeProviderPort 8091
+```
+
+The E2E script verifies one three-Shot project end to end, including keyframe review, video review, locked tail frames, Shot 2/3 start-frame inheritance, Fake Provider upload references in first/last-frame video requests, GenerationWorker restart recovery without duplicate submit, final render, media full download, HTTP Range `206`, FFprobe metadata, backup, restore, and restored media access. Its JSON summary uses the same `project_id` and `render_id` for E2E, backup, and restore evidence.
 
 Backup and restore scripts operate on the configured SQLite database:
 

@@ -12,6 +12,8 @@
       "video_submit_path": "/fake/v1/videos/generations",
       "job_status_path_template": "/fake/v1/jobs/{remote_job_id}",
       "job_cancel_path_template": "/fake/v1/jobs/{remote_job_id}/cancel",
+      "upload_endpoint": "/fake/v1/uploads",
+      "upload_response_url_path": "data.url",
       "request_timeout_seconds": 10,
       "verify_tls": true,
       "capabilities": {

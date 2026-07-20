@@ -11,11 +11,14 @@ app = FastAPI(title="Frame Chain Studio Fake Provider", version="0.1.0")
 JOBS: dict[str, dict[str, Any]] = {}
 ATTEMPTS: dict[str, int] = {}
 JOBS_BY_IDEMPOTENCY_KEY: dict[str, str] = {}
+UPLOADS: dict[str, bytes] = {}
+SUBMISSIONS: list[dict[str, Any]] = []
 SUBMIT_CALLS = 0
 CREATED_JOBS = 0
 CANCEL_CALLS = 0
 CANCELLED_JOBS = 0
 DOWNLOAD_CALLS = 0
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 def _format_response(job: dict[str, Any], response_format: str, base_url: str) -> dict[str, Any]:
@@ -87,6 +90,14 @@ async def _submit(
     if scenario == "job_not_found":
         return JSONResponse({"error": "not found"}, status_code=404)
     job_id = f"fake-{uuid4()}"
+    SUBMISSIONS.append(
+        {
+            "job_id": job_id,
+            "kind": kind,
+            "idempotency_key": idempotency_key,
+            "body": body,
+        }
+    )
     status = "succeeded" if scenario == "immediate_success" else "queued"
     JOBS[job_id] = {
         "id": job_id,
@@ -123,6 +134,8 @@ def test_stats() -> dict[str, object]:
         "cancelled_jobs": CANCELLED_JOBS,
         "download_calls": DOWNLOAD_CALLS,
         "jobs_by_idempotency_key": dict(JOBS_BY_IDEMPOTENCY_KEY),
+        "uploads": sorted(UPLOADS),
+        "submissions": SUBMISSIONS,
     }
 
 
@@ -132,12 +145,38 @@ def test_reset() -> dict[str, str]:
     JOBS.clear()
     ATTEMPTS.clear()
     JOBS_BY_IDEMPOTENCY_KEY.clear()
+    UPLOADS.clear()
+    SUBMISSIONS.clear()
     SUBMIT_CALLS = 0
     CREATED_JOBS = 0
     CANCEL_CALLS = 0
     CANCELLED_JOBS = 0
     DOWNLOAD_CALLS = 0
     return {"status": "reset"}
+
+
+@app.post("/fake/v1/uploads")
+async def upload_asset(request: Request) -> dict[str, object]:
+    body = await request.body()
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="upload too large")
+    upload_id = f"upload-{uuid4()}"
+    UPLOADS[upload_id] = body
+    return {
+        "data": {
+            "id": upload_id,
+            "url": f"{str(request.base_url).rstrip('/')}/fake/v1/uploads/{upload_id}",
+            "size": len(body),
+        }
+    }
+
+
+@app.get("/fake/v1/uploads/{upload_id}")
+async def read_upload(upload_id: str) -> Response:
+    body = UPLOADS.get(upload_id)
+    if body is None:
+        raise HTTPException(status_code=404, detail="upload not found")
+    return Response(body, media_type="application/octet-stream")
 
 
 @app.post("/fake/v1/images/generations")
