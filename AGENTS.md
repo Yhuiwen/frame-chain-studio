@@ -87,6 +87,10 @@
 - Media serving must keep path traversal checks and support Range requests for video preview/download.
 - Local orchestration scripts may stop only PIDs recorded in `.run/dev-processes.json`; never kill unrelated user processes on common ports.
 - Runtime `.run/` and `backups/` output must stay ignored by Git.
+- Script import must never directly create formal Shots. Imported text is immutable and must first become ScriptBlocks, StoryboardDrafts, and editable ShotDrafts.
+- Script parsing is deterministic rules-based review assistance, not LLM understanding. Preserve source ranges and unrecognized text; do not call LLMs or network services from the parser.
+- Do not auto-create Characters, Locations, StyleProfiles, references, or all Shots from script text. Users must explicitly match entities and apply selected ShotDrafts.
+- Applying ShotDrafts must be idempotent and must not overwrite existing formal Shots or completed generation results.
 
 ## Phase Two Order
 

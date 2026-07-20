@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0-rc5
+
+- Adds script import for pasted text, TXT, Markdown, Fountain, and safe DOCX extraction.
+- Adds deterministic `deterministic-script-parser-v1` ScriptBlocks with source ranges, parser warnings, and user correction fields.
+- Adds StoryboardDraft, editable ShotDrafts, split/merge/skip/restore, manual Character/Location/StyleProfile matching, and Prompt preview.
+- Applies reviewed ShotDrafts into formal Shots and revision-1 ShotSpecs through the existing `structured-continuity-v1` Prompt Compiler.
+- Extends local E2E to verify script import, storyboard apply, generation, quality checks, render, Range `206`, and backup/restore of script/storyboard records.
+
 ## v0.2.0-rc4
 
 - Adds the Project continuity library for Characters, Locations, StyleProfiles, and image references.

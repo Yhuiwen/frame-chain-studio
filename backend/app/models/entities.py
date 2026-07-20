@@ -184,6 +184,47 @@ class ProjectRenderStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class ScriptSourceType(str, Enum):
+    PLAIN_TEXT = "PLAIN_TEXT"
+    MARKDOWN = "MARKDOWN"
+    FOUNTAIN = "FOUNTAIN"
+    DOCX = "DOCX"
+    PASTED = "PASTED"
+
+
+class ScriptDocumentStatus(str, Enum):
+    IMPORTED = "IMPORTED"
+    PARSED = "PARSED"
+    PARSE_WARNING = "PARSE_WARNING"
+    ARCHIVED = "ARCHIVED"
+
+
+class ScriptBlockType(str, Enum):
+    SCENE_HEADING = "SCENE_HEADING"
+    ACTION = "ACTION"
+    DIALOGUE = "DIALOGUE"
+    CHARACTER_CUE = "CHARACTER_CUE"
+    PARENTHETICAL = "PARENTHETICAL"
+    TRANSITION = "TRANSITION"
+    COMMENT = "COMMENT"
+    UNKNOWN = "UNKNOWN"
+
+
+class StoryboardDraftStatus(str, Enum):
+    DRAFT = "DRAFT"
+    REVIEWED = "REVIEWED"
+    PARTIALLY_APPLIED = "PARTIALLY_APPLIED"
+    APPLIED = "APPLIED"
+    ARCHIVED = "ARCHIVED"
+
+
+class ShotDraftStatus(str, Enum):
+    DRAFT = "DRAFT"
+    READY = "READY"
+    SKIPPED = "SKIPPED"
+    APPLIED = "APPLIED"
+
+
 class ProjectBase(SQLModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
@@ -412,6 +453,128 @@ class ShotCharacter(SQLModel, table=True):
     props_json: str = Field(default="[]")
     continuity_notes: str = Field(default="", max_length=4000)
     reference_asset_ids_json: str = Field(default="[]")
+
+
+class ScriptDocument(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("project_id", "content_sha256", "version", name="uq_scriptdocument_project_sha_version"),
+        Index("ix_scriptdocument_project_status", "project_id", "status"),
+        Index("ix_scriptdocument_project_sha", "project_id", "content_sha256"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    title: str = Field(min_length=1, max_length=160)
+    source_type: ScriptSourceType = Field(index=True)
+    original_filename: str = Field(default="", max_length=260)
+    mime_type: str = Field(default="", max_length=160)
+    content_sha256: str = Field(index=True, max_length=64)
+    raw_text: str
+    language: str = Field(default="", max_length=40)
+    status: ScriptDocumentStatus = Field(default=ScriptDocumentStatus.IMPORTED, index=True)
+    version: int = Field(default=1, index=True)
+    parent_document_id: int | None = Field(default=None, foreign_key="scriptdocument.id", index=True)
+    parse_revision: int = Field(default=0, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ScriptBlock(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("script_document_id", "parse_revision", "sort_order", name="uq_scriptblock_doc_rev_order"),
+        Index("ix_scriptblock_doc_rev_order", "script_document_id", "parse_revision", "sort_order"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    script_document_id: int = Field(foreign_key="scriptdocument.id", index=True)
+    parse_revision: int = Field(default=1, index=True)
+    block_type: ScriptBlockType = Field(index=True)
+    user_block_type: ScriptBlockType | None = Field(default=None, index=True)
+    sort_order: int = Field(index=True)
+    source_start: int = Field(index=True)
+    source_end: int = Field(index=True)
+    source_text: str
+    normalized_text: str = ""
+    user_normalized_text: str | None = None
+    speaker: str = Field(default="", max_length=160)
+    metadata_json: str = Field(default="{}")
+    parse_confidence: float = Field(default=0.5, ge=0, le=1)
+    parse_warnings_json: str = Field(default="[]")
+    warnings_confirmed: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class StoryboardDraft(SQLModel, table=True):
+    __table_args__ = (Index("ix_storyboarddraft_project_script", "project_id", "script_document_id"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    script_document_id: int = Field(foreign_key="scriptdocument.id", index=True)
+    name: str = Field(min_length=1, max_length=160)
+    parser_version: str = Field(default="", max_length=120)
+    builder_version: str = Field(default="", max_length=120)
+    status: StoryboardDraftStatus = Field(default=StoryboardDraftStatus.DRAFT, index=True)
+    default_style_profile_id: int | None = Field(default=None, foreign_key="styleprofile.id", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    applied_at: datetime | None = None
+
+
+class ShotDraft(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("storyboard_draft_id", "applied_shot_id", name="uq_shotdraft_storyboard_applied_shot"),
+        Index("ix_shotdraft_storyboard_order", "storyboard_draft_id", "sort_order"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    storyboard_draft_id: int = Field(foreign_key="storyboarddraft.id", index=True)
+    sort_order: int = Field(index=True)
+    source_block_start_id: int | None = Field(default=None, foreign_key="scriptblock.id", index=True)
+    source_block_end_id: int | None = Field(default=None, foreign_key="scriptblock.id", index=True)
+    title: str = Field(default="", max_length=160)
+    summary: str = Field(default="", max_length=4000)
+    action: str = Field(default="", max_length=4000)
+    dialogue: str = Field(default="", max_length=4000)
+    suggested_duration_seconds: float = Field(default=4.0, ge=0.1, le=60)
+    location_id: int | None = Field(default=None, foreign_key="location.id", index=True)
+    location_name: str = Field(default="", max_length=160)
+    style_profile_id: int | None = Field(default=None, foreign_key="styleprofile.id", index=True)
+    time_of_day: str = Field(default="", max_length=120)
+    weather: str = Field(default="", max_length=120)
+    shot_size: str = Field(default="", max_length=120)
+    camera_angle: str = Field(default="", max_length=240)
+    camera_movement: str = Field(default="", max_length=1000)
+    composition: str = Field(default="", max_length=2000)
+    lighting: str = Field(default="", max_length=2000)
+    emotion: str = Field(default="", max_length=1000)
+    props_json: str = Field(default="[]")
+    continuity_notes: str = Field(default="", max_length=4000)
+    free_prompt: str = Field(default="", max_length=4000)
+    negative_prompt: str = Field(default="", max_length=2000)
+    status: ShotDraftStatus = Field(default=ShotDraftStatus.DRAFT, index=True)
+    applied_shot_id: int | None = Field(default=None, foreign_key="shot.id", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ShotDraftCharacter(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("shot_draft_id", "character_id", "character_name", name="uq_shotdraftcharacter_identity"),
+        Index("ix_shotdraftcharacter_draft_sort", "shot_draft_id", "sort_order"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    shot_draft_id: int = Field(foreign_key="shotdraft.id", index=True)
+    character_id: int | None = Field(default=None, foreign_key="character.id", index=True)
+    character_name: str = Field(default="", max_length=160)
+    role: ShotCharacterRole = Field(default=ShotCharacterRole.SECONDARY, index=True)
+    action: str = Field(default="", max_length=2000)
+    expression: str = Field(default="", max_length=1000)
+    clothing: str = Field(default="", max_length=2000)
+    position: str = Field(default="", max_length=1000)
+    props_json: str = Field(default="[]")
+    notes: str = Field(default="", max_length=4000)
+    sort_order: int = Field(default=0, index=True)
 
 
 class GenerationRequest(SQLModel, table=True):

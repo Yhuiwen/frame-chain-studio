@@ -185,7 +185,9 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0010"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0011"
+        for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
+            assert connection.execute(sa.text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
     assert "job_deadline_at" in columns(db_path, "generationtask")
@@ -205,6 +207,11 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
     assert "character" in table_names(db_path)
     assert "structured_payload_json" in columns(db_path, "generationrequest")
     assert "compiler_version" in columns(db_path, "generationrequest")
+    assert "scriptdocument" in table_names(db_path)
+    assert "scriptblock" in table_names(db_path)
+    assert "storyboarddraft" in table_names(db_path)
+    assert "shotdraft" in table_names(db_path)
+    assert "shotdraftcharacter" in table_names(db_path)
 
 
 def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(tmp_path: Path) -> None:

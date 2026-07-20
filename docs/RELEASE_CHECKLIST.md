@@ -10,9 +10,11 @@ Use this before creating a `v0.2.0` tag. Do not tag until every required item is
 - The E2E JSON summary uses one `project_id` and one `render.id` for the 3 Shot workflow, final render, backup, restore, and restored media verification.
 - Local 3 Shot E2E passes, including GenerationWorker restart recovery without duplicate Provider submit, first/last-frame Provider request evidence, quality-check evidence for current video assets, final render playback, full download, Range `206`, and FFprobe verification.
 - Structured continuity evidence passes: Character, Location, StyleProfile, ShotSpec history, no-op sync, explicit sync, Prompt Compiler `structured-continuity-v1`, GenerationRequest structured snapshots, and Provider reference Asset injection.
+- Script/storyboard evidence passes: script SHA/version, parser `deterministic-script-parser-v1`, ScriptBlock source ranges, editable ShotDrafts, split/merge, manual Character/Location/StyleProfile matching, Prompt preview, batch apply into three Shots, and restored `applied_shot_id` links.
 - Structured prompt and reference-image behavior remains labeled `CONTRACT_VERIFIED_ONLY`; do not claim live real-Provider visual quality validation.
 - E2E summary includes per-Shot `quality_result_count`, `quality_check_types`, `quality_algorithm_versions`, `quality_asset_id`, `asset_revision_count`, and `superseded_asset_count`.
 - Backup/restore evidence includes persisted quality-check counts and `quality_duplicate_count = 0`.
+- Backup/restore evidence includes readable ScriptDocument, ScriptBlocks, StoryboardDraft, ShotDrafts, and applied Shot links.
 - Services stop cleanly with `scripts/dev-stop.ps1`.
 - Docker config passes: `docker compose --profile development --profile worker config --quiet`.
 - Docker E2E and restart persistence pass when Docker daemon is available.

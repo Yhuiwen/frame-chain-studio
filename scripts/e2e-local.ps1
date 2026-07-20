@@ -1,4 +1,4 @@
-param(
+﻿param(
   [int]$BackendPort = 8000,
   [int]$FrontendPort = 5173,
   [int]$FakeProviderPort = 8090,
@@ -30,6 +30,7 @@ $Summary = [ordered]@{
   shot_ids = @()
   shots = @()
   worker_restart = [ordered]@{ skipped = [bool]$SkipWorkerRestart }
+  script_storyboard = $null
   structured_continuity = $null
   provider_requests = @()
   range = @()
@@ -521,6 +522,108 @@ function Configure-StructuredShot($ProjectId, $ShotId) {
   }
 }
 
+function Create-ScriptStoryboardShots($ProjectId) {
+  Write-Host "==> Script import and storyboard apply"
+  $character = Invoke-Api "POST" "/projects/$ProjectId/characters" @{
+    name = "Script Alice"
+    appearance = "calm engineer with silver glasses"
+    default_clothing = "white lab coat"
+    continuity_notes = "Manually matched from ShotDraft; not auto-created by parser."
+  }
+  $location = Invoke-Api "POST" "/projects/$ProjectId/locations" @{
+    name = "Script Lab"
+    description = "A practical lab with a sealed door"
+    time_of_day = "Night"
+    lighting = "cool overhead panels"
+  }
+  $style = Invoke-Api "POST" "/projects/$ProjectId/style-profiles" @{
+    name = "Script Ink"
+    positive_prompt = "clean ink storyboard frame"
+    negative_prompt = "blurred details"
+    aspect_ratio = "16:9"
+  }
+  $scriptText = @"
+INT. SCRIPT LAB - NIGHT
+ALICE
+I will open the door.
+
+EXT. SCRIPT STREET - DAY
+A vehicle stops near the curb.
+
+EXT. SCRIPT ROOFTOP - NIGHT
+ALICE: The wind is too strong.
+"@
+  $script = Invoke-Api "POST" "/projects/$ProjectId/scripts/import" @{
+    title = "3C-2 E2E Script"
+    text = $scriptText
+    source_type = "FOUNTAIN"
+    language = "mixed"
+  }
+  $parsed = Invoke-Api "POST" "/scripts/$($script.id)/parse"
+  if ($parsed.parser_version -ne "deterministic-script-parser-v1") { Fail "script" "Unexpected parser version." }
+  $blocks = @((Invoke-Api "GET" "/scripts/$($script.id)/blocks") | ForEach-Object { $_ })
+  if ([int]$parsed.block_count -lt 7) { Fail "script" "Expected parsed script blocks." }
+  $storyboard = Invoke-Api "POST" "/scripts/$($script.id)/storyboards" @{
+    name = "3C-2 E2E Storyboard"
+    default_style_profile_id = $style.id
+  }
+  $drafts = @((Invoke-Api "GET" "/storyboards/$($storyboard.id)/shot-drafts") | ForEach-Object { $_ })
+  if ($drafts.Count -lt 3) { Fail "storyboard" "Expected at least three ShotDrafts." }
+  $firstDraft = $drafts[0]
+  $split = @((Invoke-Api "POST" "/shot-drafts/$($firstDraft.id)/split" @{ split_after_block_id = $firstDraft.source_block_start_id }) | ForEach-Object { $_ })
+  if ($split.Count -ne 2) { Fail "storyboard" "ShotDraft split did not return two drafts." }
+  $merged = Invoke-Api "POST" "/shot-drafts/$($split[0].id)/merge-next"
+  if (-not $merged.id) { Fail "storyboard" "ShotDraft merge did not return a draft." }
+  $drafts = @((Invoke-Api "GET" "/storyboards/$($storyboard.id)/shot-drafts") | ForEach-Object { $_ })
+  $firstDraft = $drafts[0]
+  $updatedDraft = Invoke-Api "PATCH" "/shot-drafts/$($firstDraft.id)" @{
+    location_id = $location.id
+    style_profile_id = $style.id
+    free_prompt = "Manual review keeps Alice framed before the door opens."
+    characters = @(
+      @{
+        character_id = $character.id
+        character_name = "ALICE"
+        role = "PRIMARY"
+        sort_order = 0
+      }
+    )
+  }
+  $preview = Invoke-Api "POST" "/shot-drafts/$($updatedDraft.id)/preview-spec"
+  if ($preview.compiler_version -ne "structured-continuity-v1") { Fail "storyboard" "Preview did not reuse Prompt Compiler." }
+  if ([string]$preview.compiled_prompt -notmatch "silver glasses") { Fail "storyboard" "Preview prompt did not include matched Character." }
+  $draftIds = @($drafts | Select-Object -First 3 | ForEach-Object { $_.id })
+  $applied = Invoke-Api "POST" "/storyboards/$($storyboard.id)/apply" @{ shot_draft_ids = $draftIds }
+  $shotIds = @($applied.applied_shot_ids)
+  if ($shotIds.Count -ne 3) { Fail "storyboard" "Expected storyboard apply to create three Shots." }
+  $specHashes = @()
+  $specIds = @()
+  foreach ($shotId in $shotIds) {
+    $spec = Invoke-Api "GET" "/shots/$shotId/spec"
+    if ($spec.revision -ne 1) { Fail "storyboard" "Applied ShotSpec revision is not 1." }
+    if ($spec.compiler_version -ne "structured-continuity-v1") { Fail "storyboard" "Applied ShotSpec compiler version mismatch." }
+    $specIds += $spec.id
+    $specHashes += Get-StringSha256 $spec.compiled_prompt
+  }
+  $Summary.script_storyboard = [ordered]@{
+    script_document_id = $script.id
+    script_sha256 = $script.content_sha256
+    script_block_count = [int]$parsed.block_count
+    script_parser_version = $parsed.parser_version
+    storyboard_id = $storyboard.id
+    shot_draft_ids = $draftIds
+    applied_shot_ids = $shotIds
+    compiled_prompt_hashes = $specHashes
+    shot_spec_ids = $specIds
+    preview_compiler_version = $preview.compiler_version
+    character_id = $character.id
+    location_id = $location.id
+    style_profile_id = $style.id
+    backup_restore_verified = $false
+  }
+  return $shotIds
+}
+
 function Complete-Shot($ProjectId, $ShotId, [int]$ShotNumber, [bool]$RestartGenerationWorker) {
   Write-Host "==> Shot $ShotNumber keyframe"
   $keyRequest = Invoke-Api "POST" "/shots/$ShotId/keyframe/generate" @{ provider_id = "fake-http"; seed = (100 + $ShotNumber) }
@@ -732,6 +835,18 @@ function Run-BackupRestoreVerification($ProjectId, $RenderId, $RenderUrl, $Rende
   $detail = Get-Detail $ProjectId
   if ($detail.shots.Count -ne 3 -or $detail.tasks.Count -ne 7) { Fail "restore" "Restored API detail has unexpected shot/task counts." }
   if (@($detail.quality_checks).Count -lt 1) { Fail "restore" "Restored API detail is missing quality checks." }
+  if ($Summary.script_storyboard) {
+    $restoredScript = Invoke-Api "GET" "/scripts/$($Summary.script_storyboard.script_document_id)"
+    $restoredBlocks = @((Invoke-Api "GET" "/scripts/$($Summary.script_storyboard.script_document_id)/blocks") | ForEach-Object { $_ })
+    $restoredStoryboard = Invoke-Api "GET" "/storyboards/$($Summary.script_storyboard.storyboard_id)"
+    $restoredDrafts = @((Invoke-Api "GET" "/storyboards/$($Summary.script_storyboard.storyboard_id)/shot-drafts") | ForEach-Object { $_ })
+    if ($restoredScript.content_sha256 -ne $Summary.script_storyboard.script_sha256) { Fail "restore" "Restored script SHA mismatch." }
+    if ($restoredBlocks.Count -ne $Summary.script_storyboard.script_block_count) { Fail "restore" "Restored script block count mismatch." }
+    if ($restoredStoryboard.id -ne $Summary.script_storyboard.storyboard_id) { Fail "restore" "Restored storyboard mismatch." }
+    $appliedDrafts = @($restoredDrafts | Where-Object { $_.applied_shot_id })
+    if ($appliedDrafts.Count -lt 3) { Fail "restore" "Restored ShotDraft applied_shot_id links are missing." }
+    $Summary.script_storyboard.backup_restore_verified = $true
+  }
   $render = Invoke-Api "GET" "/renders/$RenderId"
   if ($render.status -ne "SUCCEEDED" -or -not $render.output_asset_id) { Fail "restore" "Restored render did not remain succeeded." }
   Assert-MediaRange $RenderUrl $RenderSize "restored-render" | Out-Null
@@ -786,9 +901,9 @@ try {
   Start-Stack
   Invoke-RestMethod -Method POST -Uri "$FakeBaseUrl/test/reset" -TimeoutSec 5 | Out-Null
 
-  Write-Host "==> Create isolated 3-shot E2E project"
+  Write-Host "==> Create isolated 3C-2 E2E project"
   $project = Invoke-Api "POST" "/projects" @{
-    name = "3C-1 local E2E $(Get-Date -Format yyyyMMdd-HHmmss)"
+    name = "3C-2 local E2E $(Get-Date -Format yyyyMMdd-HHmmss)"
     description = "Created by scripts/e2e-local.ps1"
     image_provider_id = "fake-http"
     video_provider_id = "fake-http"
@@ -798,15 +913,7 @@ try {
   }
   $Summary.project_id = $project.id
 
-  $shotIds = @()
-  for ($i = 1; $i -le 3; $i++) {
-    $shot = Invoke-Api "POST" "/projects/$($project.id)/shots" @{
-      title = "Shot $i"
-      prompt = "Shot $i continuity smoke test"
-      duration_seconds = 1.0
-    }
-    $shotIds += $shot.id
-  }
+  $shotIds = @(Create-ScriptStoryboardShots $project.id)
   $Summary.shot_ids = $shotIds
 
   Configure-StructuredShot $project.id $shotIds[0]

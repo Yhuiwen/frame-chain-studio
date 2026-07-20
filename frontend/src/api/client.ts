@@ -211,6 +211,143 @@ export interface ShotSpec {
   reference_asset_ids: number[];
 }
 
+export type ScriptSourceType = "PLAIN_TEXT" | "MARKDOWN" | "FOUNTAIN" | "DOCX" | "PASTED";
+export type ScriptDocumentStatus = "IMPORTED" | "PARSED" | "PARSE_WARNING" | "ARCHIVED";
+export type ScriptBlockType =
+  | "SCENE_HEADING"
+  | "ACTION"
+  | "DIALOGUE"
+  | "CHARACTER_CUE"
+  | "PARENTHETICAL"
+  | "TRANSITION"
+  | "COMMENT"
+  | "UNKNOWN";
+export type StoryboardDraftStatus = "DRAFT" | "REVIEWED" | "PARTIALLY_APPLIED" | "APPLIED" | "ARCHIVED";
+export type ShotDraftStatus = "DRAFT" | "READY" | "SKIPPED" | "APPLIED";
+
+export interface ScriptDocument {
+  id: number;
+  project_id: number;
+  title: string;
+  source_type: ScriptSourceType;
+  original_filename: string;
+  mime_type: string;
+  content_sha256: string;
+  language: string;
+  status: ScriptDocumentStatus;
+  version: number;
+  parent_document_id: number | null;
+  parse_revision: number;
+  block_count: number;
+  storyboard_count: number;
+  duplicate_of_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScriptContent {
+  id: number;
+  title: string;
+  raw_text: string;
+  content_sha256: string;
+  version: number;
+}
+
+export interface ScriptBlock {
+  id: number;
+  script_document_id: number;
+  parse_revision: number;
+  block_type: ScriptBlockType;
+  user_block_type: ScriptBlockType | null;
+  effective_block_type: ScriptBlockType;
+  sort_order: number;
+  source_start: number;
+  source_end: number;
+  source_text: string;
+  normalized_text: string;
+  user_normalized_text: string | null;
+  effective_text: string;
+  speaker: string;
+  metadata: Record<string, unknown>;
+  parse_confidence: number;
+  parse_warnings: string[];
+  warnings_confirmed: boolean;
+  created_at: string;
+}
+
+export interface StoryboardDraft {
+  id: number;
+  project_id: number;
+  script_document_id: number;
+  name: string;
+  parser_version: string;
+  builder_version: string;
+  status: StoryboardDraftStatus;
+  default_style_profile_id: number | null;
+  shot_draft_count: number;
+  applied_shot_count: number;
+  created_at: string;
+  updated_at: string;
+  applied_at: string | null;
+}
+
+export interface ShotDraftCharacter {
+  character_id: number | null;
+  character_name: string;
+  role: ShotCharacterRole;
+  action: string;
+  expression: string;
+  clothing: string;
+  position: string;
+  props: string[];
+  notes: string;
+  sort_order: number;
+}
+
+export interface ShotDraft {
+  id: number;
+  storyboard_draft_id: number;
+  sort_order: number;
+  source_block_start_id: number | null;
+  source_block_end_id: number | null;
+  title: string;
+  summary: string;
+  action: string;
+  dialogue: string;
+  suggested_duration_seconds: number;
+  location_id: number | null;
+  location_name: string;
+  style_profile_id: number | null;
+  time_of_day: string;
+  weather: string;
+  shot_size: string;
+  camera_angle: string;
+  camera_movement: string;
+  composition: string;
+  lighting: string;
+  emotion: string;
+  props: string[];
+  continuity_notes: string;
+  free_prompt: string;
+  negative_prompt: string;
+  status: ShotDraftStatus;
+  applied_shot_id: number | null;
+  characters: ShotDraftCharacter[];
+  source_text: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ShotDraftPreview {
+  shot_spec: Record<string, unknown>;
+  compiled_prompt: string;
+  compiled_negative_prompt: string;
+  structured_payload: Record<string, unknown>;
+  compiler_version: string;
+  reference_asset_ids: number[];
+  validation_warnings: string[];
+}
+
 export type ShotSpecPatch = Partial<
   Pick<
     ShotSpec,
@@ -502,6 +639,47 @@ export const api = {
     body.append("file", file);
     return request<Asset>(`/api/projects/${projectId}/assets/images`, { method: "POST", body });
   },
+  listScripts: (projectId: number) => request<ScriptDocument[]>(`/api/projects/${projectId}/scripts`),
+  importScriptText: (projectId: number, body: { title?: string; text: string; source_type?: ScriptSourceType; language?: string; create_new_version?: boolean; parent_document_id?: number | null }) =>
+    request<ScriptDocument>(`/api/projects/${projectId}/scripts/import`, { method: "POST", body: JSON.stringify(body) }),
+  importScriptFile: (projectId: number, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<ScriptDocument>(`/api/projects/${projectId}/scripts/import`, { method: "POST", body });
+  },
+  getScript: (scriptId: number) => request<ScriptDocument>(`/api/scripts/${scriptId}`),
+  getScriptContent: (scriptId: number) => request<ScriptContent>(`/api/scripts/${scriptId}/content`),
+  parseScript: (scriptId: number) =>
+    request<{ script: ScriptDocument; parser_version: string; block_count: number; warnings: string[]; statistics: Record<string, unknown> }>(
+      `/api/scripts/${scriptId}/parse`,
+      { method: "POST" },
+    ),
+  listScriptBlocks: (scriptId: number) => request<ScriptBlock[]>(`/api/scripts/${scriptId}/blocks`),
+  updateScriptBlock: (blockId: number, body: { user_block_type?: ScriptBlockType | null; user_normalized_text?: string | null; warnings_confirmed?: boolean | null }) =>
+    request<ScriptBlock>(`/api/script-blocks/${blockId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  archiveScript: (scriptId: number) => request<ScriptDocument>(`/api/scripts/${scriptId}/archive`, { method: "POST" }),
+  listStoryboards: (scriptId: number) => request<StoryboardDraft[]>(`/api/scripts/${scriptId}/storyboards`),
+  createStoryboard: (scriptId: number, body: { name?: string | null; default_style_profile_id?: number | null }) =>
+    request<StoryboardDraft>(`/api/scripts/${scriptId}/storyboards`, { method: "POST", body: JSON.stringify(body) }),
+  getStoryboard: (storyboardId: number) => request<StoryboardDraft>(`/api/storyboards/${storyboardId}`),
+  updateStoryboard: (storyboardId: number, body: Partial<StoryboardDraft>) =>
+    request<StoryboardDraft>(`/api/storyboards/${storyboardId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  applyStoryboard: (storyboardId: number, body: { shot_draft_ids: number[]; insert_after_shot_id?: number | null }) =>
+    request<{ storyboard: StoryboardDraft; applied_shot_ids: number[] }>(`/api/storyboards/${storyboardId}/apply`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  listShotDrafts: (storyboardId: number) => request<ShotDraft[]>(`/api/storyboards/${storyboardId}/shot-drafts`),
+  updateShotDraft: (shotDraftId: number, body: Partial<ShotDraft>) =>
+    request<ShotDraft>(`/api/shot-drafts/${shotDraftId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  splitShotDraft: (shotDraftId: number, body: { split_after_block_id?: number | null; text_split_offset?: number | null }) =>
+    request<ShotDraft[]>(`/api/shot-drafts/${shotDraftId}/split`, { method: "POST", body: JSON.stringify(body) }),
+  mergeShotDraftNext: (shotDraftId: number) => request<ShotDraft>(`/api/shot-drafts/${shotDraftId}/merge-next`, { method: "POST" }),
+  skipShotDraft: (shotDraftId: number) => request<ShotDraft>(`/api/shot-drafts/${shotDraftId}/skip`, { method: "POST" }),
+  restoreShotDraft: (shotDraftId: number) => request<ShotDraft>(`/api/shot-drafts/${shotDraftId}/restore`, { method: "POST" }),
+  previewShotDraft: (shotDraftId: number) => request<ShotDraftPreview>(`/api/shot-drafts/${shotDraftId}/preview-spec`, { method: "POST" }),
+  applyShotDraft: (shotDraftId: number, body: { insert_after_shot_id?: number | null } = {}) =>
+    request<ShotDraft>(`/api/shot-drafts/${shotDraftId}/apply`, { method: "POST", body: JSON.stringify(body) }),
   setStartFrame: (shotId: number, body: { action: "SELECT" | "CLEAR" | "RESTORE_INHERITED"; asset_id?: number | null }) =>
     request<Shot>(`/api/shots/${shotId}/start-frame`, { method: "POST", body: JSON.stringify(body) }),
   setTargetKeyframe: (shotId: number, body: { asset_id: number }) =>

@@ -721,3 +721,17 @@ On Windows PowerShell:
 ## Database Initialization
 
 The backend startup initializer applies Alembic migrations to the configured database. The default SQLite database path is still `backend/data/frame_chain.db`, and runtime data remains ignored by Git.
+
+## Script Import And Storyboards
+
+Frame Chain Studio supports a human-reviewed script workflow:
+
+- Import pasted text, TXT, Markdown, Fountain, and DOCX scripts.
+- Store immutable raw script text with SHA-256, version, parent version, source type, and parse status.
+- Parse deterministic ScriptBlocks with `deterministic-script-parser-v1`, stable source ranges, warnings, and user correction fields.
+- Create editable StoryboardDraft and ShotDraft rows before any formal Shot is created.
+- Manually match draft characters, locations, and style profiles; the parser does not auto-create library entities.
+- Preview ShotSpec output through the same `structured-continuity-v1` Prompt Compiler used by formal Shots.
+- Apply selected ShotDrafts only after user review; repeated apply returns the existing `applied_shot_id`.
+
+The parser is a deterministic rules parser, not an LLM script-understanding system. It preserves unrecognized text for review and does not guarantee full screenplay semantics. Unsupported in this release: PDF OCR, image OCR, Final Draft FDX, web scraping, subtitles, automatic Character creation, automatic Location selection, LLM parser calls, real Provider online validation, audio, and timeline effects.

@@ -15,9 +15,14 @@ from app.models.entities import (
     ProjectRenderStatus,
     QualityCheckSeverity,
     ReliableTaskStatus,
+    ScriptBlockType,
+    ScriptDocumentStatus,
+    ScriptSourceType,
     ShotCharacterRole,
+    ShotDraftStatus,
     ShotStatus,
     StartFrameSourceType,
+    StoryboardDraftStatus,
     WorkerStatus,
     WorkerType,
 )
@@ -229,6 +234,215 @@ class LocationReferenceRead(BaseModel):
     sort_order: int
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class ScriptImportRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=160)
+    text: str | None = Field(default=None, max_length=2_000_000)
+    source_type: ScriptSourceType = ScriptSourceType.PASTED
+    language: str = Field(default="", max_length=40)
+    create_new_version: bool = False
+    parent_document_id: int | None = None
+
+
+class ScriptDocumentRead(BaseModel):
+    id: int
+    project_id: int
+    title: str
+    source_type: ScriptSourceType
+    original_filename: str
+    mime_type: str
+    content_sha256: str
+    language: str
+    status: ScriptDocumentStatus
+    version: int
+    parent_document_id: int | None
+    parse_revision: int
+    block_count: int = 0
+    storyboard_count: int = 0
+    duplicate_of_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ScriptContentRead(BaseModel):
+    id: int
+    title: str
+    raw_text: str
+    content_sha256: str
+    version: int
+
+
+class ScriptParseRead(BaseModel):
+    script: ScriptDocumentRead
+    parser_version: str
+    block_count: int
+    warnings: list[str] = Field(default_factory=list)
+    statistics: dict[str, object] = Field(default_factory=dict)
+
+
+class ScriptBlockRead(BaseModel):
+    id: int
+    script_document_id: int
+    parse_revision: int
+    block_type: ScriptBlockType
+    user_block_type: ScriptBlockType | None
+    effective_block_type: ScriptBlockType
+    sort_order: int
+    source_start: int
+    source_end: int
+    source_text: str
+    normalized_text: str
+    user_normalized_text: str | None
+    effective_text: str
+    speaker: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+    parse_confidence: float
+    parse_warnings: list[str] = Field(default_factory=list)
+    warnings_confirmed: bool
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ScriptBlockUpdate(BaseModel):
+    user_block_type: ScriptBlockType | None = None
+    user_normalized_text: str | None = Field(default=None, max_length=4000)
+    warnings_confirmed: bool | None = None
+
+
+class StoryboardCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=160)
+    default_style_profile_id: int | None = None
+
+
+class StoryboardUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    status: StoryboardDraftStatus | None = None
+    default_style_profile_id: int | None = None
+
+
+class StoryboardRead(BaseModel):
+    id: int
+    project_id: int
+    script_document_id: int
+    name: str
+    parser_version: str
+    builder_version: str
+    status: StoryboardDraftStatus
+    default_style_profile_id: int | None
+    shot_draft_count: int = 0
+    applied_shot_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+    applied_at: datetime | None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ShotDraftCharacterInput(BaseModel):
+    character_id: int | None = None
+    character_name: str = Field(default="", max_length=160)
+    role: ShotCharacterRole = ShotCharacterRole.SECONDARY
+    action: str = Field(default="", max_length=2000)
+    expression: str = Field(default="", max_length=1000)
+    clothing: str = Field(default="", max_length=2000)
+    position: str = Field(default="", max_length=1000)
+    props: list[str] = Field(default_factory=list)
+    notes: str = Field(default="", max_length=4000)
+    sort_order: int = 0
+
+
+class ShotDraftRead(BaseModel):
+    id: int
+    storyboard_draft_id: int
+    sort_order: int
+    source_block_start_id: int | None
+    source_block_end_id: int | None
+    title: str
+    summary: str
+    action: str
+    dialogue: str
+    suggested_duration_seconds: float
+    location_id: int | None
+    location_name: str
+    style_profile_id: int | None
+    time_of_day: str
+    weather: str
+    shot_size: str
+    camera_angle: str
+    camera_movement: str
+    composition: str
+    lighting: str
+    emotion: str
+    props: list[str] = Field(default_factory=list)
+    continuity_notes: str
+    free_prompt: str
+    negative_prompt: str
+    status: ShotDraftStatus
+    applied_shot_id: int | None
+    characters: list[ShotDraftCharacterInput] = Field(default_factory=list)
+    source_text: str = ""
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ShotDraftUpdate(BaseModel):
+    sort_order: int | None = None
+    source_block_start_id: int | None = None
+    source_block_end_id: int | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    summary: str | None = Field(default=None, max_length=4000)
+    action: str | None = Field(default=None, max_length=4000)
+    dialogue: str | None = Field(default=None, max_length=4000)
+    suggested_duration_seconds: float | None = Field(default=None, ge=0.1, le=60)
+    location_id: int | None = None
+    location_name: str | None = Field(default=None, max_length=160)
+    style_profile_id: int | None = None
+    time_of_day: str | None = Field(default=None, max_length=120)
+    weather: str | None = Field(default=None, max_length=120)
+    shot_size: str | None = Field(default=None, max_length=120)
+    camera_angle: str | None = Field(default=None, max_length=240)
+    camera_movement: str | None = Field(default=None, max_length=1000)
+    composition: str | None = Field(default=None, max_length=2000)
+    lighting: str | None = Field(default=None, max_length=2000)
+    emotion: str | None = Field(default=None, max_length=1000)
+    props: list[str] | None = None
+    continuity_notes: str | None = Field(default=None, max_length=4000)
+    free_prompt: str | None = Field(default=None, max_length=4000)
+    negative_prompt: str | None = Field(default=None, max_length=2000)
+    status: ShotDraftStatus | None = None
+    characters: list[ShotDraftCharacterInput] | None = None
+
+
+class ShotDraftSplitRequest(BaseModel):
+    split_after_block_id: int | None = None
+    text_split_offset: int | None = None
+
+
+class ShotDraftApplyRequest(BaseModel):
+    insert_after_shot_id: int | None = None
+    idempotency_key: str | None = Field(default=None, max_length=120)
+
+
+class StoryboardApplyRequest(BaseModel):
+    shot_draft_ids: list[int]
+    insert_after_shot_id: int | None = None
+
+
+class StoryboardApplyRead(BaseModel):
+    storyboard: StoryboardRead
+    applied_shot_ids: list[int]
+
+
+class ShotDraftPreviewRead(BaseModel):
+    shot_spec: dict[str, object]
+    compiled_prompt: str
+    compiled_negative_prompt: str
+    structured_payload: dict[str, object]
+    compiler_version: str
+    reference_asset_ids: list[int]
+    validation_warnings: list[str] = Field(default_factory=list)
 
 
 class ShotCreate(BaseModel):

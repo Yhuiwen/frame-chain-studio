@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     render_temp_file_ttl_hours: int = 24
     upload_max_image_bytes: int = 25 * 1024 * 1024
     upload_max_image_pixels: int = 80_000_000
+    script_max_file_bytes: int = Field(default=5 * 1024 * 1024, ge=1_024, le=50 * 1024 * 1024)
+    script_max_extracted_text_chars: int = Field(default=250_000, ge=1, le=2_000_000)
+    script_max_docx_uncompressed_bytes: int = Field(default=20 * 1024 * 1024, ge=1_024, le=200 * 1024 * 1024)
+    script_max_blocks: int = Field(default=5_000, ge=1, le=50_000)
+    script_max_shot_drafts: int = Field(default=500, ge=1, le=5_000)
     quality_dhash_warning_distance: int = Field(default=16, ge=0, le=64)
     quality_pixel_mae_warning: float = Field(default=0.12, ge=0, le=1)
     quality_brightness_warning: float = Field(default=0.15, ge=0, le=1)

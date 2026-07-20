@@ -143,7 +143,8 @@ def verify_decode(path: Path, *, timeout_seconds: int) -> str | None:
 
 def _dhash(image: Image.Image) -> int:
     gray = image.convert("L").resize((9, 8))
-    pixels = list(gray.getdata())
+    get_pixels = getattr(gray, "get_flattened_data", gray.getdata)
+    pixels = list(get_pixels())
     value = 0
     for row in range(8):
         for col in range(8):

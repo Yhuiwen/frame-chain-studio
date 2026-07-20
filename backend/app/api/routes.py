@@ -33,7 +33,18 @@ from app.models.schemas import (
     ProjectRead,
     ProjectUpdate,
     ReorderShot,
+    ScriptBlockRead,
+    ScriptBlockUpdate,
+    ScriptContentRead,
+    ScriptDocumentRead,
+    ScriptImportRequest,
+    ScriptParseRead,
     ShotCreate,
+    ShotDraftApplyRequest,
+    ShotDraftPreviewRead,
+    ShotDraftRead,
+    ShotDraftSplitRequest,
+    ShotDraftUpdate,
     ShotRead,
     ShotSpecRead,
     ShotSpecRevisionRequest,
@@ -43,6 +54,11 @@ from app.models.schemas import (
     ShotStartFrameRequest,
     ShotTargetKeyframeRequest,
     ShotUpdate,
+    StoryboardApplyRead,
+    StoryboardApplyRequest,
+    StoryboardCreate,
+    StoryboardRead,
+    StoryboardUpdate,
     StyleProfileCreate,
     StyleProfileRead,
     StyleProfileUpdate,
@@ -58,7 +74,8 @@ from app.providers.config_loader import load_registry_from_env
 from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
-from app.services import provider_resolution, quality_service, studio, structured, task_service, worker_status
+from app.models.entities import ShotDraftStatus
+from app.services import provider_resolution, quality_service, script_workflow, studio, structured, task_service, worker_status
 from app.workers import render_service
 
 router = APIRouter()
@@ -371,6 +388,190 @@ async def upload_project_image(
         content_type=file.content_type,
     )
     return studio.asset_payload(asset)
+
+
+@router.get("/projects/{project_id}/scripts", response_model=list[ScriptDocumentRead])
+def list_project_scripts(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return script_workflow.list_scripts(session, project_id)
+
+
+@router.post("/projects/{project_id}/scripts/import", response_model=ScriptDocumentRead, status_code=201)
+async def import_project_script(
+    project_id: int,
+    request: Request,
+    file: UploadFile | None = File(default=None),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        if file is None:
+            raise AppError("SCRIPT_FILE_REQUIRED", "Multipart import requires a file.", 400)
+        content = await file.read()
+        text, source_type = script_workflow.decode_script_upload(
+            content,
+            filename=file.filename or "",
+            mime_type=file.content_type or "",
+        )
+        payload = ScriptImportRequest(title=None, source_type=source_type)
+        return script_workflow.import_script(
+            session,
+            project_id,
+            payload,
+            raw_text=text,
+            source_type=source_type,
+            original_filename=file.filename or "",
+            mime_type=file.content_type or "",
+        )
+    body = await request.json()
+    payload = ScriptImportRequest.model_validate(body)
+    return script_workflow.import_script(session, project_id, payload)
+
+
+@router.get("/scripts/{script_id}", response_model=ScriptDocumentRead)
+def read_script(script_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.script_document_payload(session, script_workflow.get_script_or_404(session, script_id))
+
+
+@router.get("/scripts/{script_id}/content", response_model=ScriptContentRead)
+def read_script_content(script_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    script = script_workflow.get_script_or_404(session, script_id)
+    return {
+        "id": script.id,
+        "title": script.title,
+        "raw_text": script.raw_text,
+        "content_sha256": script.content_sha256,
+        "version": script.version,
+    }
+
+
+@router.post("/scripts/{script_id}/parse", response_model=ScriptParseRead)
+def parse_script(script_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.parse_script_document(session, script_id)
+
+
+@router.get("/scripts/{script_id}/blocks", response_model=list[ScriptBlockRead])
+def list_script_blocks(script_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return script_workflow.list_blocks(session, script_id)
+
+
+@router.post("/scripts/{script_id}/versions", response_model=ScriptDocumentRead, status_code=201)
+def create_script_version(
+    script_id: int,
+    payload: ScriptImportRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    parent = script_workflow.get_script_or_404(session, script_id)
+    payload.parent_document_id = script_id
+    payload.create_new_version = True
+    return script_workflow.import_script(session, parent.project_id, payload)
+
+
+@router.post("/scripts/{script_id}/archive", response_model=ScriptDocumentRead)
+def archive_script(script_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.archive_script(session, script_id)
+
+
+@router.patch("/script-blocks/{block_id}", response_model=ScriptBlockRead)
+def update_script_block(
+    block_id: int,
+    payload: ScriptBlockUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return script_workflow.update_block(session, block_id, payload)
+
+
+@router.get("/scripts/{script_id}/storyboards", response_model=list[StoryboardRead])
+def list_script_storyboards(script_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return script_workflow.list_storyboards(session, script_id)
+
+
+@router.post("/scripts/{script_id}/storyboards", response_model=StoryboardRead, status_code=201)
+def create_script_storyboard(
+    script_id: int,
+    payload: StoryboardCreate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return script_workflow.create_storyboard(session, script_id, payload)
+
+
+@router.get("/storyboards/{storyboard_id}", response_model=StoryboardRead)
+def read_storyboard(storyboard_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.storyboard_payload(session, script_workflow.get_storyboard_or_404(session, storyboard_id))
+
+
+@router.patch("/storyboards/{storyboard_id}", response_model=StoryboardRead)
+def update_storyboard(
+    storyboard_id: int,
+    payload: StoryboardUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return script_workflow.update_storyboard(session, storyboard_id, payload)
+
+
+@router.post("/storyboards/{storyboard_id}/apply", response_model=StoryboardApplyRead)
+def apply_storyboard(
+    storyboard_id: int,
+    payload: StoryboardApplyRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return script_workflow.apply_storyboard(session, storyboard_id, payload)
+
+
+@router.post("/storyboards/{storyboard_id}/archive", response_model=StoryboardRead)
+def archive_storyboard(storyboard_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.archive_storyboard(session, storyboard_id)
+
+
+@router.get("/storyboards/{storyboard_id}/shot-drafts", response_model=list[ShotDraftRead])
+def list_storyboard_shot_drafts(storyboard_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return script_workflow.list_shot_drafts(session, storyboard_id)
+
+
+@router.patch("/shot-drafts/{shot_draft_id}", response_model=ShotDraftRead)
+def update_shot_draft(
+    shot_draft_id: int,
+    payload: ShotDraftUpdate,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return script_workflow.update_shot_draft(session, shot_draft_id, payload)
+
+
+@router.post("/shot-drafts/{shot_draft_id}/split", response_model=list[ShotDraftRead])
+def split_shot_draft(
+    shot_draft_id: int,
+    payload: ShotDraftSplitRequest,
+    session: Session = Depends(get_session),
+) -> list[dict[str, object]]:
+    return script_workflow.split_shot_draft(session, shot_draft_id, payload)
+
+
+@router.post("/shot-drafts/{shot_draft_id}/merge-next", response_model=ShotDraftRead)
+def merge_shot_draft_next(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.merge_shot_draft_next(session, shot_draft_id)
+
+
+@router.post("/shot-drafts/{shot_draft_id}/skip", response_model=ShotDraftRead)
+def skip_shot_draft(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.set_shot_draft_status(session, shot_draft_id, ShotDraftStatus.SKIPPED)
+
+
+@router.post("/shot-drafts/{shot_draft_id}/restore", response_model=ShotDraftRead)
+def restore_shot_draft(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.set_shot_draft_status(session, shot_draft_id, ShotDraftStatus.DRAFT)
+
+
+@router.post("/shot-drafts/{shot_draft_id}/preview-spec", response_model=ShotDraftPreviewRead)
+def preview_shot_draft(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return script_workflow.preview_shot_draft(session, shot_draft_id)
+
+
+@router.post("/shot-drafts/{shot_draft_id}/apply", response_model=ShotDraftRead)
+def apply_shot_draft(
+    shot_draft_id: int,
+    payload: ShotDraftApplyRequest | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return script_workflow.apply_shot_draft(session, shot_draft_id, payload or ShotDraftApplyRequest())
 
 
 @router.get("/projects/{project_id}/characters", response_model=list[CharacterRead])
