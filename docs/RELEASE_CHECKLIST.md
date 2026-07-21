@@ -40,6 +40,7 @@ Use this before creating a `v0.2.0` tag. Do not tag until every required item is
 - Provider configs and ProviderProfile rows contain no real API keys, authorization headers, cookies, tokens, or secret material.
 - CI passes on GitHub Actions.
 - Known Vite warnings are reviewed and documented.
+- Failed TOAPIS paid runs remain terminal; normalized video-input evidence and RecoveryPlanOnly both verify zero Provider network and zero database mutation.
 
 Suggested commands after all checks pass. Stage only release-owned source and documentation files; do not use `git add .`.
 

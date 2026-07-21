@@ -72,3 +72,22 @@ def test_two_shot_plan_only_and_video_console_review_are_explicit_and_local() ->
     assert "[switch]$AcknowledgeConsoleReview" in review
     assert "if (-not $AcknowledgeConsoleReview)" in review
     assert "databaseUpdated=false" in review
+
+
+def test_failed_run_recovery_plan_only_is_local_and_precedes_live_execution() -> None:
+    runner = (REPO_ROOT / "scripts" / "e2e-real-provider.ps1").read_text(encoding="utf-8")
+    planner = (REPO_ROOT / "scripts" / "toapis_recovery_plan.py").read_text(encoding="utf-8")
+    assert "[switch]$RecoveryPlanOnly" in runner
+    assert "[int]$FailedRunId" in runner
+    assert "[int]$RecoverFailedRunId" in runner
+    assert "[string]$RecoveryPlanHash" in runner
+    assert runner.index("if ($RecoveryPlanOnly)") < runner.index("if (-not $ConfirmLive)")
+    assert runner.index("if ($RecoveryPlanOnly)") < runner.index("Invoke-RestMethod")
+    assert "RECOVERY_EXECUTION_REQUIRES_EXPLICIT_FUTURE_IMPLEMENTATION" in runner
+    for forbidden in ("httpx", "requests", "Invoke-RestMethod", "/live-enable", "/verify-live", "/advance"):
+        assert forbidden not in planner
+    assert "build_recovery_plan" in planner
+    assert "networkCalled" not in planner  # emitted by the pure planning service
+    assert "suggestedRecoveryCommand=" in planner
+    assert "suggestedRecoveryCommandExecuted=false" in planner
+    assert "subprocess" not in planner

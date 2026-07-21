@@ -74,7 +74,9 @@ def advance(session: Session, run_id: int) -> dict[str, Any]:
         raise AppError("PROVIDER_VERIFICATION_RUN_NOT_FOUND", "Provider verification run was not found.", 404)
     stage = _stage(run)
     if stage in TERMINAL_STAGES:
-        return payload(session, run)
+        result = payload(session, run)
+        session.commit()
+        return result
     run.state_version += 1
     session.add(run)
     try:
@@ -85,7 +87,9 @@ def advance(session: Session, run_id: int) -> dict[str, Any]:
         _fail(session, run, stage, "VERIFICATION_STEP_FAILED")
     session.commit()
     session.refresh(run)
-    return payload(session, run)
+    result = payload(session, run)
+    session.commit()
+    return result
 
 
 def set_initial_anchor(session: Session, run_id: int, *, content: bytes, content_type: str | None) -> dict[str, Any]:
@@ -230,7 +234,12 @@ def _wait_for_review(session: Session, run: ProviderVerificationRun, request_id:
     if task is None or task.status in WAITING_TASK_STATUSES:
         return
     if task.status in TERMINAL_TASK_STATUSES:
-        raise AppError("GENERATION_TASK_TERMINAL_FAILURE", "Verification generation task failed or was cancelled.", 409)
+        failure_code = (
+            task.error_message
+            if task.error_message == "ANCHOR_ASPECT_RATIO_MISMATCH"
+            else "GENERATION_TASK_TERMINAL_FAILURE"
+        )
+        raise AppError(failure_code, "Verification generation task failed or was cancelled.", 409)
 
 
 def _approve_keyframe(session: Session, run: ProviderVerificationRun, shot_number: int) -> None:

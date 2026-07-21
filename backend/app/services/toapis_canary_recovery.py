@@ -6,6 +6,7 @@ from sqlmodel import Session, select
 
 from app.core.errors import AppError
 from app.models.entities import (
+    Asset,
     GenerationRequest,
     GenerationTask,
     GenerationUsageRecord,
@@ -15,10 +16,103 @@ from app.models.entities import (
     UsageCostSource,
     UsageRecordStatus,
     UsageRecordType,
+    TaskLog,
     utcnow,
 )
 from app.services import provider_management, task_service
 from app.models.schemas import ToApisVideoCanaryConsoleReviewRequest
+
+
+def record_existing_live_chain_image_result_review(
+    session: Session,
+    *,
+    run_id: int,
+    generation_request_id: int,
+    existing_remote_task_id: str,
+    actual_billing_units: Decimal,
+) -> dict[str, object]:
+    """Idempotently audit an already completed LIVE_CHAIN image task without advancing it."""
+    run = session.get(ProviderVerificationRun, run_id)
+    request = session.get(GenerationRequest, generation_request_id)
+    if run is None or run.verification_type != ProviderVerificationType.LIVE_CHAIN:
+        raise AppError("LIVE_CHAIN_RUN_NOT_FOUND", "The existing LIVE_CHAIN run was not found.", 409)
+    if request is None or request.id not in {run.shot_1_keyframe_request_id, run.shot_2_keyframe_request_id}:
+        raise AppError("LIVE_CHAIN_REQUEST_IDENTITY_INVALID", "The image request does not belong to the run.", 409)
+    tasks = session.exec(
+        select(GenerationTask).where(GenerationTask.generation_request_id == generation_request_id)
+    ).all()
+    if len(tasks) != 1 or tasks[0].retry_of_task_id is not None:
+        raise AppError("LIVE_CHAIN_TASK_IDENTITY_INVALID", "Exactly one root image task is required.", 409)
+    task = tasks[0]
+    expected_business_id = "".join(
+        char for char in task.idempotency_key if char.isascii() and (char.isalnum() or char in "-_")
+    )[:96]
+    expected_remote_job_id = f"image:{existing_remote_task_id}"
+    if (
+        task.provider_id != "toapis"
+        or task.task_type.value != "KEYFRAME_GENERATION"
+        or expected_business_id != "generation-request52task-typeKEYFRAME_GENERATIONretry-ofroot"
+    ):
+        raise AppError("LIVE_CHAIN_BUSINESS_ID_MISMATCH", "The persisted task identity is invalid.", 409)
+    if task.remote_job_id != expected_remote_job_id:
+        raise AppError("REMOTE_TASK_ID_CONFLICT", "The persisted remote task ID conflicts with the review.", 409)
+    asset = session.get(Asset, task.result_asset_id) if task.result_asset_id else None
+    if task.status.value != "SUCCEEDED" or asset is None or asset.type.value != "KEYFRAME":
+        raise AppError("LIVE_CHAIN_RESULT_NOT_RECOVERED", "The existing image result is not registered.", 409)
+    if actual_billing_units != Decimal("6.3"):
+        raise AppError("CONSOLE_REVIEW_EVIDENCE_INVALID", "The reviewed image billing must be 6.3 TOAPIS_CREDIT.", 409)
+
+    existing = session.exec(
+        select(GenerationUsageRecord).where(
+            GenerationUsageRecord.generation_task_id == task.id,
+            GenerationUsageRecord.record_type == UsageRecordType.MANUAL_ADJUSTMENT,
+        )
+    ).first()
+    if existing is None:
+        existing = GenerationUsageRecord(
+            project_id=task.project_id,
+            shot_id=task.shot_id,
+            generation_request_id=task.generation_request_id,
+            generation_task_id=task.id,
+            attempt_number=task.attempt_number,
+            record_type=UsageRecordType.MANUAL_ADJUSTMENT,
+            status=UsageRecordStatus.ACTUAL,
+            currency="TOAPIS_CREDIT",
+            billing_unit="TOAPIS_CREDIT",
+            estimated_cost="6.3",
+            actual_cost="6.3",
+            cost_source=UsageCostSource.MANUAL,
+            actual_units_json=provider_management.dumps({"generated_images": 1}),
+            provider_usage_json=provider_management.dumps({"source": "TOAPIS_CONSOLE_REVIEW"}),
+        )
+        session.add(existing)
+    elif existing.actual_cost != "6.3" or existing.billing_unit != "TOAPIS_CREDIT":
+        raise AppError("CONSOLE_REVIEW_CONFLICT", "A conflicting manual billing review already exists.", 409)
+
+    request.estimated_billing_units = "6.3"
+    run.actual_cost = "6.3"
+    summary = provider_management.loads_dict(run.summary_json)
+    summary["actual_billing_source"] = "TOAPIS_CONSOLE_REVIEW"
+    summary["historical_image_submits"] = 1
+    summary["new_image_submits"] = 0
+    run.summary_json = provider_management.dumps(summary)
+    for message in ("EXISTING_REMOTE_TASK_BOUND", "INLINE_RESULT_RECOVERY_STARTED"):
+        already_logged = session.exec(
+            select(TaskLog).where(TaskLog.task_id == task.id, TaskLog.message == message)
+        ).first()
+        if already_logged is None:
+            session.add(TaskLog(request_id=request.id, task_id=task.id, shot_id=task.shot_id, message=message))
+    session.add(request)
+    session.add(run)
+    session.commit()
+    return {
+        "run_id": run.id or 0,
+        "task_id": task.id or 0,
+        "asset_id": asset.id or 0,
+        "actual_billing_units": "6.3",
+        "actual_billing_source": "TOAPIS_CONSOLE_REVIEW",
+        "new_image_submits": 0,
+    }
 
 
 def prepare_existing_result_recovery(

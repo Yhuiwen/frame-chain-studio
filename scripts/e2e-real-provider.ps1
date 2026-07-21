@@ -13,10 +13,15 @@ param(
     [switch]$AutoApproveForVerification,
     [switch]$CanaryImageOnly,
     [switch]$CanaryVideoFirstLast,
-    [switch]$PlanOnly
+    [switch]$PlanOnly,
+    [switch]$RecoveryPlanOnly,
+    [int]$FailedRunId,
+    [int]$RecoverFailedRunId,
+    [string]$RecoveryPlanHash
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Net.Http
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendRoot = Join-Path $repoRoot "backend"
 
@@ -24,6 +29,7 @@ Write-Host "Provider: TOAPIS"
 Write-Host "Image model: doubao-seedream-5-0"
 Write-Host "Video model: viduq3-pro"
 if ($CanaryImageOnly -and $CanaryVideoFirstLast) { throw "CANARY_MODES_ARE_MUTUALLY_EXCLUSIVE" }
+if ($PlanOnly -and $RecoveryPlanOnly) { throw "PLAN_MODES_ARE_MUTUALLY_EXCLUSIVE" }
 if ($CanaryImageOnly) {
     Write-Host "Mode: paid image canary; Shots: 1; image tasks: max 1; video tasks: 0"
 } elseif ($CanaryVideoFirstLast) {
@@ -35,6 +41,22 @@ if ($CanaryVideoFirstLast) {
     Write-Host "Video duration: 1s; resolution: 720p; audio: false"
 } else {
     Write-Host "Video duration: 4s; resolution: 720p; audio: false; image resolution: 2K"
+}
+
+if ($RecoveryPlanOnly) {
+    if (-not $ConfirmLive -or -not $ExecutePaid) { throw "RECOVERY_PLAN_CONFIRMATION_REQUIRED" }
+    if ($FailedRunId -le 0) { throw "FAILED_RUN_ID_REQUIRED" }
+    if ($BillingUnit -ne "TOAPIS_CREDIT" -or $MaxBillingUnits -ne [decimal]190) { throw "RECOVERY_LINEAGE_BUDGET_INVALID" }
+    $planner = Join-Path $PSScriptRoot "toapis_recovery_plan.py"
+    & python $planner --failed-run-id $FailedRunId --billing-unit $BillingUnit `
+        --max-billing-units ([string]$MaxBillingUnits) --pricing-snapshot-hash $PricingSnapshotHash
+    if ($LASTEXITCODE -ne 0) { throw "RECOVERY_PLAN_FAILED" }
+    exit 0
+}
+
+if ($RecoverFailedRunId -gt 0) {
+    if ([string]::IsNullOrWhiteSpace($RecoveryPlanHash)) { throw "RECOVERY_PLAN_HASH_REQUIRED" }
+    throw "RECOVERY_EXECUTION_REQUIRES_EXPLICIT_FUTURE_IMPLEMENTATION"
 }
 
 if (-not $ConfirmLive) {

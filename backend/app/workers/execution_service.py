@@ -34,6 +34,7 @@ from app.providers.models import (
 )
 from app.providers.registry import ProviderRegistry
 from app.services import live_orchestration, provider_management, task_service, worker_status
+from app.services.video_input_normalization import normalize_video_input_frame
 from app.workers.request_factory import ProviderRequestFactory
 from app.workers.settings import WorkerSettings
 from app.workers.lease_guard import LeaseLostError, TaskLeaseGuard, TaskLeaseGuardConfig
@@ -481,6 +482,14 @@ class ProviderExecutionService:
             and payload.get("generation_mode") == "FIRST_LAST_FRAME"
             and len(input_asset_ids) >= 2
         ):
+            for asset_id, frame_role in zip(input_asset_ids[:2], ("START", "END"), strict=True):
+                normalized = normalize_video_input_frame(
+                    session,
+                    source_asset_id=asset_id,
+                    frame_role=frame_role,
+                )
+                assets[asset_id] = normalized.asset
+                paths[asset_id] = Path(normalized.asset.path).resolve()
             _validate_toapis_video_anchors(
                 [paths[input_asset_ids[0]], paths[input_asset_ids[1]]],
                 max_pixels=settings.result_max_image_pixels,

@@ -27,6 +27,7 @@ class AssetType(str, Enum):
     TAIL_FRAME = "TAIL_FRAME"
     START_FRAME = "START_FRAME"
     PROJECT_RENDER = "PROJECT_RENDER"
+    VIDEO_INPUT_FRAME = "VIDEO_INPUT_FRAME"
 
 
 class AssetStatus(str, Enum):
@@ -281,6 +282,7 @@ class ProviderVerificationType(str, Enum):
     LIVE_CHAIN = "LIVE_CHAIN"
     LIVE_CANARY = "LIVE_CANARY"
     LIVE_VIDEO_CANARY = "LIVE_VIDEO_CANARY"
+    LIVE_TWO_SHOT_RECOVERY = "LIVE_TWO_SHOT_RECOVERY"
 
 
 class ProviderVerificationStatus(str, Enum):
@@ -802,7 +804,10 @@ class ProjectBudgetPolicy(SQLModel, table=True):
 
 
 class ProviderVerificationRun(SQLModel, table=True):
-    __table_args__ = (Index("ix_providerverification_provider_created", "provider_profile_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_providerverification_provider_created", "provider_profile_id", "created_at"),
+        UniqueConstraint("recovery_of_run_id", name="uq_providerverification_recovery_of_run"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     provider_profile_id: int = Field(foreign_key="providerprofile.id", index=True)
@@ -839,6 +844,21 @@ class ProviderVerificationRun(SQLModel, table=True):
     summary_json: str = Field(default="{}")
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=1000)
+    recovery_of_run_id: int | None = Field(default=None, foreign_key="providerverificationrun.id", index=True)
+    lineage_root_run_id: int | None = Field(default=None, foreign_key="providerverificationrun.id", index=True)
+    normalized_start_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    normalized_end_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    reused_keyframe_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    historical_image_submits: int = 0
+    historical_video_submits: int = 0
+    remaining_image_submit_limit: int | None = None
+    remaining_video_submit_limit: int | None = None
+    historical_billing_units: str | None = Field(default=None, max_length=80)
+    estimated_remaining_billing_units: str | None = Field(default=None, max_length=80)
+    estimated_lineage_billing_units: str | None = Field(default=None, max_length=80)
+    maximum_lineage_billing_units: str | None = Field(default=None, max_length=80)
+    recovery_plan_hash: str | None = Field(default=None, max_length=64, index=True)
+    recovery_authorization_reference: str | None = Field(default=None, max_length=200)
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
@@ -954,6 +974,37 @@ class GenerationTask(SQLModel, table=True):
     lock_version: int = Field(default=0)
     idempotency_key: str = Field(index=True)
     result_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    recovery_run_id: int | None = Field(default=None, foreign_key="providerverificationrun.id", index=True)
+
+
+class VideoInputFrameNormalization(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "source_asset_id", "normalization_version", "target_width", "target_height",
+            name="uq_video_input_normalization_source_version_size",
+        ),
+        UniqueConstraint("normalized_asset_id", name="uq_video_input_normalization_asset"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    source_asset_id: int = Field(foreign_key="asset.id", index=True)
+    normalized_asset_id: int = Field(foreign_key="asset.id", index=True)
+    purpose: str = Field(default="VIDEO_INPUT_FRAME", max_length=80)
+    frame_role: str = Field(max_length=16)
+    normalization_version: str = Field(default="video-input-v1", max_length=80, index=True)
+    target_width: int = 1280
+    target_height: int = 720
+    resize_mode: str = Field(default="contain", max_length=40)
+    crop_applied: bool = False
+    padding_applied: bool = False
+    padding_left: int = 0
+    padding_right: int = 0
+    padding_top: int = 0
+    padding_bottom: int = 0
+    padding_color: str = Field(max_length=32)
+    source_sha256: str = Field(max_length=64)
+    normalized_sha256: str = Field(max_length=64, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class WorkerHeartbeat(SQLModel, table=True):

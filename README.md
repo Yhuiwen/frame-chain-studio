@@ -759,3 +759,5 @@ Frame Chain Studio supports a human-reviewed script workflow:
 - Apply selected ShotDrafts only after user review; repeated apply returns the existing `applied_shot_id`.
 
 The parser is a deterministic rules parser, not an LLM script-understanding system. It preserves unrecognized text for review and does not guarantee full screenplay semantics. Unsupported in this release: PDF OCR, image OCR, Final Draft FDX, web scraping, subtitles, automatic Character creation, automatic Location selection, LLM parser calls, real Provider online validation, audio, and timeline effects.
+
+Failed TOAPIS two-shot runs use immutable lineage recovery planning. Video start/end inputs are normalized to audited 1280×720 RGB PNG Assets, and `RecoveryPlanOnly` must produce a matching plan hash before separately authorized recovery can be considered.

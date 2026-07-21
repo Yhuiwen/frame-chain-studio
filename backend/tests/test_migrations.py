@@ -185,7 +185,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0018"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0020"
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE remote_model IN ('doubao-seedream-5-0', 'viduq3-pro')")).scalar_one() == 2
         for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
@@ -670,7 +670,7 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     }
     assert expected.issubset(set(columns(db_path, "providerverificationrun")))
     with engine.connect() as connection:
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0018"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0020"
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")
     command.upgrade(config, "head")
@@ -710,6 +710,32 @@ def test_toapis_balance_canary_migration_fields(tmp_path: Path) -> None:
     assert "canary_image_only" in set(columns(db_path, "providerverificationrun"))
     command.downgrade(config, "20260721_0016")
     assert "account_balance_evidence_type" not in set(columns(db_path, "providerprofile"))
+    command.upgrade(config, "head")
+
+
+def test_failed_run_recovery_migration_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "failed-run-recovery.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    assert {
+        "recovery_of_run_id", "lineage_root_run_id", "normalized_start_asset_id",
+        "normalized_end_asset_id", "reused_keyframe_asset_id", "historical_image_submits", "historical_video_submits",
+        "remaining_image_submit_limit", "remaining_video_submit_limit", "historical_billing_units",
+        "estimated_remaining_billing_units", "estimated_lineage_billing_units",
+        "maximum_lineage_billing_units", "recovery_plan_hash", "recovery_authorization_reference",
+    }.issubset(set(columns(db_path, "providerverificationrun")))
+    assert "recovery_run_id" in set(columns(db_path, "generationtask"))
+    assert {
+        "source_asset_id", "normalized_asset_id", "frame_role", "normalization_version",
+        "target_width", "target_height", "padding_color", "normalized_sha256",
+    }.issubset(set(columns(db_path, "videoinputframenormalization")))
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.connect() as connection:
+        indexes = connection.execute(sa.text("PRAGMA index_list(providerverificationrun)")).all()
+        assert any(row[1] == "sqlite_autoindex_providerverificationrun_1" or row[2] for row in indexes)
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+    command.downgrade(config, "20260721_0018")
+    assert "recovery_of_run_id" not in set(columns(db_path, "providerverificationrun"))
     command.upgrade(config, "head")
 
 

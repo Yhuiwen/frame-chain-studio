@@ -93,6 +93,7 @@
 - Applying ShotDrafts must be idempotent and must not overwrite existing formal Shots or completed generation results.
 - TOAPIS uses the dedicated `ToApisProvider`, fixed provider key `toapis`, official v1 base URL, and `TOAPIS_API_KEY`; never route it through arbitrary mapped fields or persist the secret.
 - TOAPIS Vidu Q3 Pro `image_urls` are reserved for ordered start/end anchors. Provider `last_frame_url` is audit-only and never replaces the local FFmpeg locked tail.
+- TOAPIS first/last video anchors must be normalized to audited 1280x720 RGB PNG `VIDEO_INPUT_FRAME` assets before upload. Failed paid runs are immutable; recovery requires a separate lineage run, an exact Recovery Plan hash, and new explicit authorization.
 - TOAPIS paid two-Shot verification is a persisted `ProviderVerificationRun` state machine. Each advance is short and idempotent, recovery uses the run ID, and Shot 2 must inherit Shot 1's validated local FFmpeg tail asset. `ConfirmLive` never authorizes payment without the independent `ExecutePaid` gate.
 
 ## Phase Two Order
