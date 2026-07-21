@@ -1294,6 +1294,58 @@ class VisualContinuityReviewEvent(SQLModel, table=True):
     reviewed_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class VisualRegenerationPlan(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("source_run_id", "plan_version", "config_hash", "strategy", name="uq_visualregen_source_version_config_strategy"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    source_run_id: int = Field(foreign_key="providerverificationrun.id", index=True)
+    source_render_id: int | None = Field(default=None, foreign_key="projectrender.id")
+    source_visual_report_ids_json: str = Field(default="[]")
+    plan_version: str = Field(index=True)
+    config_hash: str = Field(max_length=64, index=True)
+    plan_hash: str = Field(max_length=64, index=True)
+    status: str = Field(default="DRAFT", index=True)
+    scope: str = Field(index=True)
+    strategy: str = Field(index=True)
+    target_shot_ids_json: str = Field(default="[]")
+    preserved_shot_ids_json: str = Field(default="[]")
+    source_asset_ids_json: str = Field(default="[]")
+    replacement_asset_policy: str = "LOCAL_TAIL_LINEAGE_ONLY"
+    prompt_contract_json: str = Field(default="{}")
+    keyframe_plan_json: str = Field(default="{}")
+    video_plan_json: str = Field(default="{}")
+    reason_codes_json: str = Field(default="[]")
+    automatic_recommendation: str = ""
+    human_decision: str = Field(default="PENDING", index=True)
+    review_comment: str = Field(default="", max_length=2000)
+    estimated_image_submits: int = 0
+    estimated_video_submits: int = 0
+    estimated_video_seconds: str = "0"
+    estimated_billing_units: str = "0"
+    maximum_billing_units: str = "0"
+    billing_unit: str = "TOAPIS_CREDIT"
+    pricing_snapshot_hash: str | None = Field(default=None, max_length=64)
+    superseded_by_plan_id: int | None = Field(default=None, foreign_key="visualregenerationplan.id")
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+    approved_at: datetime | None = None
+    executed_at: datetime | None = None
+
+
+class VisualRegenerationReviewEvent(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    plan_id: int = Field(foreign_key="visualregenerationplan.id", index=True)
+    decision: str = Field(index=True)
+    expected_plan_hash: str = Field(max_length=64)
+    review_comment: str = Field(default="", max_length=2000)
+    acknowledged_visual_failures: bool = False
+    acknowledged_estimated_cost: bool = False
+    acknowledged_no_execution: bool = False
+    reviewed_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class TaskCommand(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("command_type", "idempotency_key", name="uq_taskcommand_type_idempotency"),

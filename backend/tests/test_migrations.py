@@ -198,7 +198,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260721_0023"
+            == "20260721_0024"
         )
         assert (
             connection.execute(
@@ -746,7 +746,7 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     with engine.connect() as connection:
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260721_0023"
+            == "20260721_0024"
         )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")
@@ -921,6 +921,19 @@ def test_visual_review_event_migration_from_0022(tmp_path: Path) -> None:
         "resulting_production_gate_status",
         "reviewed_at",
     }.issubset(set(columns(db_path, "visualcontinuityreviewevent")))
+
+
+def test_visual_regeneration_plan_migration_from_0023(tmp_path: Path) -> None:
+    db_path = tmp_path / "visual-regeneration.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260721_0023")
+    command.upgrade(config, "head")
+    assert {"source_run_id", "plan_hash", "strategy", "prompt_contract_json", "estimated_billing_units"}.issubset(
+        set(columns(db_path, "visualregenerationplan"))
+    )
+    assert {"plan_id", "decision", "expected_plan_hash", "acknowledged_no_execution"}.issubset(
+        set(columns(db_path, "visualregenerationreviewevent"))
+    )
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:

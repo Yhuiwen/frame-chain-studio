@@ -107,7 +107,7 @@ watch(projectId, () => void load()); onMounted(() => void load());
 
 <template>
   <main class="visual-review-page">
-    <header class="review-header"><div><h1>视觉连续性审核</h1><p>供应商任务成功和视频可播放，不代表生产视觉质量通过。</p></div><el-button @click="reanalyze" :loading="state === 'submitting'">重新进行离线分析（不调用 TOAPIS、零费用）</el-button></header>
+    <header class="review-header"><div><h1>视觉连续性审核</h1><p>供应商任务成功和视频可播放，不代表生产视觉质量通过。</p></div><div><el-button @click="$router.push(`/projects/${projectId}/visual-regeneration`)">视觉再生成 PlanOnly</el-button><el-button @click="reanalyze" :loading="state === 'submitting'">重新进行离线分析（不调用 TOAPIS、零费用）</el-button></div></header>
     <el-alert v-if="state === 'error' || state === 'conflict'" :title="errorMessage" type="error" show-icon />
     <el-empty v-else-if="state === 'empty'" description="该项目暂无视觉分析报告" />
     <div v-else class="review-layout" v-loading="state === 'loading'">

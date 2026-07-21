@@ -29,6 +29,7 @@ from app.models.entities import (
     Shot,
     TaskCommandType,
     VisualContinuityReport,
+    VisualRegenerationPlan,
 )
 from app.models.schemas import (
     CharacterCreate,
@@ -108,6 +109,8 @@ from app.models.schemas import (
     VisualContinuityHumanReviewRequest,
     VisualContinuityReportRead,
     VisualContinuityReviewEventRead,
+    VisualRegenerationPlanRequest,
+    VisualRegenerationReviewRequest,
 )
 from app.providers.config_loader import load_registry, load_registry_from_env
 from app.providers.exceptions import ProviderError
@@ -129,6 +132,7 @@ from app.services import (
     toapis_verification,
     toapis_video_canary,
     visual_continuity_service,
+    visual_regeneration,
     worker_status,
 )
 from app.workers import render_service
@@ -1334,6 +1338,54 @@ def get_visual_production_gate(
         "automatic_visual_status": report.automatic_visual_status,
         "human_visual_status": report.human_visual_status,
     }
+
+
+@router.post("/visual-regeneration/plan-only")
+def visual_regeneration_plan_only(
+    payload: VisualRegenerationPlanRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    if payload.ready_for_paid_execution or payload.actual_billing_units is not None:
+        raise AppError("REGENERATION_EXECUTION_FIELDS_FORBIDDEN", "Execution readiness and actual billing are server-owned.", 422)
+    plan = visual_regeneration.build_plan_only(
+        session,
+        project_id=payload.project_id,
+        source_run_id=payload.source_run_id,
+        strategy=payload.strategy,
+        maximum_billing_units=payload.maximum_billing_units,
+    )
+    if payload.save_draft:
+        saved = visual_regeneration.save_draft(session, plan)
+        plan["savedDraftId"] = saved.id
+        plan["databaseUpdated"] = True
+    return plan
+
+
+@router.get("/visual-regeneration/plans/{plan_id}")
+def get_visual_regeneration_plan(
+    plan_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
+    plan = session.get(VisualRegenerationPlan, plan_id)
+    if plan is None:
+        raise AppError("REGENERATION_PLAN_NOT_FOUND", "Plan was not found.", 404)
+    return visual_regeneration.plan_payload(plan)
+
+
+@router.post("/visual-regeneration/plans/{plan_id}/review")
+def review_visual_regeneration_plan(
+    plan_id: int,
+    payload: VisualRegenerationReviewRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    plan = visual_regeneration.review_plan(
+        session,
+        plan_id,
+        decision=payload.decision,
+        expected_plan_hash=payload.expected_plan_hash,
+        comment=payload.review_comment,
+        acknowledgements=(payload.acknowledged_visual_failures, payload.acknowledged_estimated_cost, payload.acknowledged_no_execution),
+    )
+    return visual_regeneration.plan_payload(plan)
 
 
 @router.delete("/shots/{shot_id}", status_code=204)

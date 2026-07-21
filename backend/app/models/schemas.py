@@ -465,6 +465,25 @@ class VisualContinuityReviewEventRead(BaseModel):
     reviewed_at: datetime
 
 
+class VisualRegenerationPlanRequest(BaseModel):
+    project_id: int
+    source_run_id: int
+    strategy: str = Field(max_length=80)
+    maximum_billing_units: Decimal = Field(default=Decimal("190"), gt=0)
+    save_draft: bool = False
+    ready_for_paid_execution: bool = False
+    actual_billing_units: Decimal | None = None
+
+
+class VisualRegenerationReviewRequest(BaseModel):
+    decision: str = Field(max_length=20)
+    expected_plan_hash: str = Field(min_length=64, max_length=64)
+    review_comment: str = Field(default="", max_length=2000)
+    acknowledged_visual_failures: bool
+    acknowledged_estimated_cost: bool
+    acknowledged_no_execution: bool
+
+
 class CharacterBase(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)

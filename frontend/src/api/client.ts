@@ -145,6 +145,19 @@ export interface VisualPreviewManifest {
   crossShotSeam?: Record<string, unknown> | null;
 }
 
+export interface VisualRegenerationPlanOnly {
+  strategy: string; status: "BLOCKED" | "READY_FOR_REVIEW"; scope: string;
+  regenerationPlanHash: string; promptContractHash: string; targetShotIds: number[];
+  reusedAssets: number[]; reasonCodes: string[]; blockedReasons: string[];
+  promptContract: Record<string, Record<string, unknown>>;
+  compiledImagePrompt: Record<string, string>; compiledVideoPrompt: Record<string, string>;
+  keyframeDeltaStatus: string; splitSuggestion: Record<string, unknown>;
+  imageRequests: number; videoRequests: number; totalVideoSeconds: string;
+  estimatedBillingUnits: string; maximumBillingUnits: string; billingUnit: string;
+  pricingReviewed: boolean; pricingFresh: boolean; crossShotSeamStatus: string;
+  readyForHumanReview: boolean; readyForPaidExecution: false; recommendationReason: string;
+}
+
 export interface GenerationRequest {
   id: number;
   project_id: number;
@@ -824,6 +837,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  planVisualRegeneration: (body: { project_id: number; source_run_id: number; strategy: string; maximum_billing_units: string; save_draft?: boolean }) =>
+    request<VisualRegenerationPlanOnly>("/api/visual-regeneration/plan-only", { method: "POST", body: JSON.stringify(body) }),
   mediaUrl: (assetId: number) => `${API_BASE}/api/media/${assetId}`,
   visualFrameUrl: (reportId: number, timestamp: number) =>
     `${API_BASE}/api/visual-continuity/reports/${reportId}/frames/${timestamp}`,
