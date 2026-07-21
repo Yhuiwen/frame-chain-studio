@@ -64,6 +64,7 @@ def build_recovery_plan(
     failed_run_id: int,
     maximum_billing_units: Decimal,
     pricing_snapshot_hash: str,
+    allow_live_enabled: bool = False,
 ) -> dict[str, Any]:
     checks: dict[str, bool] = {}
     run = session.get(ProviderVerificationRun, failed_run_id)
@@ -116,7 +117,7 @@ def build_recovery_plan(
     profile = session.exec(select(ProviderProfile).where(ProviderProfile.provider_key == "toapis")).one()
     now = datetime.now(timezone.utc)
     models = session.exec(select(ProviderModelProfile).where(ProviderModelProfile.provider_profile_id == profile.id)).all()
-    checks["liveDisabled"] = not profile.live_orchestration_enabled
+    checks["liveDisabled"] = not profile.live_orchestration_enabled or allow_live_enabled
     checks["noActiveRuns"] = not session.exec(
         select(ProviderVerificationRun).where(
             col(ProviderVerificationRun.status).in_([ProviderVerificationStatus.PENDING, ProviderVerificationStatus.RUNNING])
@@ -211,11 +212,19 @@ def create_authorized_recovery_run(
 ) -> ProviderVerificationRun:
     if not authorization_reference.strip():
         raise AppError("RECOVERY_AUTHORIZATION_REQUIRED", "Explicit recovery authorization is required.", 409)
+    existing = session.exec(
+        select(ProviderVerificationRun).where(ProviderVerificationRun.recovery_of_run_id == failed_run_id)
+    ).first()
+    if existing is not None:
+        if existing.recovery_plan_hash != recovery_plan_hash:
+            raise AppError("RECOVERY_PLAN_HASH_MISMATCH", "The recovery plan is stale or invalid.", 409)
+        return existing
     plan = build_recovery_plan(
         session,
         failed_run_id=failed_run_id,
         maximum_billing_units=MAXIMUM_LINEAGE,
         pricing_snapshot_hash=EXPECTED_PRICING_HASH,
+        allow_live_enabled=True,
     )
     if not plan["ready"] or recovery_plan_hash != plan["recoveryPlanHash"]:
         raise AppError("RECOVERY_PLAN_HASH_MISMATCH", "The recovery plan is stale or invalid.", 409)
@@ -256,6 +265,53 @@ def create_authorized_recovery_run(
     return recovery
 
 
+def start_authorized_recovery_run(
+    session: Session,
+    *,
+    failed_run_id: int,
+    recovery_plan_hash: str,
+    authorization_reference: str,
+) -> ProviderVerificationRun:
+    from app.services import live_orchestration, task_service
+
+    profile = live_orchestration.get_toapis_profile(session)
+    if not profile.live_orchestration_enabled:
+        raise AppError("LIVE_ORCHESTRATION_DISABLED", "TOAPIS live orchestration is disabled.", 409)
+    recovery = create_authorized_recovery_run(
+        session,
+        failed_run_id=failed_run_id,
+        recovery_plan_hash=recovery_plan_hash,
+        authorization_reference=authorization_reference,
+    )
+    failed = session.get(ProviderVerificationRun, failed_run_id)
+    if failed is None or failed.shot_1_video_request_id is None:
+        raise AppError("FAILED_VIDEO_TASK_MISSING", "The failed video task is missing.", 409)
+    source = _failed_video_task(session, failed)
+    retry = task_service.manual_retry_task(
+        session,
+        source.id or 0,
+        idempotency_key=f"recovery-run:{recovery.id}:source-task:{source.id}",
+        reason="Authorized failed-run recovery; source failed before Provider submit.",
+    )
+    if retry.remote_job_id is not None or retry.retry_of_task_id != source.id:
+        raise AppError("RECOVERY_TASK_IDENTITY_INVALID", "The recovery task identity is invalid.", 409)
+    retry.max_attempts = 1
+    retry.recovery_run_id = recovery.id
+    recovery.status = ProviderVerificationStatus.RUNNING
+    recovery.current_stage = "SHOT_1_VIDEO_REQUESTED"
+    recovery.shot_1_keyframe_request_id = failed.shot_1_keyframe_request_id
+    recovery.shot_1_video_request_id = failed.shot_1_video_request_id
+    recovery.initial_anchor_asset_id = failed.initial_anchor_asset_id
+    recovery.auto_approve_for_verification = True
+    recovery.max_cost = "190"
+    recovery.estimated_billing_units = "166.3"
+    session.add(retry)
+    session.add(recovery)
+    session.commit()
+    session.refresh(recovery)
+    return recovery
+
+
 def _failed_video_task(session: Session, run: ProviderVerificationRun) -> GenerationTask:
     task = _failed_video_task_or_none(session, run)
     if task is None:
@@ -267,7 +323,10 @@ def _failed_video_task_or_none(session: Session, run: ProviderVerificationRun) -
     if run.shot_1_video_request_id is None:
         return None
     tasks = session.exec(
-        select(GenerationTask).where(GenerationTask.generation_request_id == run.shot_1_video_request_id)
+        select(GenerationTask).where(
+            GenerationTask.generation_request_id == run.shot_1_video_request_id,
+            col(GenerationTask.retry_of_task_id).is_(None),
+        )
     ).all()
     return tasks[0] if len(tasks) == 1 else None
 

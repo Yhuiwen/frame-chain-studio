@@ -15,11 +15,13 @@ from app.models.entities import (
     AssetType,
     GenerationKind,
     GenerationRequest,
+    GenerationTask,
     Project,
     ProjectRender,
     ProjectRenderStatus,
     ProviderVerificationRun,
     ProviderVerificationStatus,
+    ProviderVerificationType,
     ReliableTaskStatus,
     Shot,
     ShotStatus,
@@ -28,7 +30,7 @@ from app.models.entities import (
 )
 from app.models.schemas import GenerationStartRequest, ProjectCreate, ShotCreate
 from app.providers.config_loader import load_registry
-from app.services import live_orchestration, provider_management, provider_resolution, studio, structured
+from app.services import live_orchestration, provider_management, provider_resolution, studio, structured, task_service
 from app.workers import render_service
 
 WORKFLOW_VERSION = "toapis-two-shot-v1"
@@ -70,7 +72,10 @@ def advance(session: Session, run_id: int) -> dict[str, Any]:
         run = session.exec(
             select(ProviderVerificationRun).where(ProviderVerificationRun.id == run_id).with_for_update()
         ).first()
-    if run is None or run.verification_type.value != "LIVE_CHAIN":
+    if run is None or run.verification_type not in {
+        ProviderVerificationType.LIVE_CHAIN,
+        ProviderVerificationType.LIVE_TWO_SHOT_RECOVERY,
+    }:
         raise AppError("PROVIDER_VERIFICATION_RUN_NOT_FOUND", "Provider verification run was not found.", 404)
     stage = _stage(run)
     if stage in TERMINAL_STAGES:
@@ -219,6 +224,14 @@ def _create_generation(session: Session, run: ProviderVerificationRun, *, shot_n
             request = studio.start_video_generation_atomic(session, shot=shot, resolved=resolved, request_payload=resolved.request_payload(shot))
         provider_management.create_estimate_for_request(session, request)
         setattr(run, request_field, request.id)
+        if run.verification_type == ProviderVerificationType.LIVE_TWO_SHOT_RECOVERY:
+            task = studio.active_or_latest_task_for_request(session, request.id or 0)
+            if task is None:
+                raise AppError("RECOVERY_TASK_MISSING", "The recovery generation task is missing.", 409)
+            task.max_attempts = 1
+            task.recovery_run_id = run.id
+            session.add(task)
+            session.commit()
     target = ToApisVerificationStage[f"SHOT_{shot_number}_{'KEYFRAME' if kind == GenerationKind.KEYFRAME else 'VIDEO'}_REQUESTED"]
     _set_stage(session, run, target)
 
@@ -335,6 +348,15 @@ def _check_paid_gate(session: Session, run: ProviderVerificationRun, kind: Gener
     limit = IMAGE_LIMIT if kind == GenerationKind.KEYFRAME else VIDEO_LIMIT
     if len(count) >= limit:
         raise AppError("VERIFICATION_TASK_LIMIT_REACHED", "Verification generation request limit was reached.", 409)
+    if run.verification_type == ProviderVerificationType.LIVE_TWO_SHOT_RECOVERY:
+        tasks = session.exec(select(GenerationTask).where(
+            GenerationTask.project_id == run.verification_project_id,
+            GenerationTask.provider_id == "toapis",
+        )).all()
+        remote_count = sum(task.task_type == task_service.task_type_from_generation_kind(kind) and bool(task.remote_job_id) for task in tasks)
+        lineage_limit = 2
+        if remote_count >= lineage_limit:
+            raise AppError("RECOVERY_LINEAGE_REMOTE_LIMIT_REACHED", "The recovery lineage remote-task limit was reached.", 409)
 
 
 def _decimal(value: str | None, code: str) -> Decimal:

@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime
+from decimal import Decimal
 import tempfile
 
 from alembic.config import Config
@@ -84,6 +85,7 @@ from app.models.schemas import (
     ProviderVerificationAdvanceRead,
     ToApisAccountBalanceRequest,
     ToApisCanaryRecoveryRequest,
+    ToApisFailedRunRecoveryRequest,
     ToApisVideoCanaryConsoleReviewRequest,
     ToApisLiveEnableRequest,
     ToApisPricingReviewRequest,
@@ -94,7 +96,7 @@ from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
 from app.models.entities import ShotDraftStatus
-from app.services import live_orchestration, provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, toapis_canary, toapis_canary_recovery, toapis_verification, toapis_video_canary, worker_status
+from app.services import live_orchestration, provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, toapis_canary, toapis_canary_recovery, toapis_recovery_planning, toapis_verification, toapis_video_canary, worker_status
 from app.workers import render_service
 
 router = APIRouter()
@@ -297,6 +299,28 @@ def recover_existing_canary_result(
         existing_result_url=payload.existing_result_url,
         acknowledged=payload.acknowledge_existing_task_recovery,
     )
+
+
+@router.post("/provider-verification-runs/{run_id}/start-failed-run-recovery", response_model=ProviderVerificationRunRead, status_code=202)
+def start_failed_run_recovery(
+    run_id: int,
+    payload: ToApisFailedRunRecoveryRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    if (
+        not payload.acknowledged
+        or payload.billing_unit != "TOAPIS_CREDIT"
+        or payload.estimated_remaining_billing_units != Decimal("166.3")
+        or payload.maximum_lineage_billing_units != Decimal("190")
+    ):
+        raise AppError("RECOVERY_AUTHORIZATION_INVALID", "The failed-run recovery authorization is invalid.", 409)
+    recovery = toapis_recovery_planning.start_authorized_recovery_run(
+        session,
+        failed_run_id=run_id,
+        recovery_plan_hash=payload.recovery_plan_hash,
+        authorization_reference=payload.authorization_reference,
+    )
+    return provider_management.verification_payload(recovery)
 
 
 @router.post("/provider-verification-runs/{run_id}/video-canary-console-review")

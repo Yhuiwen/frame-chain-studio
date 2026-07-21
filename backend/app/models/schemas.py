@@ -297,6 +297,20 @@ class ProviderVerificationRunRead(BaseModel):
     failure_stage: str | None
     failure_code: str | None
     state_version: int
+    recovery_of_run_id: int | None = None
+    lineage_root_run_id: int | None = None
+    normalized_start_asset_id: int | None = None
+    normalized_end_asset_id: int | None = None
+    reused_keyframe_asset_id: int | None = None
+    historical_image_submits: int = 0
+    historical_video_submits: int = 0
+    remaining_image_submit_limit: int | None = None
+    remaining_video_submit_limit: int | None = None
+    historical_billing_units: str | None = None
+    estimated_remaining_billing_units: str | None = None
+    estimated_lineage_billing_units: str | None = None
+    maximum_lineage_billing_units: str | None = None
+    recovery_plan_hash: str | None = None
     summary: dict[str, object]
     error_code: str | None
     error_message: str | None
@@ -375,6 +389,15 @@ class ToApisVideoCanaryConsoleReviewRequest(BaseModel):
     actual_billing_units: Decimal = Field(gt=0)
     billing_unit: str = Field(max_length=40)
     evidence_type: str = Field(max_length=80)
+
+
+class ToApisFailedRunRecoveryRequest(BaseModel):
+    acknowledged: bool = False
+    recovery_plan_hash: str = Field(min_length=64, max_length=64)
+    billing_unit: str = Field(max_length=40)
+    estimated_remaining_billing_units: Decimal = Field(gt=0)
+    maximum_lineage_billing_units: Decimal = Field(gt=0)
+    authorization_reference: str = Field(min_length=1, max_length=200)
 
 
 class CharacterBase(BaseModel):

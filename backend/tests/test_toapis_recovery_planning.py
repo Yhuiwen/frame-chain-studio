@@ -5,7 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.core.errors import AppError
 from app.models.entities import (
@@ -32,10 +32,14 @@ from app.models.entities import (
     UsageRecordType,
     utcnow,
 )
+from app.models.schemas import ProviderVerificationRunRead
+from app.services import provider_management
+from app.services.toapis_recovery_billing import review_recovery_console_billing
 from app.services.toapis_recovery_planning import (
     EXPECTED_PRICING_HASH,
     build_recovery_plan,
     create_authorized_recovery_run,
+    start_authorized_recovery_run,
 )
 from app.services.video_input_normalization import normalize_video_input_frame
 
@@ -169,5 +173,97 @@ def test_recovery_run_requires_authorization_and_current_hash(session: Session, 
     assert recovery.verification_type == ProviderVerificationType.LIVE_TWO_SHOT_RECOVERY
     failed = session.get(ProviderVerificationRun, run.id)
     assert failed is not None and failed.status == ProviderVerificationStatus.FAILED
-    with pytest.raises(AppError, match="stale or invalid"):
-        create_authorized_recovery_run(session, failed_run_id=run.id or 0, recovery_plan_hash=plan["recoveryPlanHash"], authorization_reference="test-authorization")
+    duplicate = create_authorized_recovery_run(
+        session,
+        failed_run_id=run.id or 0,
+        recovery_plan_hash=plan["recoveryPlanHash"],
+        authorization_reference="test-authorization",
+    )
+    assert duplicate.id == recovery.id
+
+
+def test_authorized_recovery_start_creates_one_pre_submit_retry(session: Session, tmp_path: Path) -> None:
+    run = _configured_failed_run(session, tmp_path)
+    plan = build_recovery_plan(session, failed_run_id=run.id or 0, maximum_billing_units=Decimal("190"), pricing_snapshot_hash=EXPECTED_PRICING_HASH)
+    profile = session.get(ProviderProfile, run.provider_profile_id)
+    assert profile is not None
+    profile.live_orchestration_enabled = True
+    session.add(profile)
+    session.commit()
+    recovery = start_authorized_recovery_run(
+        session,
+        failed_run_id=run.id or 0,
+        recovery_plan_hash=plan["recoveryPlanHash"],
+        authorization_reference="test-authorization",
+    )
+    retries = session.exec(select(GenerationTask).where(col(GenerationTask.retry_of_task_id).is_not(None))).all()
+    assert len(retries) == 1
+    assert retries[0].remote_job_id is None
+    assert retries[0].max_attempts == 1
+    assert retries[0].recovery_run_id == recovery.id
+    assert recovery.status == ProviderVerificationStatus.RUNNING
+    assert recovery.current_stage == "SHOT_1_VIDEO_REQUESTED"
+    response = ProviderVerificationRunRead.model_validate(provider_management.verification_payload(recovery))
+    assert response.recovery_of_run_id == run.id
+    assert response.lineage_root_run_id == run.id
+    assert response.verification_project_id == run.verification_project_id
+    assert response.shot_1_id == run.shot_1_id
+    assert response.shot_2_id == run.shot_2_id
+    assert response.actual_cost is None
+    again = start_authorized_recovery_run(
+        session,
+        failed_run_id=run.id or 0,
+        recovery_plan_hash=plan["recoveryPlanHash"],
+        authorization_reference="test-authorization",
+    )
+    assert again.id == recovery.id
+    assert len(session.exec(select(GenerationTask).where(col(GenerationTask.retry_of_task_id).is_not(None))).all()) == 1
+
+
+def test_recovery_billing_review_is_atomic_and_idempotent(session: Session, tmp_path: Path) -> None:
+    failed = _configured_failed_run(session, tmp_path)
+    plan = build_recovery_plan(session, failed_run_id=failed.id or 0, maximum_billing_units=Decimal("190"), pricing_snapshot_hash=EXPECTED_PRICING_HASH)
+    recovery = create_authorized_recovery_run(
+        session, failed_run_id=failed.id or 0, recovery_plan_hash=plan["recoveryPlanHash"], authorization_reference="test",
+    )
+    project_id = failed.verification_project_id or 0
+    shot_id = failed.shot_1_id or 0
+    for index, (kind, task_type, remote_id) in enumerate(
+        [
+            (GenerationKind.VIDEO, GenerationTaskType.VIDEO_GENERATION, "video:one"),
+            (GenerationKind.KEYFRAME, GenerationTaskType.KEYFRAME_GENERATION, "image:two"),
+            (GenerationKind.VIDEO, GenerationTaskType.VIDEO_GENERATION, "video:three"),
+        ], start=1,
+    ):
+        request = GenerationRequest(project_id=project_id, shot_id=shot_id, kind=kind, provider_name="toapis")
+        session.add(request)
+        session.flush()
+        session.add(GenerationTask(
+            generation_request_id=request.id or 0, project_id=project_id, shot_id=shot_id,
+            task_type=task_type, provider_id="toapis", status=ReliableTaskStatus.SUCCEEDED,
+            remote_job_id=remote_id, max_attempts=1, idempotency_key=f"billing-{index}", recovery_run_id=recovery.id,
+        ))
+    recovery.status = ProviderVerificationStatus.PASSED
+    session.add(recovery)
+    session.commit()
+    recovery_tasks = session.exec(select(GenerationTask).where(GenerationTask.recovery_run_id == recovery.id)).all()
+    reviews = {task.id or 0: (task.remote_job_id or "", Decimal(str(index))) for index, task in enumerate(recovery_tasks, start=1)}
+    result = review_recovery_console_billing(
+        session, run_id=recovery.id or 0, acknowledged=True, task_reviews=reviews,
+        billing_unit="TOAPIS_CREDIT", evidence_type="TOAPIS_CONSOLE_REVIEW",
+    )
+    assert result["recovery_actual_billing_units"] == "6"
+    assert result["lineage_actual_billing_units"] == "12.3"
+    again = review_recovery_console_billing(
+        session, run_id=recovery.id or 0, acknowledged=True, task_reviews=reviews,
+        billing_unit="TOAPIS_CREDIT", evidence_type="TOAPIS_CONSOLE_REVIEW",
+    )
+    assert again == result
+    with pytest.raises(AppError, match="different manual billing review"):
+        changed = dict(reviews)
+        task_id = next(iter(changed))
+        changed[task_id] = (changed[task_id][0], Decimal("99"))
+        review_recovery_console_billing(
+            session, run_id=recovery.id or 0, acknowledged=True, task_reviews=changed,
+            billing_unit="TOAPIS_CREDIT", evidence_type="TOAPIS_CONSOLE_REVIEW",
+        )

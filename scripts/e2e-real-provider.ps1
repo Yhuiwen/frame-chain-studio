@@ -24,6 +24,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendRoot = Join-Path $repoRoot "backend"
+$RecoverySourceRunId = $RecoverFailedRunId
 
 Write-Host "Provider: TOAPIS"
 Write-Host "Image model: doubao-seedream-5-0"
@@ -56,7 +57,8 @@ if ($RecoveryPlanOnly) {
 
 if ($RecoverFailedRunId -gt 0) {
     if ([string]::IsNullOrWhiteSpace($RecoveryPlanHash)) { throw "RECOVERY_PLAN_HASH_REQUIRED" }
-    throw "RECOVERY_EXECUTION_REQUIRES_EXPLICIT_FUTURE_IMPLEMENTATION"
+    if (-not $ConfirmLive -or -not $ExecutePaid) { throw "RECOVERY_EXECUTION_AUTHORIZATION_REQUIRED" }
+    if ($BillingUnit -ne "TOAPIS_CREDIT" -or $MaxBillingUnits -ne [decimal]190) { throw "RECOVERY_LINEAGE_BUDGET_INVALID" }
 }
 
 if (-not $ConfirmLive) {
@@ -164,13 +166,25 @@ try {
         $enableBody = @{
             acknowledged = $true
             pricing_snapshot_hash = $PricingSnapshotHash
-            reason = if ($CanaryImageOnly) { "Explicitly authorized isolated paid image canary." } elseif ($CanaryVideoFirstLast) { "Explicitly authorized isolated paid video canary." } else { "Explicitly authorized paid two-shot verification." }
+            reason = if ($RecoverFailedRunId -gt 0) { "Explicitly authorized failed-run recovery with a matching plan hash." } elseif ($CanaryImageOnly) { "Explicitly authorized isolated paid image canary." } elseif ($CanaryVideoFirstLast) { "Explicitly authorized isolated paid video canary." } else { "Explicitly authorized paid two-shot verification." }
         } | ConvertTo-Json
         $enabled = Invoke-RestMethod -Method Post -Uri "$api/provider-profiles/toapis/live-enable" -ContentType "application/json" -Body $enableBody -TimeoutSec 10
         if (-not $enabled.live_orchestration_enabled) { throw "LIVE_ENABLE_FAILED" }
     }
 
-    if (-not $PSBoundParameters.ContainsKey("RunId")) {
+    if ($RecoverFailedRunId -gt 0) {
+        $recoveryBody = @{
+            acknowledged = $true
+            recovery_plan_hash = $RecoveryPlanHash
+            billing_unit = $BillingUnit
+            estimated_remaining_billing_units = "166.3"
+            maximum_lineage_billing_units = "$MaxBillingUnits"
+            authorization_reference = "EXPLICIT_USER_AUTHORIZATION"
+        } | ConvertTo-Json
+        $created = Invoke-RestMethod -Method Post -Uri "$api/provider-verification-runs/$RecoverFailedRunId/start-failed-run-recovery" -ContentType "application/json" -Body $recoveryBody -TimeoutSec 15
+        $RunId = [int]$created.id
+        $RecoverFailedRunId = 0
+    } elseif (-not $PSBoundParameters.ContainsKey("RunId")) {
         $profiles = Invoke-RestMethod -Method Get -Uri "$api/provider-profiles" -TimeoutSec 10
         $profile = @($profiles | Where-Object { $_.provider_key -eq "toapis" })[0]
         if ($null -eq $profile) { throw "TOAPIS_PROVIDER_NOT_FOUND" }
@@ -232,7 +246,16 @@ try {
     Write-Host "uploadCalled=$($progress.video_requests_created -gt 0)"
     Write-Host "submitCalled=$($progress.image_requests_created -gt 0 -or $progress.video_requests_created -gt 0)"
     Write-Host "pollCalled=$($progress.image_requests_created -gt 0 -or $progress.video_requests_created -gt 0)"
-    Write-Host "remoteTasksCreated=$($progress.image_requests_created + $progress.video_requests_created)"
+    if ($RecoverySourceRunId -gt 0) {
+        $newImages = [Math]::Max(0, [int]$progress.image_requests_created - 1)
+        $newVideos = [int]$progress.video_requests_created
+        Write-Host "historicalImageSubmits=1"
+        Write-Host "newImageSubmits=$newImages"
+        Write-Host "newVideoSubmits=$newVideos"
+        Write-Host "remoteTasksCreated=$($newImages + $newVideos)"
+    } else {
+        Write-Host "remoteTasksCreated=$($progress.image_requests_created + $progress.video_requests_created)"
+    }
     Write-Host "generationCost=$($progress.actual_billing_units)"
     if ($state.status -ne "PASSED") { throw "VERIFICATION_$($state.status)" }
 }

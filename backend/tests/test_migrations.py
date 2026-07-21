@@ -185,7 +185,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0020"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0021"
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE remote_model IN ('doubao-seedream-5-0', 'viduq3-pro')")).scalar_one() == 2
         for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
@@ -670,7 +670,7 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     }
     assert expected.issubset(set(columns(db_path, "providerverificationrun")))
     with engine.connect() as connection:
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0020"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0021"
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")
     command.upgrade(config, "head")
@@ -737,6 +737,40 @@ def test_failed_run_recovery_migration_fields(tmp_path: Path) -> None:
     command.downgrade(config, "20260721_0018")
     assert "recovery_of_run_id" not in set(columns(db_path, "providerverificationrun"))
     command.upgrade(config, "head")
+
+
+def test_recovery_project_lineage_migration_allows_project_reuse(tmp_path: Path) -> None:
+    db_path = tmp_path / "recovery-project-lineage.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.connect() as connection:
+        indexes = connection.execute(sa.text("PRAGMA index_list(providerverificationrun)")).all()
+        project_index = next(row for row in indexes if row[1] == "ix_providerverificationrun_verification_project_id")
+        assert project_index[2] == 0
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+
+
+def test_recovery_project_lineage_downgrade_rejects_shared_project(tmp_path: Path) -> None:
+    db_path = tmp_path / "recovery-project-lineage-unsafe.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.execute(sa.text(
+            "INSERT INTO project (id, name, description, created_at, updated_at) "
+            "VALUES (1, 'P', '', '2026-07-21', '2026-07-21')"
+        ))
+        for run_id in (1, 2):
+            connection.execute(sa.text(
+                "INSERT INTO providerverificationrun "
+                "(id, provider_profile_id, verification_type, status, verification_project_id, summary_json, created_at) "
+                "VALUES (:id, (SELECT id FROM providerprofile LIMIT 1), 'CONTRACT', 'PASSED', 1, '{}', '2026-07-21')"
+            ), {"id": run_id})
+    with pytest.raises(RuntimeError, match="shared by a recovery lineage"):
+        command.downgrade(config, "20260721_0020")
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("SELECT COUNT(*) FROM providerverificationrun")).scalar_one() == 2
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:

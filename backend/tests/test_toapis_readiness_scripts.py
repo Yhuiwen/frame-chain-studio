@@ -83,7 +83,8 @@ def test_failed_run_recovery_plan_only_is_local_and_precedes_live_execution() ->
     assert "[string]$RecoveryPlanHash" in runner
     assert runner.index("if ($RecoveryPlanOnly)") < runner.index("if (-not $ConfirmLive)")
     assert runner.index("if ($RecoveryPlanOnly)") < runner.index("Invoke-RestMethod")
-    assert "RECOVERY_EXECUTION_REQUIRES_EXPLICIT_FUTURE_IMPLEMENTATION" in runner
+    assert "RECOVERY_EXECUTION_AUTHORIZATION_REQUIRED" in runner
+    assert "start-failed-run-recovery" in runner
     for forbidden in ("httpx", "requests", "Invoke-RestMethod", "/live-enable", "/verify-live", "/advance"):
         assert forbidden not in planner
     assert "build_recovery_plan" in planner
