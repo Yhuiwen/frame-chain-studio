@@ -1416,7 +1416,7 @@ def create_visual_baseline_draft(payload: VisualBaselineDraftRequest, session: S
 
 @router.post("/visual-baselines/{baseline_id}/review")
 def review_visual_baseline(baseline_id: int, payload: VisualBaselineReviewRequest, session: Session = Depends(get_session)) -> dict[str, object]:
-    item=visual_experiment.review_baseline(session,baseline_id=baseline_id,expected_hash=payload.expected_baseline_hash,decision=payload.decision,comment=payload.comment)
+    item=visual_experiment.review_baseline(session,baseline_id=baseline_id,expected_hash=payload.expected_baseline_hash,decision=payload.decision,comment=payload.comment,acknowledged=payload.acknowledge_baseline_review)
     return {"id":item.id,"baselineHash":item.baseline_hash,"status":item.status,"humanReviewStatus":item.human_review_status}
 
 

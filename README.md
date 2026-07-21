@@ -6,6 +6,8 @@ Offline regeneration proposals and structured Prompt Contract previews are avail
 
 The same workspace prepares human-reviewed production baseline candidates and SHORT/FULL visual experiment authorization packages. See [the authorization policy](docs/phase-3c-visual-experiment-authorization.md).
 
+Project visual baselines require hash-bound operator review; see [the baseline review record](docs/phase-3c-visual-baseline-review.md).
+
 Phase 4A includes an offline-contract-verified dedicated TOAPIS adapter for Seedream 5.0 images and Vidu Q3 Pro first/last-frame video. See [TOAPIS Provider](docs/providers/toapis.md). Live verification remains opt-in, cost-bounded, and blocked by default.
 
 Live enable uses an auditable, expiring `TOAPIS_CREDIT` pricing review, read-only model-access preflight, manual capacity confirmation, and a centralized backend submit gate. It does not convert credits or token quota into USD.

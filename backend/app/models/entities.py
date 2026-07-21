@@ -1362,6 +1362,7 @@ class ProjectVisualBaseline(SQLModel, table=True):
     forbidden_changes_json: str = Field(default="[]")
     automatic_metrics_json: str = Field(default="{}")
     human_review_status: str = Field(default="PENDING", index=True)
+    review_source: str = Field(default="PENDING", max_length=80)
     human_review_comment: str = Field(default="", max_length=2000)
     approved_at: datetime | None = None
     superseded_by_id: int | None = Field(default=None, foreign_key="projectvisualbaseline.id")

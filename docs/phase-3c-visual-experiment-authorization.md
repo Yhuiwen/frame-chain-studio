@@ -20,3 +20,18 @@ SHORT is recommended because this experiment validates visual constraints, not t
 `MINIMUM_COST_REPAIR` remains blocked and cannot enter an authorization package. Package hashes cover baseline, prompts, task limits, duration, pricing, and candidate. Baseline review and plan review are independent. `PLAN_REVIEWED` is not `PAID_AUTHORIZED`; this phase never sets `AUTHORIZED` or `readyForPaidExecution=true`.
 
 Any future execution requires a new, explicit natural-language paid authorization containing the experiment, baseline, prompt, pricing, and plan hashes, exact task limits, maximum billing, and no-extra-retry constraint. The final render must run the automatic visual-continuity gate and remain blocked until human visual approval.
+
+## Frozen SHORT review package
+
+The operator independently approved `SHORT_CONTINUITY_CANARY` as plan content. It is frozen to 2 image tasks and 2 video tasks of 2 seconds each, 4 total video seconds, `maxAttemptsPerTask=1`, and `automaticRetryAllowed=false`. Estimated billing is 92.6 TOAPIS_CREDIT with a maximum gate of 110.
+
+- Baseline hash: `c3b32c4ac984b9350c91e206394e37850ec2b1536c12285eff56d4b84de6a88e`
+- Prompt Contract hash: `2f2891d30bc2172e331ead0690ea934e2cb260739f0e7f572d1c898a036e81a0`
+- Regeneration Plan hash: `e2ee46fa33d085351d1beeb8f4194aeacdd192977991021e55f030c699f2b86c`
+- Experiment Plan hash: `4d0ad7e12ed5fa0f2b2d0aa325993d58e24ac867d6a5050b7024f8b6fee78b52`
+
+The package is only `READY_FOR_EXPLICIT_AUTHORIZATION`; it is not paid-authorized. Suggested future authorization text:
+
+> I approved Project 22's three-dimensional toy-photography baseline and selected SHORT_CONTINUITY_CANARY. I authorize one new TOAPIS visual-continuity experiment with at most 2 image tasks and 2 video tasks of 2 seconds each, estimated at 92.6 TOAPIS_CREDIT with a 110 TOAPIS_CREDIT maximum. Each task may be attempted once; no retry, FULL experiment, or other remote task is authorized. Execution must use the approved Baseline, Prompt Contract, Regeneration Plan, and Experiment Plan hashes.
+
+This text is documentation only and has no effect unless the user sends an independent explicit authorization in a later phase.

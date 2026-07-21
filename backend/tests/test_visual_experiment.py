@@ -9,6 +9,7 @@ from app.services.visual_experiment import (
     baseline_hash,
     create_baseline_draft,
     production_contracts,
+    review_baseline,
 )
 from app.services.visual_regeneration import compile_prompts
 from app.domain.visual_prompt_contract import VisualPromptContract
@@ -55,11 +56,11 @@ def test_prompt_hashes_are_stable_safe_and_shot_specific() -> None:
 
 def test_baseline_hash_is_stable_comment_independent_and_lock_sensitive() -> None:
     contract, _ = production_contracts()
-    first = baseline_hash(83, contract)
-    assert first == baseline_hash(83, contract)
-    assert first != baseline_hash(89, contract)
+    first = baseline_hash(83, "sha83", contract)
+    assert first == baseline_hash(83, "sha83", contract)
+    assert first != baseline_hash(89, "sha89", contract)
     changed = {**contract, "style": {**contract["style"], "detail_level": "changed"}}
-    assert first != baseline_hash(83, changed)
+    assert first != baseline_hash(83, "sha83", changed)
 
 
 def test_draft_requires_project_image_and_excludes_asset_82(session: Session) -> None:
@@ -71,6 +72,14 @@ def test_draft_requires_project_image_and_excludes_asset_82(session: Session) ->
         create_baseline_draft(session, project_id=22, source_asset_id=82)
 
 
+def test_tail_asset_is_not_primary_candidate(session: Session) -> None:
+    session.add(Project(id=22, name="P"))
+    session.commit()
+    add_image(session, 22, 87)
+    with pytest.raises(AppError, match="primary baseline"):
+        create_baseline_draft(session, project_id=22, source_asset_id=87)
+
+
 def test_create_baseline_draft_is_pending_and_idempotent(session: Session) -> None:
     session.add(Project(id=22, name="P"))
     session.commit()
@@ -80,3 +89,25 @@ def test_create_baseline_draft_is_pending_and_idempotent(session: Session) -> No
     assert first.id == second.id
     assert first.status == "READY_FOR_REVIEW"
     assert first.human_review_status == "PENDING"
+
+
+def test_baseline_review_requires_acknowledgement_and_hash_match(session: Session) -> None:
+    session.add(Project(id=22, name="P"))
+    session.commit()
+    add_image(session, 22, 83)
+    draft = create_baseline_draft(session, project_id=22, source_asset_id=83)
+    assert draft.id is not None
+    with pytest.raises(AppError, match="acknowledgement"):
+        review_baseline(
+            session, baseline_id=draft.id, expected_hash=draft.baseline_hash, decision="APPROVED"
+        )
+    session.refresh(draft)
+    assert draft.human_review_status == "PENDING"
+    with pytest.raises(AppError, match="changed"):
+        review_baseline(
+            session,
+            baseline_id=draft.id,
+            expected_hash="0" * 64,
+            decision="APPROVED",
+            acknowledged=True,
+        )

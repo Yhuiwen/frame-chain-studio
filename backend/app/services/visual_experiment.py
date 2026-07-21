@@ -11,7 +11,12 @@ from app.core.errors import AppError
 from app.domain.visual_prompt_contract import MotionDelta, VisualPromptContract
 from app.models.entities import (
     Asset,
+    GenerationTask,
     ProjectVisualBaseline,
+    ProviderProfile,
+    ProviderVerificationRun,
+    ProviderVerificationStatus,
+    ReliableTaskStatus,
     VisualExperimentAuthorizationPackage,
     utcnow,
 )
@@ -26,7 +31,8 @@ from app.services.visual_regeneration import (
 
 SHORT = "SHORT_CONTINUITY_CANARY"
 FULL = "FULL_CONTINUITY_RETEST"
-BASELINE_VERSION = "project-visual-baseline-v1"
+BASELINE_VERSION = "project22-toy-product-v1"
+PRIMARY_BASELINE_ASSETS = {83, 89}
 
 
 def _stable_hash(value: object) -> str:
@@ -119,12 +125,15 @@ def baseline_candidates(session: Session, project_id: int) -> list[dict[str, Any
     return candidates
 
 
-def baseline_hash(asset_id: int, contract: dict[str, Any]) -> str:
+def baseline_hash(asset_id: int, asset_sha: str, contract: dict[str, Any]) -> str:
     return _stable_hash(
         {
-            "version": BASELINE_VERSION,
+            "projectId": 22,
+            "baselineVersion": BASELINE_VERSION,
             "sourceAssetId": asset_id,
+            "sourceAssetSha": asset_sha,
             "locks": {k: contract[k] for k in ("character", "camera", "environment", "style")},
+            "forbiddenChanges": ["flat cartoon", "character redesign", "camera cut", "style shift"],
         }
     )
 
@@ -140,9 +149,19 @@ def create_baseline_draft(
             422,
         )
     if source_asset_id == 82:
-        raise AppError("VISUAL_BASELINE_ASSET_EXCLUDED", "Flat cartoon Anchor 82 is excluded.", 409)
+        raise AppError(
+            "BASELINE_ASSET_EXPLICITLY_EXCLUDED", "Flat cartoon Anchor 82 is excluded.", 409
+        )
+    if source_asset_id not in PRIMARY_BASELINE_ASSETS:
+        raise AppError(
+            "BASELINE_ASSET_NOT_PRIMARY_CANDIDATE",
+            "Only Asset 83 or 89 may be the primary baseline.",
+            409,
+        )
+    if not asset.sha256:
+        raise AppError("VISUAL_BASELINE_ASSET_SHA_MISSING", "Baseline source SHA is missing.", 409)
     contract, _ = production_contracts()
-    value_hash = baseline_hash(source_asset_id, contract)
+    value_hash = baseline_hash(source_asset_id, asset.sha256, contract)
     existing = session.exec(
         select(ProjectVisualBaseline).where(
             ProjectVisualBaseline.project_id == project_id,
@@ -178,13 +197,25 @@ def create_baseline_draft(
 
 
 def review_baseline(
-    session: Session, *, baseline_id: int, expected_hash: str, decision: str, comment: str = ""
+    session: Session,
+    *,
+    baseline_id: int,
+    expected_hash: str,
+    decision: str,
+    comment: str = "",
+    acknowledged: bool = False,
 ) -> ProjectVisualBaseline:
     baseline = session.get(ProjectVisualBaseline, baseline_id)
     if baseline is None:
         raise AppError("VISUAL_BASELINE_NOT_FOUND", "Baseline not found.", 404)
     if baseline.baseline_hash != expected_hash:
-        raise AppError("VISUAL_BASELINE_HASH_CONFLICT", "Baseline changed; refresh review.", 409)
+        raise AppError("BASELINE_HASH_MISMATCH", "Baseline changed; refresh review.", 409)
+    if not acknowledged:
+        raise AppError(
+            "BASELINE_REVIEW_NOT_ACKNOWLEDGED",
+            "Explicit baseline review acknowledgement is required.",
+            409,
+        )
     if decision not in {"APPROVED", "REJECTED"}:
         raise AppError(
             "VISUAL_BASELINE_DECISION_INVALID", "Decision must be APPROVED or REJECTED.", 422
@@ -205,6 +236,7 @@ def review_baseline(
         baseline.approved_at = utcnow()
     baseline.status = decision
     baseline.human_review_status = decision
+    baseline.review_source = "OPERATOR_REVIEW"
     baseline.human_review_comment = comment
     baseline.updated_at = utcnow()
     session.add(baseline)
@@ -253,7 +285,24 @@ def build_authorization_plan_only(
         ),
         None,
     )
-    selected_hash = baseline_hash(selected["assetId"], contracts[0]) if selected else None
+    selected_asset = session.get(Asset, selected["assetId"]) if selected else None
+    selected_hash = (
+        baseline_hash(selected["assetId"], selected_asset.sha256, contracts[0])
+        if selected and selected_asset and selected_asset.sha256
+        else None
+    )
+    approved_baseline = (
+        session.exec(
+            select(ProjectVisualBaseline).where(
+                ProjectVisualBaseline.project_id == project_id,
+                ProjectVisualBaseline.source_asset_id == selected_baseline_asset_id,
+                ProjectVisualBaseline.baseline_hash == selected_hash,
+                ProjectVisualBaseline.status == "APPROVED",
+            )
+        ).first()
+        if selected_hash
+        else None
+    )
     core = {
         "projectId": project_id,
         "sourceRunId": source_run_id,
@@ -275,19 +324,74 @@ def build_authorization_plan_only(
         "pricingSnapshotHash": TOAPIS_PRICING_CONTRACT.snapshot_hash(),
         "visualAnalysisVersion": "visual-continuity-v1",
         "visualGateConfigHash": plan["configHash"],
+        "selectedBaselineAssetSha": selected_asset.sha256 if selected_asset else None,
+        "maxAttemptsPerTask": 1,
+        "automaticRetryAllowed": False,
     }
     experiment_hash = _stable_hash(core)
+    package = session.exec(
+        select(VisualExperimentAuthorizationPackage).where(
+            VisualExperimentAuthorizationPackage.experiment_plan_hash == experiment_hash
+        )
+    ).first()
+    profile = session.exec(
+        select(ProviderProfile).where(ProviderProfile.provider_key == "toapis")
+    ).first()
+    balance_valid = bool(
+        profile
+        and profile.account_balance_sufficient
+        and profile.account_balance_pricing_snapshot_hash == core["pricingSnapshotHash"]
+        and Decimal(profile.account_balance_confirmed_units or "0") >= maximum
+    )
+    model_valid = bool(
+        profile
+        and profile.preflight_image_model_accessible
+        and profile.preflight_video_model_accessible
+    )
+    active_runs = [
+        run
+        for run in session.exec(select(ProviderVerificationRun)).all()
+        if run.status in {ProviderVerificationStatus.PENDING, ProviderVerificationStatus.RUNNING}
+    ]
+    unfinished = [
+        task
+        for task in session.exec(
+            select(GenerationTask).where(GenerationTask.provider_id == "toapis")
+        ).all()
+        if task.status
+        not in {
+            ReliableTaskStatus.SUCCEEDED,
+            ReliableTaskStatus.FAILED,
+            ReliableTaskStatus.CANCELLED,
+        }
+    ]
+    live_enabled = profile.live_orchestration_enabled if profile else False
+    plan_approved = bool(package and package.human_plan_review_status == "APPROVED")
+    ready = bool(
+        candidate == SHORT
+        and approved_baseline
+        and plan_approved
+        and plan["pricingReviewed"]
+        and plan["pricingFresh"]
+        and balance_valid
+        and model_valid
+        and not live_enabled
+        and not active_runs
+        and not unfinished
+    )
     return {
         **core,
         "experimentPlanHash": experiment_hash,
         "baselineCandidates": baseline_candidates(session, project_id),
-        "baselineHumanReviewStatus": "PENDING",
-        "planHumanReviewStatus": "PENDING",
-        "authorizationStatus": "BLOCKED",
+        "baselineHumanReviewStatus": approved_baseline.human_review_status
+        if approved_baseline
+        else "PENDING",
+        "planHumanReviewStatus": package.human_plan_review_status if package else "PENDING",
+        "authorizationStatus": "READY_FOR_EXPLICIT_AUTHORIZATION" if ready else "BLOCKED",
         "minimumCostRepairStatus": minimum["status"],
         "regenerationPlanStatus": plan["status"],
         "recommendedCandidate": SHORT,
-        "humanCandidateDecision": "PENDING",
+        "humanCandidateDecision": candidate if plan_approved else "PENDING",
         "promptContracts": {"shot1": contracts[0], "shot2": contracts[1]},
         "compiledPrompts": compiled,
         "imageRequests": 2,
@@ -297,9 +401,12 @@ def build_authorization_plan_only(
         "estimatedVideoBilling": str(video_billing),
         "pricingReviewed": plan["pricingReviewed"],
         "pricingFresh": plan["pricingFresh"],
-        "balanceReviewValid": False,
-        "modelAccessValid": False,
-        "readyForExplicitAuthorization": False,
+        "balanceReviewValid": balance_valid,
+        "modelAccessValid": model_valid,
+        "liveOrchestrationEnabled": live_enabled,
+        "activeVerificationRuns": len(active_runs),
+        "unfinishedToapisTasks": len(unfinished),
+        "readyForExplicitAuthorization": ready,
         "readyForPaidExecution": False,
         "networkCalled": False,
         "databaseUpdated": False,
@@ -317,11 +424,16 @@ def save_package_draft(
     ).first()
     if existing:
         return existing
+    baseline = session.exec(
+        select(ProjectVisualBaseline).where(
+            ProjectVisualBaseline.baseline_hash == payload["baselineHash"]
+        )
+    ).first()
     item = VisualExperimentAuthorizationPackage(
         project_id=payload["projectId"],
         source_run_id=payload["sourceRunId"],
         candidate_type=payload["candidateType"],
-        visual_baseline_id=None,
+        visual_baseline_id=baseline.id if baseline else None,
         baseline_hash=payload["baselineHash"],
         prompt_contract_hash=payload["promptContractHash"],
         compiled_prompt_hashes_json=json.dumps(
@@ -340,6 +452,53 @@ def save_package_draft(
         pricing_reviewed=payload["pricingReviewed"],
         authorization_status="BLOCKED",
     )
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return item
+
+
+def approve_short_plan(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    expected_regeneration_hash: str,
+    expected_baseline_hash: str,
+    expected_experiment_hash: str,
+    acknowledgements: tuple[bool, ...],
+    comment: str = "",
+) -> VisualExperimentAuthorizationPackage:
+    if payload["candidateType"] != SHORT:
+        raise AppError(
+            "VISUAL_EXPERIMENT_CANDIDATE_NOT_APPROVABLE",
+            "Only SHORT may be approved in this phase.",
+            409,
+        )
+    if not all(acknowledgements):
+        raise AppError(
+            "VISUAL_EXPERIMENT_PLAN_NOT_ACKNOWLEDGED",
+            "All plan acknowledgements are required.",
+            409,
+        )
+    if (
+        payload["selectedRegenerationPlanHash"] != expected_regeneration_hash
+        or payload["baselineHash"] != expected_baseline_hash
+        or payload["experimentPlanHash"] != expected_experiment_hash
+    ):
+        raise AppError(
+            "VISUAL_EXPERIMENT_PLAN_HASH_CONFLICT", "Experiment plan changed; refresh review.", 409
+        )
+    item = save_package_draft(session, payload)
+    item.human_baseline_review_status = "APPROVED"
+    item.human_plan_review_status = "APPROVED"
+    item.balance_review_valid = payload["balanceReviewValid"]
+    item.model_access_valid = payload["modelAccessValid"]
+    item.authorization_status = (
+        "READY_FOR_EXPLICIT_AUTHORIZATION"
+        if payload["balanceReviewValid"] and payload["modelAccessValid"]
+        else "BLOCKED"
+    )
+    item.updated_at = utcnow()
     session.add(item)
     session.commit()
     session.refresh(item)

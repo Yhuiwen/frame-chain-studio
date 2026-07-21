@@ -502,6 +502,7 @@ class VisualBaselineReviewRequest(BaseModel):
     expected_baseline_hash: str = Field(min_length=64, max_length=64)
     decision: str = Field(max_length=20)
     comment: str = Field(default="", max_length=2000)
+    acknowledge_baseline_review: bool = False
 
 
 class CharacterBase(BaseModel):
