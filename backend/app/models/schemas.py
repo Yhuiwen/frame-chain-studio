@@ -12,6 +12,7 @@ from app.models.entities import (
     GenerationMode,
     GenerationTaskStatus,
     GenerationTaskType,
+    HumanVisualStatus,
     LocationReferenceType,
     BudgetPeriodType,
     ProviderAdapterType,
@@ -37,6 +38,8 @@ from app.models.entities import (
     UsageRecordType,
     WorkerStatus,
     WorkerType,
+    VisualAnalysisStatus,
+    ProductionGateStatus,
 )
 
 PROVIDER_ID_MAX_LENGTH = 80
@@ -68,6 +71,7 @@ class ProjectSettingsValidationMixin(BaseModel):
         if ratio < 0.1 or ratio > 10:
             raise ValueError("Aspect ratio is outside the supported range.")
         return value
+
 
 class ProjectCreate(ProjectSettingsValidationMixin):
     name: str = Field(min_length=1, max_length=160)
@@ -398,6 +402,49 @@ class ToApisFailedRunRecoveryRequest(BaseModel):
     estimated_remaining_billing_units: Decimal = Field(gt=0)
     maximum_lineage_billing_units: Decimal = Field(gt=0)
     authorization_reference: str = Field(min_length=1, max_length=200)
+
+
+class VisualContinuityAnalyzeRequest(BaseModel):
+    video_asset_id: int
+    start_anchor_asset_id: int | None = None
+    target_keyframe_asset_id: int | None = None
+    tail_frame_asset_id: int | None = None
+    analysis_version: str = Field(default="visual-continuity-v1", max_length=80)
+
+
+class VisualContinuityHumanReviewRequest(BaseModel):
+    status: HumanVisualStatus
+    rejection_reasons: list[str] = Field(default_factory=list, max_length=32)
+
+
+class VisualContinuityReportRead(BaseModel):
+    id: int
+    project_id: int
+    shot_id: int | None
+    video_asset_id: int
+    start_anchor_asset_id: int | None
+    target_keyframe_asset_id: int | None
+    tail_frame_asset_id: int | None
+    analysis_version: str
+    config_hash: str
+    report_hash: str
+    technical_status: VisualAnalysisStatus
+    automatic_visual_status: VisualAnalysisStatus
+    human_visual_status: HumanVisualStatus
+    overall_visual_status: VisualAnalysisStatus
+    scene_cut_status: VisualAnalysisStatus
+    anchor_match_status: VisualAnalysisStatus
+    target_match_status: VisualAnalysisStatus
+    camera_stability_status: VisualAnalysisStatus
+    composition_drift_status: VisualAnalysisStatus
+    subject_scale_drift_status: VisualAnalysisStatus
+    style_drift_status: VisualAnalysisStatus
+    cross_shot_seam_status: VisualAnalysisStatus
+    production_gate_status: ProductionGateStatus
+    metrics: dict[str, object]
+    rejection_reasons: list[object]
+    created_at: datetime
+    updated_at: datetime
 
 
 class CharacterBase(BaseModel):

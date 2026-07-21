@@ -353,7 +353,9 @@ class ShotBase(SQLModel):
 
 
 class Shot(ShotBase, table=True):
-    __table_args__ = (UniqueConstraint("project_id", "sort_order", name="uq_shot_project_sort_order"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "sort_order", name="uq_shot_project_sort_order"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
@@ -364,7 +366,9 @@ class Shot(ShotBase, table=True):
     approved_keyframe_asset_id: int | None = Field(default=None, foreign_key="asset.id")
     approved_video_asset_id: int | None = Field(default=None, foreign_key="asset.id")
     locked_tail_frame_asset_id: int | None = Field(default=None, foreign_key="asset.id")
-    start_frame_source_type: StartFrameSourceType = Field(default=StartFrameSourceType.NONE, index=True)
+    start_frame_source_type: StartFrameSourceType = Field(
+        default=StartFrameSourceType.NONE, index=True
+    )
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     project: Project | None = Relationship(back_populates="shots")
@@ -380,7 +384,14 @@ class Asset(SQLModel, table=True):
             "sha256",
             name="uq_asset_project_shot_type_revision_sha256",
         ),
-        Index("ix_asset_project_shot_type_revision_sha256", "project_id", "shot_id", "type", "revision", "sha256"),
+        Index(
+            "ix_asset_project_shot_type_revision_sha256",
+            "project_id",
+            "shot_id",
+            "type",
+            "revision",
+            "sha256",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -427,7 +438,12 @@ class Character(SQLModel, table=True):
 
 class CharacterReference(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("character_id", "asset_id", "reference_type", name="uq_characterreference_character_asset_type"),
+        UniqueConstraint(
+            "character_id",
+            "asset_id",
+            "reference_type",
+            name="uq_characterreference_character_asset_type",
+        ),
         Index("ix_characterreference_character_sort", "character_id", "sort_order"),
     )
 
@@ -464,7 +480,12 @@ class Location(SQLModel, table=True):
 
 class LocationReference(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("location_id", "asset_id", "reference_type", name="uq_locationreference_location_asset_type"),
+        UniqueConstraint(
+            "location_id",
+            "asset_id",
+            "reference_type",
+            name="uq_locationreference_location_asset_type",
+        ),
         Index("ix_locationreference_location_sort", "location_id", "sort_order"),
     )
 
@@ -557,7 +578,9 @@ class ShotCharacter(SQLModel, table=True):
 
 class ScriptDocument(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("project_id", "content_sha256", "version", name="uq_scriptdocument_project_sha_version"),
+        UniqueConstraint(
+            "project_id", "content_sha256", "version", name="uq_scriptdocument_project_sha_version"
+        ),
         Index("ix_scriptdocument_project_status", "project_id", "status"),
         Index("ix_scriptdocument_project_sha", "project_id", "content_sha256"),
     )
@@ -573,7 +596,9 @@ class ScriptDocument(SQLModel, table=True):
     language: str = Field(default="", max_length=40)
     status: ScriptDocumentStatus = Field(default=ScriptDocumentStatus.IMPORTED, index=True)
     version: int = Field(default=1, index=True)
-    parent_document_id: int | None = Field(default=None, foreign_key="scriptdocument.id", index=True)
+    parent_document_id: int | None = Field(
+        default=None, foreign_key="scriptdocument.id", index=True
+    )
     parse_revision: int = Field(default=0, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -581,7 +606,12 @@ class ScriptDocument(SQLModel, table=True):
 
 class ScriptBlock(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("script_document_id", "parse_revision", "sort_order", name="uq_scriptblock_doc_rev_order"),
+        UniqueConstraint(
+            "script_document_id",
+            "parse_revision",
+            "sort_order",
+            name="uq_scriptblock_doc_rev_order",
+        ),
         Index("ix_scriptblock_doc_rev_order", "script_document_id", "parse_revision", "sort_order"),
     )
 
@@ -605,7 +635,9 @@ class ScriptBlock(SQLModel, table=True):
 
 
 class StoryboardDraft(SQLModel, table=True):
-    __table_args__ = (Index("ix_storyboarddraft_project_script", "project_id", "script_document_id"),)
+    __table_args__ = (
+        Index("ix_storyboarddraft_project_script", "project_id", "script_document_id"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
@@ -614,7 +646,9 @@ class StoryboardDraft(SQLModel, table=True):
     parser_version: str = Field(default="", max_length=120)
     builder_version: str = Field(default="", max_length=120)
     status: StoryboardDraftStatus = Field(default=StoryboardDraftStatus.DRAFT, index=True)
-    default_style_profile_id: int | None = Field(default=None, foreign_key="styleprofile.id", index=True)
+    default_style_profile_id: int | None = Field(
+        default=None, foreign_key="styleprofile.id", index=True
+    )
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     applied_at: datetime | None = None
@@ -622,14 +656,18 @@ class StoryboardDraft(SQLModel, table=True):
 
 class ShotDraft(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("storyboard_draft_id", "applied_shot_id", name="uq_shotdraft_storyboard_applied_shot"),
+        UniqueConstraint(
+            "storyboard_draft_id", "applied_shot_id", name="uq_shotdraft_storyboard_applied_shot"
+        ),
         Index("ix_shotdraft_storyboard_order", "storyboard_draft_id", "sort_order"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
     storyboard_draft_id: int = Field(foreign_key="storyboarddraft.id", index=True)
     sort_order: int = Field(index=True)
-    source_block_start_id: int | None = Field(default=None, foreign_key="scriptblock.id", index=True)
+    source_block_start_id: int | None = Field(
+        default=None, foreign_key="scriptblock.id", index=True
+    )
     source_block_end_id: int | None = Field(default=None, foreign_key="scriptblock.id", index=True)
     title: str = Field(default="", max_length=160)
     summary: str = Field(default="", max_length=4000)
@@ -659,7 +697,9 @@ class ShotDraft(SQLModel, table=True):
 
 class ShotDraftCharacter(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("shot_draft_id", "character_id", "character_name", name="uq_shotdraftcharacter_identity"),
+        UniqueConstraint(
+            "shot_draft_id", "character_id", "character_name", name="uq_shotdraftcharacter_identity"
+        ),
         Index("ix_shotdraftcharacter_draft_sort", "shot_draft_id", "sort_order"),
     )
 
@@ -743,7 +783,9 @@ class ProviderModelProfile(SQLModel, table=True):
     pricing_reviewed_at: datetime | None = None
     pricing_reviewed_by: str | None = Field(default=None, max_length=120)
     pricing_snapshot_hash: str | None = Field(default=None, max_length=64, index=True)
-    pricing_review_status: PricingReviewStatus = Field(default=PricingReviewStatus.PENDING, index=True)
+    pricing_review_status: PricingReviewStatus = Field(
+        default=PricingReviewStatus.PENDING, index=True
+    )
     currency: str = Field(default="USD", max_length=12, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -764,10 +806,18 @@ class GenerationUsageRecord(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)
     shot_id: int | None = Field(default=None, foreign_key="shot.id", index=True)
-    generation_request_id: int | None = Field(default=None, foreign_key="generationrequest.id", index=True)
-    generation_task_id: int | None = Field(default=None, foreign_key="generationtask.id", index=True)
-    provider_profile_id: int | None = Field(default=None, foreign_key="providerprofile.id", index=True)
-    provider_model_profile_id: int | None = Field(default=None, foreign_key="providermodelprofile.id", index=True)
+    generation_request_id: int | None = Field(
+        default=None, foreign_key="generationrequest.id", index=True
+    )
+    generation_task_id: int | None = Field(
+        default=None, foreign_key="generationtask.id", index=True
+    )
+    provider_profile_id: int | None = Field(
+        default=None, foreign_key="providerprofile.id", index=True
+    )
+    provider_model_profile_id: int | None = Field(
+        default=None, foreign_key="providermodelprofile.id", index=True
+    )
     attempt_number: int = Field(default=1, index=True)
     record_type: UsageRecordType = Field(index=True)
     status: UsageRecordStatus = Field(index=True)
@@ -797,7 +847,9 @@ class ProjectBudgetPolicy(SQLModel, table=True):
     hard_limit: str | None = Field(default=None, max_length=80)
     per_request_limit: str | None = Field(default=None, max_length=80)
     period_type: BudgetPeriodType = Field(default=BudgetPeriodType.PROJECT_TOTAL, index=True)
-    unknown_cost_policy: UnknownCostPolicy = Field(default=UnknownCostPolicy.ALLOW_WITH_WARNING, index=True)
+    unknown_cost_policy: UnknownCostPolicy = Field(
+        default=UnknownCostPolicy.ALLOW_WITH_WARNING, index=True
+    )
     enabled: bool = Field(default=False, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -811,9 +863,13 @@ class ProviderVerificationRun(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     provider_profile_id: int = Field(foreign_key="providerprofile.id", index=True)
-    model_profile_id: int | None = Field(default=None, foreign_key="providermodelprofile.id", index=True)
+    model_profile_id: int | None = Field(
+        default=None, foreign_key="providermodelprofile.id", index=True
+    )
     verification_type: ProviderVerificationType = Field(index=True)
-    status: ProviderVerificationStatus = Field(default=ProviderVerificationStatus.PENDING, index=True)
+    status: ProviderVerificationStatus = Field(
+        default=ProviderVerificationStatus.PENDING, index=True
+    )
     started_at: datetime | None = None
     completed_at: datetime | None = None
     max_cost: str | None = Field(default=None, max_length=80)
@@ -844,8 +900,12 @@ class ProviderVerificationRun(SQLModel, table=True):
     summary_json: str = Field(default="{}")
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=1000)
-    recovery_of_run_id: int | None = Field(default=None, foreign_key="providerverificationrun.id", index=True)
-    lineage_root_run_id: int | None = Field(default=None, foreign_key="providerverificationrun.id", index=True)
+    recovery_of_run_id: int | None = Field(
+        default=None, foreign_key="providerverificationrun.id", index=True
+    )
+    lineage_root_run_id: int | None = Field(
+        default=None, foreign_key="providerverificationrun.id", index=True
+    )
     normalized_start_asset_id: int | None = Field(default=None, foreign_key="asset.id")
     normalized_end_asset_id: int | None = Field(default=None, foreign_key="asset.id")
     reused_keyframe_asset_id: int | None = Field(default=None, foreign_key="asset.id")
@@ -903,7 +963,9 @@ class GenerationRequest(SQLModel, table=True):
 class GenerationTask(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_generationtask_idempotency_key"),
-        UniqueConstraint("provider_id", "remote_job_id", name="uq_generationtask_provider_remote_job"),
+        UniqueConstraint(
+            "provider_id", "remote_job_id", name="uq_generationtask_provider_remote_job"
+        ),
         CheckConstraint("attempt_number >= 1", name="ck_generationtask_attempt_number"),
         CheckConstraint("retry_count >= 0", name="ck_generationtask_retry_count"),
         CheckConstraint("max_attempts >= 1", name="ck_generationtask_max_attempts"),
@@ -916,7 +978,9 @@ class GenerationTask(SQLModel, table=True):
         Index("ix_generationtask_status_locked_until", "status", "locked_until"),
         Index("ix_generationtask_status_submission_deadline", "status", "submission_deadline_at"),
         Index("ix_generationtask_status_job_deadline", "status", "job_deadline_at"),
-        Index("ix_generationtask_status_cancellation_deadline", "status", "cancellation_deadline_at"),
+        Index(
+            "ix_generationtask_status_cancellation_deadline", "status", "cancellation_deadline_at"
+        ),
         Index("ix_generationtask_project_created", "project_id", "created_at"),
         Index("ix_generationtask_shot_type_created", "shot_id", "task_type", "created_at"),
     )
@@ -974,13 +1038,18 @@ class GenerationTask(SQLModel, table=True):
     lock_version: int = Field(default=0)
     idempotency_key: str = Field(index=True)
     result_asset_id: int | None = Field(default=None, foreign_key="asset.id")
-    recovery_run_id: int | None = Field(default=None, foreign_key="providerverificationrun.id", index=True)
+    recovery_run_id: int | None = Field(
+        default=None, foreign_key="providerverificationrun.id", index=True
+    )
 
 
 class VideoInputFrameNormalization(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint(
-            "source_asset_id", "normalization_version", "target_width", "target_height",
+            "source_asset_id",
+            "normalization_version",
+            "target_width",
+            "target_height",
             name="uq_video_input_normalization_source_version_size",
         ),
         UniqueConstraint("normalized_asset_id", name="uq_video_input_normalization_asset"),
@@ -1029,7 +1098,12 @@ class WorkerHeartbeat(SQLModel, table=True):
 
 class ProviderAssetCache(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("provider_id", "asset_id", "asset_sha256", name="uq_providerassetcache_provider_asset_sha"),
+        UniqueConstraint(
+            "provider_id",
+            "asset_id",
+            "asset_sha256",
+            name="uq_providerassetcache_provider_asset_sha",
+        ),
         Index("ix_providerassetcache_provider_asset", "provider_id", "asset_id"),
     )
 
@@ -1079,7 +1153,9 @@ class ProjectRender(SQLModel, table=True):
 class GenerationTaskResult(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("generation_task_id", "result_index", name="uq_taskresult_task_index"),
-        UniqueConstraint("generation_task_id", "source_url_hash", name="uq_taskresult_task_url_hash"),
+        UniqueConstraint(
+            "generation_task_id", "source_url_hash", name="uq_taskresult_task_url_hash"
+        ),
         Index("ix_taskresult_task_status", "generation_task_id", "status"),
         Index("ix_taskresult_status_next_retry", "status", "next_retry_at"),
         Index("ix_taskresult_source_url_hash", "source_url_hash"),
@@ -1091,7 +1167,9 @@ class GenerationTaskResult(SQLModel, table=True):
     result_index: int
     source_url: str
     source_url_hash: str = Field(index=True)
-    status: GenerationTaskResultStatus = Field(default=GenerationTaskResultStatus.PENDING, index=True)
+    status: GenerationTaskResultStatus = Field(
+        default=GenerationTaskResultStatus.PENDING, index=True
+    )
     media_kind: ResultMediaKind | None = Field(default=None, index=True)
     expected_media_kind: ResultMediaKind = Field(index=True)
     is_primary: bool = Field(default=False, index=True)
@@ -1142,6 +1220,64 @@ class QualityCheckResult(SQLModel, table=True):
     details_json: str = Field(default="{}")
     algorithm_version: str = Field(default="quality-v1", index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class VisualAnalysisStatus(str, Enum):
+    PENDING = "PENDING"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class HumanVisualStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class ProductionGateStatus(str, Enum):
+    BLOCKED = "BLOCKED"
+    ALLOWED = "ALLOWED"
+
+
+class VisualContinuityReport(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "video_asset_id",
+            "analysis_version",
+            "config_hash",
+            name="uq_visualcontinuity_asset_version_config",
+        ),
+        Index("ix_visualcontinuity_project_shot_created", "project_id", "shot_id", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    shot_id: int | None = Field(default=None, foreign_key="shot.id", index=True)
+    video_asset_id: int = Field(foreign_key="asset.id", index=True)
+    start_anchor_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    target_keyframe_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    tail_frame_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    analysis_version: str = Field(index=True)
+    config_hash: str = Field(max_length=64, index=True)
+    report_hash: str = Field(max_length=64, index=True)
+    technical_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    automatic_visual_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    human_visual_status: HumanVisualStatus = Field(default=HumanVisualStatus.PENDING)
+    overall_visual_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    scene_cut_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    anchor_match_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    target_match_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    camera_stability_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    composition_drift_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    subject_scale_drift_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    style_drift_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    cross_shot_seam_status: VisualAnalysisStatus = Field(default=VisualAnalysisStatus.PENDING)
+    production_gate_status: ProductionGateStatus = Field(default=ProductionGateStatus.BLOCKED)
+    metrics_json: str = Field(default="{}")
+    rejection_reasons_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class TaskCommand(SQLModel, table=True):

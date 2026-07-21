@@ -15,7 +15,18 @@ from app.core.config import BACKEND_ROOT, get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
 from app.media.ffmpeg import require_binary
-from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, ProjectRender, ProviderVerificationRun, ProviderVerificationType, Shot, TaskCommandType
+from app.models.entities import (
+    Asset,
+    GenerationKind,
+    GenerationRequest,
+    Project,
+    ProjectRender,
+    ProviderVerificationRun,
+    ProviderVerificationType,
+    Shot,
+    TaskCommandType,
+    VisualContinuityReport,
+)
 from app.models.schemas import (
     CharacterCreate,
     CharacterRead,
@@ -90,13 +101,32 @@ from app.models.schemas import (
     ToApisLiveEnableRequest,
     ToApisPricingReviewRequest,
     UsageSummaryRead,
+    VisualContinuityAnalyzeRequest,
+    VisualContinuityHumanReviewRequest,
+    VisualContinuityReportRead,
 )
 from app.providers.config_loader import load_registry, load_registry_from_env
 from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
 from app.models.entities import ShotDraftStatus
-from app.services import live_orchestration, provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, toapis_canary, toapis_canary_recovery, toapis_recovery_planning, toapis_verification, toapis_video_canary, worker_status
+from app.services import (
+    live_orchestration,
+    provider_management,
+    provider_resolution,
+    quality_service,
+    script_workflow,
+    studio,
+    structured,
+    task_service,
+    toapis_canary,
+    toapis_canary_recovery,
+    toapis_recovery_planning,
+    toapis_verification,
+    toapis_video_canary,
+    visual_continuity_service,
+    worker_status,
+)
 from app.workers import render_service
 
 router = APIRouter()
@@ -200,7 +230,9 @@ def get_toapis_pricing_review(session: Session = Depends(get_session)) -> dict[s
 
 
 @router.post("/provider-profiles/toapis/pricing-review")
-def review_toapis_pricing(payload: ToApisPricingReviewRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+def review_toapis_pricing(
+    payload: ToApisPricingReviewRequest, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return live_orchestration.review_pricing(session, payload)
 
 
@@ -210,12 +242,16 @@ async def preflight_toapis(session: Session = Depends(get_session)) -> dict[str,
 
 
 @router.post("/provider-profiles/toapis/account-balance-review")
-def confirm_toapis_account_balance(payload: ToApisAccountBalanceRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+def confirm_toapis_account_balance(
+    payload: ToApisAccountBalanceRequest, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return live_orchestration.confirm_account_balance(session, payload)
 
 
 @router.post("/provider-profiles/toapis/live-enable")
-def enable_toapis_live(payload: ToApisLiveEnableRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+def enable_toapis_live(
+    payload: ToApisLiveEnableRequest, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return live_orchestration.enable_live(session, payload)
 
 
@@ -233,7 +269,9 @@ def create_provider_profile(
 
 
 @router.get("/provider-profiles/{provider_id}", response_model=ProviderProfileRead)
-def get_provider_profile(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def get_provider_profile(
+    provider_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     profile = provider_management.get_provider_profile_or_404(session, provider_id)
     return provider_management.provider_profile_payload(session, profile)
 
@@ -248,21 +286,33 @@ def update_provider_profile(
 
 
 @router.post("/provider-profiles/{provider_id}/archive", response_model=ProviderProfileRead)
-def archive_provider_profile(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def archive_provider_profile(
+    provider_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return provider_management.archive_provider_profile(session, provider_id)
 
 
 @router.post("/provider-profiles/{provider_id}/validate", response_model=ProviderValidationRead)
-def validate_provider_profile(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def validate_provider_profile(
+    provider_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return provider_management.validate_provider_profile(session, provider_id)
 
 
-@router.post("/provider-profiles/{provider_id}/verify-contract", response_model=ProviderVerificationRunRead)
-def verify_provider_contract(provider_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+@router.post(
+    "/provider-profiles/{provider_id}/verify-contract", response_model=ProviderVerificationRunRead
+)
+def verify_provider_contract(
+    provider_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return provider_management.verify_contract(session, provider_id)
 
 
-@router.post("/provider-profiles/{provider_id}/verify-live", response_model=ProviderVerificationRunRead, status_code=202)
+@router.post(
+    "/provider-profiles/{provider_id}/verify-live",
+    response_model=ProviderVerificationRunRead,
+    status_code=202,
+)
 def verify_provider_live(
     provider_id: int,
     payload: LiveVerificationRequest,
@@ -272,12 +322,18 @@ def verify_provider_live(
 
 
 @router.get("/provider-verification-runs/{run_id}", response_model=ProviderVerificationRunRead)
-def get_provider_verification_run(run_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def get_provider_verification_run(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return provider_management.get_verification_run(session, run_id)
 
 
-@router.post("/provider-verification-runs/{run_id}/advance", response_model=ProviderVerificationAdvanceRead)
-def advance_provider_verification_run(run_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+@router.post(
+    "/provider-verification-runs/{run_id}/advance", response_model=ProviderVerificationAdvanceRead
+)
+def advance_provider_verification_run(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     run = session.get(ProviderVerificationRun, run_id)
     if run and run.verification_type == ProviderVerificationType.LIVE_CANARY:
         return toapis_canary.advance(session, run_id)
@@ -301,7 +357,11 @@ def recover_existing_canary_result(
     )
 
 
-@router.post("/provider-verification-runs/{run_id}/start-failed-run-recovery", response_model=ProviderVerificationRunRead, status_code=202)
+@router.post(
+    "/provider-verification-runs/{run_id}/start-failed-run-recovery",
+    response_model=ProviderVerificationRunRead,
+    status_code=202,
+)
 def start_failed_run_recovery(
     run_id: int,
     payload: ToApisFailedRunRecoveryRequest,
@@ -313,7 +373,11 @@ def start_failed_run_recovery(
         or payload.estimated_remaining_billing_units != Decimal("166.3")
         or payload.maximum_lineage_billing_units != Decimal("190")
     ):
-        raise AppError("RECOVERY_AUTHORIZATION_INVALID", "The failed-run recovery authorization is invalid.", 409)
+        raise AppError(
+            "RECOVERY_AUTHORIZATION_INVALID",
+            "The failed-run recovery authorization is invalid.",
+            409,
+        )
     recovery = toapis_recovery_planning.start_authorized_recovery_run(
         session,
         failed_run_id=run_id,
@@ -329,22 +393,34 @@ def review_video_canary_console(
     payload: ToApisVideoCanaryConsoleReviewRequest,
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return toapis_canary_recovery.review_video_canary_console_billing(session, run_id=run_id, payload=payload)
+    return toapis_canary_recovery.review_video_canary_console_billing(
+        session, run_id=run_id, payload=payload
+    )
 
 
-@router.post("/provider-verification-runs/{run_id}/initial-anchor", response_model=ProviderVerificationAdvanceRead)
+@router.post(
+    "/provider-verification-runs/{run_id}/initial-anchor",
+    response_model=ProviderVerificationAdvanceRead,
+)
 async def set_provider_verification_initial_anchor(
     run_id: int,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return toapis_verification.set_initial_anchor(
-        session, run_id, content=await file.read(get_settings().upload_max_image_bytes + 1), content_type=file.content_type,
+        session,
+        run_id,
+        content=await file.read(get_settings().upload_max_image_bytes + 1),
+        content_type=file.content_type,
     )
 
 
-@router.get("/provider-profiles/{provider_id}/models", response_model=list[ProviderModelProfileRead])
-def list_provider_models(provider_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+@router.get(
+    "/provider-profiles/{provider_id}/models", response_model=list[ProviderModelProfileRead]
+)
+def list_provider_models(
+    provider_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return provider_management.list_provider_models(session, provider_id)
 
 
@@ -367,28 +443,40 @@ def update_provider_model(
 
 
 @router.post("/provider-models/{model_id}/archive", response_model=ProviderModelProfileRead)
-def archive_provider_model(model_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def archive_provider_model(
+    model_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return provider_management.archive_provider_model(session, model_id)
 
 
 @router.get("/workers/status", response_model=WorkersStatusRead)
 def workers_status(session: Session = Depends(get_session)) -> dict[str, object]:
     settings = get_settings()
-    return worker_status.status_summary(session, stale_after_seconds=settings.worker_stale_after_seconds)
+    return worker_status.status_summary(
+        session, stale_after_seconds=settings.worker_stale_after_seconds
+    )
 
 
 @router.get("/projects/{project_id}/usage/summary", response_model=UsageSummaryRead)
-def project_usage_summary(project_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def project_usage_summary(
+    project_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return provider_management.usage_summary(session, project_id)
 
 
 @router.get("/projects/{project_id}/usage/records", response_model=list[GenerationUsageRecordRead])
-def project_usage_records(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def project_usage_records(
+    project_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return provider_management.usage_records(session, project_id)
 
 
-@router.get("/generation-requests/{request_id}/usage", response_model=list[GenerationUsageRecordRead])
-def generation_request_usage(request_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+@router.get(
+    "/generation-requests/{request_id}/usage", response_model=list[GenerationUsageRecordRead]
+)
+def generation_request_usage(
+    request_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return provider_management.request_usage(session, request_id)
 
 
@@ -407,7 +495,9 @@ def update_project_budget(
 
 
 @router.get("/projects/{project_id}/usage/export.csv", response_class=PlainTextResponse)
-def export_project_usage(project_id: int, session: Session = Depends(get_session)) -> PlainTextResponse:
+def export_project_usage(
+    project_id: int, session: Session = Depends(get_session)
+) -> PlainTextResponse:
     return PlainTextResponse(
         provider_management.usage_csv(session, project_id),
         media_type="text/csv; charset=utf-8",
@@ -461,9 +551,13 @@ def retry_task(
 
 
 @router.get("/projects/{project_id}/renders", response_model=list[ProjectRenderRead])
-def list_project_renders(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_project_renders(
+    project_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     studio.get_project_or_404(session, project_id)
-    return [studio.render_payload(render) for render in studio.list_project_renders(session, project_id)]
+    return [
+        studio.render_payload(render) for render in studio.list_project_renders(session, project_id)
+    ]
 
 
 @router.post("/projects/{project_id}/renders", response_model=ProjectRenderRead, status_code=202)
@@ -476,14 +570,17 @@ def create_project_render(
     render = render_service.create_project_render(
         session,
         project_id=project_id,
-        idempotency_key=idempotency_key or f"project-render:{project_id}:{datetime.now().timestamp()}",
+        idempotency_key=idempotency_key
+        or f"project-render:{project_id}:{datetime.now().timestamp()}",
         allow_partial_render=payload.allow_partial_render if payload else False,
     )
     return studio.render_payload(render)
 
 
 @router.get("/renders/{render_id}", response_model=ProjectRenderRead)
-def read_project_render(render_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def read_project_render(
+    render_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     render = session.get(ProjectRender, render_id)
     if render is None:
         raise AppError("RENDER_NOT_FOUND", f"Render {render_id} was not found.", 404)
@@ -491,7 +588,9 @@ def read_project_render(render_id: int, session: Session = Depends(get_session))
 
 
 @router.get("/media/{asset_id}", response_model=None)
-def read_asset(asset_id: int, request: Request, session: Session = Depends(get_session)) -> Response:
+def read_asset(
+    asset_id: int, request: Request, session: Session = Depends(get_session)
+) -> Response:
     return asset_response(asset_id, session=session, range_header=request.headers.get("range"))
 
 
@@ -503,7 +602,9 @@ def asset_response(asset_id: int, *, session: Session, range_header: str | None 
     storage_root = settings.storage_dir.resolve()
     asset_path = Path(asset.path).resolve()
     if storage_root not in asset_path.parents and asset_path != storage_root:
-        raise AppError("ASSET_ACCESS_DENIED", "Asset file is outside the configured storage directory.", 403)
+        raise AppError(
+            "ASSET_ACCESS_DENIED", "Asset file is outside the configured storage directory.", 403
+        )
     if not asset_path.exists() or not asset_path.is_file():
         raise AppError("ASSET_FILE_NOT_FOUND", f"Asset file for {asset_id} was not found.", 404)
     if range_header:
@@ -583,7 +684,9 @@ def create_project(payload: ProjectCreate, session: Session = Depends(get_sessio
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def project_detail(project_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
-    project, shots, assets, requests, tasks, renders, completion, quality_checks, logs = studio.project_detail(session, project_id)
+    project, shots, assets, requests, tasks, renders, completion, quality_checks, logs = (
+        studio.project_detail(session, project_id)
+    )
     return {
         **ProjectRead.model_validate(project).model_dump(),
         "shots": shots,
@@ -598,7 +701,9 @@ def project_detail(project_id: int, session: Session = Depends(get_session)) -> 
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectRead)
-def update_project(project_id: int, payload: ProjectUpdate, session: Session = Depends(get_session)) -> Project:
+def update_project(
+    project_id: int, payload: ProjectUpdate, session: Session = Depends(get_session)
+) -> Project:
     return studio.update_project(session, project_id, payload)
 
 
@@ -610,11 +715,16 @@ def delete_project(project_id: int, session: Session = Depends(get_session)) -> 
 
 @router.get("/projects/{project_id}/shots", response_model=list[ShotRead])
 def list_shots(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
-    return [studio.shot_payload(session, shot) for shot in studio.list_project_shots(session, project_id)]
+    return [
+        studio.shot_payload(session, shot)
+        for shot in studio.list_project_shots(session, project_id)
+    ]
 
 
 @router.post("/projects/{project_id}/shots", response_model=ShotRead, status_code=201)
-def create_shot(project_id: int, payload: ShotCreate, session: Session = Depends(get_session)) -> Shot:
+def create_shot(
+    project_id: int, payload: ShotCreate, session: Session = Depends(get_session)
+) -> Shot:
     return studio.create_shot(session, project_id, payload)
 
 
@@ -635,11 +745,15 @@ async def upload_project_image(
 
 
 @router.get("/projects/{project_id}/scripts", response_model=list[ScriptDocumentRead])
-def list_project_scripts(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_project_scripts(
+    project_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return script_workflow.list_scripts(session, project_id)
 
 
-@router.post("/projects/{project_id}/scripts/import", response_model=ScriptDocumentRead, status_code=201)
+@router.post(
+    "/projects/{project_id}/scripts/import", response_model=ScriptDocumentRead, status_code=201
+)
 async def import_project_script(
     project_id: int,
     request: Request,
@@ -673,11 +787,15 @@ async def import_project_script(
 
 @router.get("/scripts/{script_id}", response_model=ScriptDocumentRead)
 def read_script(script_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
-    return script_workflow.script_document_payload(session, script_workflow.get_script_or_404(session, script_id))
+    return script_workflow.script_document_payload(
+        session, script_workflow.get_script_or_404(session, script_id)
+    )
 
 
 @router.get("/scripts/{script_id}/content", response_model=ScriptContentRead)
-def read_script_content(script_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def read_script_content(
+    script_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     script = script_workflow.get_script_or_404(session, script_id)
     return {
         "id": script.id,
@@ -694,7 +812,9 @@ def parse_script(script_id: int, session: Session = Depends(get_session)) -> dic
 
 
 @router.get("/scripts/{script_id}/blocks", response_model=list[ScriptBlockRead])
-def list_script_blocks(script_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_script_blocks(
+    script_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return script_workflow.list_blocks(session, script_id)
 
 
@@ -725,7 +845,9 @@ def update_script_block(
 
 
 @router.get("/scripts/{script_id}/storyboards", response_model=list[StoryboardRead])
-def list_script_storyboards(script_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_script_storyboards(
+    script_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return script_workflow.list_storyboards(session, script_id)
 
 
@@ -739,8 +861,12 @@ def create_script_storyboard(
 
 
 @router.get("/storyboards/{storyboard_id}", response_model=StoryboardRead)
-def read_storyboard(storyboard_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
-    return script_workflow.storyboard_payload(session, script_workflow.get_storyboard_or_404(session, storyboard_id))
+def read_storyboard(
+    storyboard_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
+    return script_workflow.storyboard_payload(
+        session, script_workflow.get_storyboard_or_404(session, storyboard_id)
+    )
 
 
 @router.patch("/storyboards/{storyboard_id}", response_model=StoryboardRead)
@@ -762,12 +888,16 @@ def apply_storyboard(
 
 
 @router.post("/storyboards/{storyboard_id}/archive", response_model=StoryboardRead)
-def archive_storyboard(storyboard_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def archive_storyboard(
+    storyboard_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return script_workflow.archive_storyboard(session, storyboard_id)
 
 
 @router.get("/storyboards/{storyboard_id}/shot-drafts", response_model=list[ShotDraftRead])
-def list_storyboard_shot_drafts(storyboard_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_storyboard_shot_drafts(
+    storyboard_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return script_workflow.list_shot_drafts(session, storyboard_id)
 
 
@@ -790,22 +920,30 @@ def split_shot_draft(
 
 
 @router.post("/shot-drafts/{shot_draft_id}/merge-next", response_model=ShotDraftRead)
-def merge_shot_draft_next(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def merge_shot_draft_next(
+    shot_draft_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return script_workflow.merge_shot_draft_next(session, shot_draft_id)
 
 
 @router.post("/shot-drafts/{shot_draft_id}/skip", response_model=ShotDraftRead)
-def skip_shot_draft(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def skip_shot_draft(
+    shot_draft_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return script_workflow.set_shot_draft_status(session, shot_draft_id, ShotDraftStatus.SKIPPED)
 
 
 @router.post("/shot-drafts/{shot_draft_id}/restore", response_model=ShotDraftRead)
-def restore_shot_draft(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def restore_shot_draft(
+    shot_draft_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return script_workflow.set_shot_draft_status(session, shot_draft_id, ShotDraftStatus.DRAFT)
 
 
 @router.post("/shot-drafts/{shot_draft_id}/preview-spec", response_model=ShotDraftPreviewRead)
-def preview_shot_draft(shot_draft_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def preview_shot_draft(
+    shot_draft_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return script_workflow.preview_shot_draft(session, shot_draft_id)
 
 
@@ -815,11 +953,15 @@ def apply_shot_draft(
     payload: ShotDraftApplyRequest | None = None,
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return script_workflow.apply_shot_draft(session, shot_draft_id, payload or ShotDraftApplyRequest())
+    return script_workflow.apply_shot_draft(
+        session, shot_draft_id, payload or ShotDraftApplyRequest()
+    )
 
 
 @router.get("/projects/{project_id}/characters", response_model=list[CharacterRead])
-def list_project_characters(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_project_characters(
+    project_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return structured.list_characters(session, project_id)
 
 
@@ -852,7 +994,9 @@ def delete_character(character_id: int, session: Session = Depends(get_session))
     return Response(status_code=204)
 
 
-@router.post("/characters/{character_id}/references", response_model=CharacterReferenceRead, status_code=201)
+@router.post(
+    "/characters/{character_id}/references", response_model=CharacterReferenceRead, status_code=201
+)
 def create_character_reference(
     character_id: int,
     payload: CharacterReferenceCreate,
@@ -862,13 +1006,17 @@ def create_character_reference(
 
 
 @router.delete("/character-references/{reference_id}", status_code=204)
-def delete_character_reference(reference_id: int, session: Session = Depends(get_session)) -> Response:
+def delete_character_reference(
+    reference_id: int, session: Session = Depends(get_session)
+) -> Response:
     structured.delete_character_reference(session, reference_id)
     return Response(status_code=204)
 
 
 @router.get("/projects/{project_id}/locations", response_model=list[LocationRead])
-def list_project_locations(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_project_locations(
+    project_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return structured.list_locations(session, project_id)
 
 
@@ -901,7 +1049,9 @@ def delete_location(location_id: int, session: Session = Depends(get_session)) -
     return Response(status_code=204)
 
 
-@router.post("/locations/{location_id}/references", response_model=LocationReferenceRead, status_code=201)
+@router.post(
+    "/locations/{location_id}/references", response_model=LocationReferenceRead, status_code=201
+)
 def create_location_reference(
     location_id: int,
     payload: LocationReferenceCreate,
@@ -911,17 +1061,23 @@ def create_location_reference(
 
 
 @router.delete("/location-references/{reference_id}", status_code=204)
-def delete_location_reference(reference_id: int, session: Session = Depends(get_session)) -> Response:
+def delete_location_reference(
+    reference_id: int, session: Session = Depends(get_session)
+) -> Response:
     structured.delete_location_reference(session, reference_id)
     return Response(status_code=204)
 
 
 @router.get("/projects/{project_id}/style-profiles", response_model=list[StyleProfileRead])
-def list_project_style_profiles(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def list_project_style_profiles(
+    project_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return structured.list_style_profiles(session, project_id)
 
 
-@router.post("/projects/{project_id}/style-profiles", response_model=StyleProfileRead, status_code=201)
+@router.post(
+    "/projects/{project_id}/style-profiles", response_model=StyleProfileRead, status_code=201
+)
 def create_project_style_profile(
     project_id: int,
     payload: StyleProfileCreate,
@@ -931,7 +1087,9 @@ def create_project_style_profile(
 
 
 @router.get("/style-profiles/{style_profile_id}", response_model=StyleProfileRead)
-def read_style_profile(style_profile_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+def read_style_profile(
+    style_profile_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
     return structured.get_style_profile_payload(session, style_profile_id)
 
 
@@ -945,7 +1103,9 @@ def update_style_profile(
 
 
 @router.delete("/style-profiles/{style_profile_id}", status_code=204)
-def delete_style_profile(style_profile_id: int, session: Session = Depends(get_session)) -> Response:
+def delete_style_profile(
+    style_profile_id: int, session: Session = Depends(get_session)
+) -> Response:
     structured.archive_style_profile(session, style_profile_id)
     return Response(status_code=204)
 
@@ -970,7 +1130,9 @@ def read_shot_spec(shot_id: int, session: Session = Depends(get_session)) -> dic
 
 
 @router.get("/shots/{shot_id}/spec/history", response_model=list[ShotSpecRead])
-def read_shot_spec_history(shot_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+def read_shot_spec_history(
+    shot_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
     return structured.list_shot_spec_history(session, shot_id)
 
 
@@ -998,7 +1160,9 @@ def set_start_frame(
     payload: ShotStartFrameRequest,
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    shot = studio.set_shot_start_frame(session, shot_id, action=payload.action, asset_id=payload.asset_id)
+    shot = studio.set_shot_start_frame(
+        session, shot_id, action=payload.action, asset_id=payload.asset_id
+    )
     return studio.shot_payload(session, shot)
 
 
@@ -1013,13 +1177,87 @@ def set_target_keyframe(
 
 
 @router.get("/shots/{shot_id}/quality-checks", response_model=list[QualityCheckResultRead])
-def list_quality_checks(shot_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
-    return [studio.quality_payload(item) for item in quality_service.list_shot_quality_checks(session, shot_id)]
+def list_quality_checks(
+    shot_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
+    return [
+        studio.quality_payload(item)
+        for item in quality_service.list_shot_quality_checks(session, shot_id)
+    ]
 
 
 @router.post("/shots/{shot_id}/quality-checks/run", response_model=list[QualityCheckResultRead])
-def run_quality_checks(shot_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
-    return [studio.quality_payload(item) for item in quality_service.run_shot_quality_checks(session, shot_id)]
+def run_quality_checks(
+    shot_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
+    return [
+        studio.quality_payload(item)
+        for item in quality_service.run_shot_quality_checks(session, shot_id)
+    ]
+
+
+@router.post("/visual-continuity/reports/analyze", response_model=VisualContinuityReportRead)
+def analyze_visual_continuity(
+    payload: VisualContinuityAnalyzeRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    if payload.analysis_version != "visual-continuity-v1":
+        raise AppError(
+            "VISUAL_ANALYSIS_VERSION_UNSUPPORTED",
+            "The visual analysis version is unsupported.",
+            409,
+        )
+    report = visual_continuity_service.analyze_asset(
+        session,
+        video_asset_id=payload.video_asset_id,
+        start_anchor_asset_id=payload.start_anchor_asset_id,
+        target_keyframe_asset_id=payload.target_keyframe_asset_id,
+        tail_frame_asset_id=payload.tail_frame_asset_id,
+    )
+    return visual_continuity_service.report_payload(report)
+
+
+@router.get("/visual-continuity/reports/{report_id}", response_model=VisualContinuityReportRead)
+def get_visual_continuity_report(
+    report_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
+    report = session.get(VisualContinuityReport, report_id)
+    if report is None:
+        raise AppError("VISUAL_REPORT_NOT_FOUND", "Visual continuity report was not found.", 404)
+    return visual_continuity_service.report_payload(report)
+
+
+@router.post(
+    "/visual-continuity/reports/{report_id}/human-review", response_model=VisualContinuityReportRead
+)
+def review_visual_continuity_report(
+    report_id: int,
+    payload: VisualContinuityHumanReviewRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    report = visual_continuity_service.review_report(
+        session,
+        report_id,
+        status=payload.status,
+        reasons=payload.rejection_reasons,
+    )
+    return visual_continuity_service.report_payload(report)
+
+
+@router.get("/visual-continuity/reports/{report_id}/production-gate")
+def get_visual_production_gate(
+    report_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
+    report = session.get(VisualContinuityReport, report_id)
+    if report is None:
+        raise AppError("VISUAL_REPORT_NOT_FOUND", "Visual continuity report was not found.", 404)
+    return {
+        "report_id": report.id,
+        "production_gate_status": report.production_gate_status,
+        "technical_status": report.technical_status,
+        "automatic_visual_status": report.automatic_visual_status,
+        "human_visual_status": report.human_visual_status,
+    }
 
 
 @router.delete("/shots/{shot_id}", status_code=204)

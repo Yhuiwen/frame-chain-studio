@@ -36,7 +36,14 @@ def test_upgrade_empty_database_creates_phase_one_and_task_tables(tmp_path: Path
     command.upgrade(alembic_config(db_path), "head")
 
     tables = table_names(db_path)
-    assert {"project", "shot", "asset", "generationrequest", "generationtask", "taskstatechange"} <= tables
+    assert {
+        "project",
+        "shot",
+        "asset",
+        "generationrequest",
+        "generationtask",
+        "taskstatechange",
+    } <= tables
     assert "taskcommand" in tables
     assert "generationtaskresult" in tables
     assert "task_id" in columns(db_path, "tasklog")
@@ -47,7 +54,9 @@ def test_upgrade_empty_database_creates_phase_one_and_task_tables(tmp_path: Path
     assert "sha256" in columns(db_path, "asset")
 
 
-def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tmp_path: Path) -> None:
+def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "phase-one.db"
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.begin() as connection:
@@ -183,12 +192,35 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
     with engine.connect() as connection:
         assert connection.execute(sa.text("SELECT COUNT(*) FROM project")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
+        assert (
+            connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
+        )
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0021"
-        assert connection.execute(sa.text("SELECT COUNT(*) FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE remote_model IN ('doubao-seedream-5-0', 'viduq3-pro')")).scalar_one() == 2
-        for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
+        assert (
+            connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
+            == "20260721_0022"
+        )
+        assert (
+            connection.execute(
+                sa.text("SELECT COUNT(*) FROM providerprofile WHERE provider_key='toapis'")
+            ).scalar_one()
+            == 1
+        )
+        assert (
+            connection.execute(
+                sa.text(
+                    "SELECT COUNT(*) FROM providermodelprofile WHERE remote_model IN ('doubao-seedream-5-0', 'viduq3-pro')"
+                )
+            ).scalar_one()
+            == 2
+        )
+        for table in (
+            "scriptdocument",
+            "scriptblock",
+            "storyboarddraft",
+            "shotdraft",
+            "shotdraftcharacter",
+        ):
             assert connection.execute(sa.text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
     assert "task_id" in columns(db_path, "tasklog")
     assert "result_urls_json" in columns(db_path, "generationtask")
@@ -225,7 +257,9 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
     assert "providerverificationrun" in table_names(db_path)
 
 
-def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(tmp_path: Path) -> None:
+def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "duplicate-sort.db"
     config = alembic_config(db_path)
     command.upgrade(config, "20260718_0006")
@@ -258,13 +292,19 @@ def test_reliability_hardening_migration_normalizes_duplicate_shot_sort_orders(t
     command.upgrade(config, "head")
 
     with engine.connect() as connection:
-        orders = connection.execute(
-            sa.text("SELECT sort_order FROM shot WHERE project_id = 1 ORDER BY sort_order")
-        ).scalars().all()
+        orders = (
+            connection.execute(
+                sa.text("SELECT sort_order FROM shot WHERE project_id = 1 ORDER BY sort_order")
+            )
+            .scalars()
+            .all()
+        )
         assert orders == [0, 1, 2]
 
 
-def test_continuity_revision_migration_backfills_completed_shot_asset_pointers(tmp_path: Path) -> None:
+def test_continuity_revision_migration_backfills_completed_shot_asset_pointers(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "continuity-backfill.db"
     config = alembic_config(db_path)
     command.upgrade(config, "20260719_0007")
@@ -620,7 +660,9 @@ def test_structured_continuity_migration_backfills_current_shot_specs(tmp_path: 
         ).one()
         assert tuple(spec) == (1, 4, "desc", "prompt", "avoid blur", "structured-continuity-v1")
         request = connection.execute(
-            sa.text("SELECT structured_payload_json, compiler_version FROM generationrequest WHERE id = 1")
+            sa.text(
+                "SELECT structured_payload_json, compiler_version FROM generationrequest WHERE id = 1"
+            )
         ).one()
         payload = json.loads(request.structured_payload_json)
         assert request.compiler_version == "structured-continuity-v1"
@@ -638,7 +680,10 @@ def test_asset_revision_identity_migration_safe_downgrade(tmp_path: Path) -> Non
     command.downgrade(config, "20260720_0008")
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0008"
+        assert (
+            connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
+            == "20260720_0008"
+        )
         indexes = [row[1] for row in connection.execute(sa.text("PRAGMA index_list(asset)")).all()]
         assert "ix_asset_project_shot_type_sha256" in indexes
 
@@ -649,8 +694,22 @@ def test_toapis_live_enable_migration_round_trip(tmp_path: Path) -> None:
     command.upgrade(config, "head")
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
-        assert connection.execute(sa.text("SELECT live_orchestration_enabled FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 0
-        assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE billing_unit='TOAPIS_CREDIT' AND pricing_review_status='PENDING'")).scalar_one() == 2
+        assert (
+            connection.execute(
+                sa.text(
+                    "SELECT live_orchestration_enabled FROM providerprofile WHERE provider_key='toapis'"
+                )
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                sa.text(
+                    "SELECT COUNT(*) FROM providermodelprofile WHERE billing_unit='TOAPIS_CREDIT' AND pricing_review_status='PENDING'"
+                )
+            ).scalar_one()
+            == 2
+        )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
 
@@ -661,16 +720,34 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     command.upgrade(config, "head")
     engine = sa.create_engine(f"sqlite:///{db_path}")
     expected = {
-        "workflow_version", "current_stage", "verification_project_id", "shot_1_id", "shot_2_id",
-        "initial_anchor_asset_id", "shot_1_keyframe_request_id", "shot_1_video_request_id",
-        "shot_2_keyframe_request_id", "shot_2_video_request_id", "render_id",
-        "final_render_asset_id", "pricing_snapshot_hash", "billing_unit",
-        "estimated_billing_units", "reserved_billing_units", "auto_approve_for_verification",
-        "failure_stage", "failure_code", "state_version", "canary_image_only",
+        "workflow_version",
+        "current_stage",
+        "verification_project_id",
+        "shot_1_id",
+        "shot_2_id",
+        "initial_anchor_asset_id",
+        "shot_1_keyframe_request_id",
+        "shot_1_video_request_id",
+        "shot_2_keyframe_request_id",
+        "shot_2_video_request_id",
+        "render_id",
+        "final_render_asset_id",
+        "pricing_snapshot_hash",
+        "billing_unit",
+        "estimated_billing_units",
+        "reserved_billing_units",
+        "auto_approve_for_verification",
+        "failure_stage",
+        "failure_code",
+        "state_version",
+        "canary_image_only",
     }
     assert expected.issubset(set(columns(db_path, "providerverificationrun")))
     with engine.connect() as connection:
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0021"
+        assert (
+            connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
+            == "20260721_0022"
+        )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")
     command.upgrade(config, "head")
@@ -683,16 +760,30 @@ def test_toapis_pricing_evidence_migration_round_trip(tmp_path: Path) -> None:
     config = alembic_config(db_path)
     command.upgrade(config, "head")
     expected = {
-        "pricing_source_kind", "pricing_source_checked_at",
-        "pricing_source_reference", "pricing_assumptions_json",
+        "pricing_source_kind",
+        "pricing_source_checked_at",
+        "pricing_source_reference",
+        "pricing_assumptions_json",
     }
     assert expected.issubset(set(columns(db_path, "providermodelprofile")))
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
-        assert connection.execute(
-            sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE pricing_version='toapis-public-2026-07-21' AND pricing_review_status='PENDING'")
-        ).scalar_one() == 2
-        assert connection.execute(sa.text("SELECT live_orchestration_enabled FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 0
+        assert (
+            connection.execute(
+                sa.text(
+                    "SELECT COUNT(*) FROM providermodelprofile WHERE pricing_version='toapis-public-2026-07-21' AND pricing_review_status='PENDING'"
+                )
+            ).scalar_one()
+            == 2
+        )
+        assert (
+            connection.execute(
+                sa.text(
+                    "SELECT live_orchestration_enabled FROM providerprofile WHERE provider_key='toapis'"
+                )
+            ).scalar_one()
+            == 0
+        )
     command.downgrade(config, "20260721_0015")
     assert not expected.intersection(set(columns(db_path, "providermodelprofile")))
     command.upgrade(config, "head")
@@ -718,21 +809,39 @@ def test_failed_run_recovery_migration_fields(tmp_path: Path) -> None:
     config = alembic_config(db_path)
     command.upgrade(config, "head")
     assert {
-        "recovery_of_run_id", "lineage_root_run_id", "normalized_start_asset_id",
-        "normalized_end_asset_id", "reused_keyframe_asset_id", "historical_image_submits", "historical_video_submits",
-        "remaining_image_submit_limit", "remaining_video_submit_limit", "historical_billing_units",
-        "estimated_remaining_billing_units", "estimated_lineage_billing_units",
-        "maximum_lineage_billing_units", "recovery_plan_hash", "recovery_authorization_reference",
+        "recovery_of_run_id",
+        "lineage_root_run_id",
+        "normalized_start_asset_id",
+        "normalized_end_asset_id",
+        "reused_keyframe_asset_id",
+        "historical_image_submits",
+        "historical_video_submits",
+        "remaining_image_submit_limit",
+        "remaining_video_submit_limit",
+        "historical_billing_units",
+        "estimated_remaining_billing_units",
+        "estimated_lineage_billing_units",
+        "maximum_lineage_billing_units",
+        "recovery_plan_hash",
+        "recovery_authorization_reference",
     }.issubset(set(columns(db_path, "providerverificationrun")))
     assert "recovery_run_id" in set(columns(db_path, "generationtask"))
     assert {
-        "source_asset_id", "normalized_asset_id", "frame_role", "normalization_version",
-        "target_width", "target_height", "padding_color", "normalized_sha256",
+        "source_asset_id",
+        "normalized_asset_id",
+        "frame_role",
+        "normalization_version",
+        "target_width",
+        "target_height",
+        "padding_color",
+        "normalized_sha256",
     }.issubset(set(columns(db_path, "videoinputframenormalization")))
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
         indexes = connection.execute(sa.text("PRAGMA index_list(providerverificationrun)")).all()
-        assert any(row[1] == "sqlite_autoindex_providerverificationrun_1" or row[2] for row in indexes)
+        assert any(
+            row[1] == "sqlite_autoindex_providerverificationrun_1" or row[2] for row in indexes
+        )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260721_0018")
     assert "recovery_of_run_id" not in set(columns(db_path, "providerverificationrun"))
@@ -746,7 +855,9 @@ def test_recovery_project_lineage_migration_allows_project_reuse(tmp_path: Path)
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
         indexes = connection.execute(sa.text("PRAGMA index_list(providerverificationrun)")).all()
-        project_index = next(row for row in indexes if row[1] == "ix_providerverificationrun_verification_project_id")
+        project_index = next(
+            row for row in indexes if row[1] == "ix_providerverificationrun_verification_project_id"
+        )
         assert project_index[2] == 0
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
 
@@ -757,20 +868,51 @@ def test_recovery_project_lineage_downgrade_rejects_shared_project(tmp_path: Pat
     command.upgrade(config, "head")
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.begin() as connection:
-        connection.execute(sa.text(
-            "INSERT INTO project (id, name, description, created_at, updated_at) "
-            "VALUES (1, 'P', '', '2026-07-21', '2026-07-21')"
-        ))
+        connection.execute(
+            sa.text(
+                "INSERT INTO project (id, name, description, created_at, updated_at) "
+                "VALUES (1, 'P', '', '2026-07-21', '2026-07-21')"
+            )
+        )
         for run_id in (1, 2):
-            connection.execute(sa.text(
-                "INSERT INTO providerverificationrun "
-                "(id, provider_profile_id, verification_type, status, verification_project_id, summary_json, created_at) "
-                "VALUES (:id, (SELECT id FROM providerprofile LIMIT 1), 'CONTRACT', 'PASSED', 1, '{}', '2026-07-21')"
-            ), {"id": run_id})
+            connection.execute(
+                sa.text(
+                    "INSERT INTO providerverificationrun "
+                    "(id, provider_profile_id, verification_type, status, verification_project_id, summary_json, created_at) "
+                    "VALUES (:id, (SELECT id FROM providerprofile LIMIT 1), 'CONTRACT', 'PASSED', 1, '{}', '2026-07-21')"
+                ),
+                {"id": run_id},
+            )
     with pytest.raises(RuntimeError, match="shared by a recovery lineage"):
         command.downgrade(config, "20260721_0020")
     with engine.connect() as connection:
-        assert connection.execute(sa.text("SELECT COUNT(*) FROM providerverificationrun")).scalar_one() == 2
+        assert (
+            connection.execute(sa.text("SELECT COUNT(*) FROM providerverificationrun")).scalar_one()
+            == 2
+        )
+
+
+def test_visual_continuity_report_migration(tmp_path: Path) -> None:
+    db_path = tmp_path / "visual-continuity.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    assert {
+        "video_asset_id",
+        "analysis_version",
+        "config_hash",
+        "report_hash",
+        "technical_status",
+        "automatic_visual_status",
+        "human_visual_status",
+        "production_gate_status",
+        "metrics_json",
+        "rejection_reasons_json",
+    }.issubset(set(columns(db_path, "visualcontinuityreport")))
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.connect() as connection:
+        indexes = connection.execute(sa.text("PRAGMA index_list(visualcontinuityreport)")).all()
+        assert any(row[2] for row in indexes)
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:
@@ -818,4 +960,7 @@ def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Pa
     with pytest.raises(RuntimeError, match="Cannot downgrade asset identity"):
         command.downgrade(config, "20260720_0008")
     with engine.connect() as connection:
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0009"
+        assert (
+            connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
+            == "20260720_0009"
+        )
