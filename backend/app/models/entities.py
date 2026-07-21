@@ -1346,6 +1346,60 @@ class VisualRegenerationReviewEvent(SQLModel, table=True):
     reviewed_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class ProjectVisualBaseline(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    source_asset_id: int = Field(foreign_key="asset.id", index=True)
+    source_run_id: int | None = Field(default=None, foreign_key="providerverificationrun.id")
+    source_shot_id: int | None = Field(default=None, foreign_key="shot.id")
+    baseline_version: str = Field(index=True)
+    baseline_hash: str = Field(max_length=64, index=True)
+    status: str = Field(default="DRAFT", index=True)
+    character_lock_json: str = Field(default="{}")
+    camera_lock_json: str = Field(default="{}")
+    environment_lock_json: str = Field(default="{}")
+    style_lock_json: str = Field(default="{}")
+    forbidden_changes_json: str = Field(default="[]")
+    automatic_metrics_json: str = Field(default="{}")
+    human_review_status: str = Field(default="PENDING", index=True)
+    human_review_comment: str = Field(default="", max_length=2000)
+    approved_at: datetime | None = None
+    superseded_by_id: int | None = Field(default=None, foreign_key="projectvisualbaseline.id")
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class VisualExperimentAuthorizationPackage(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    source_run_id: int = Field(foreign_key="providerverificationrun.id", index=True)
+    regeneration_plan_id: int | None = Field(default=None, foreign_key="visualregenerationplan.id")
+    candidate_type: str = Field(index=True)
+    visual_baseline_id: int | None = Field(default=None, foreign_key="projectvisualbaseline.id")
+    baseline_hash: str | None = Field(default=None, max_length=64)
+    prompt_contract_hash: str = Field(max_length=64)
+    compiled_prompt_hashes_json: str = Field(default="{}")
+    regeneration_plan_hash: str = Field(max_length=64)
+    experiment_plan_hash: str = Field(max_length=64, index=True)
+    target_shot_count: int = 2
+    maximum_image_submits: int = 2
+    maximum_video_submits: int = 2
+    video_duration_seconds_each: int
+    maximum_total_video_seconds: int
+    estimated_billing_units: str
+    maximum_billing_units: str
+    billing_unit: str = "TOAPIS_CREDIT"
+    pricing_snapshot_hash: str = Field(max_length=64)
+    pricing_reviewed: bool = False
+    balance_review_valid: bool = False
+    model_access_valid: bool = False
+    human_plan_review_status: str = Field(default="PENDING", index=True)
+    human_baseline_review_status: str = Field(default="PENDING", index=True)
+    authorization_status: str = Field(default="DRAFT", index=True)
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class TaskCommand(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("command_type", "idempotency_key", name="uq_taskcommand_type_idempotency"),

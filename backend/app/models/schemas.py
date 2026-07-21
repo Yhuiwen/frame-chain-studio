@@ -484,6 +484,26 @@ class VisualRegenerationReviewRequest(BaseModel):
     acknowledged_no_execution: bool
 
 
+class VisualExperimentPlanRequest(BaseModel):
+    project_id: int
+    source_run_id: int
+    candidate: str = Field(max_length=80)
+    selected_baseline_asset_id: int | None = None
+    save_draft: bool = False
+
+
+class VisualBaselineDraftRequest(BaseModel):
+    project_id: int
+    source_asset_id: int
+    source_run_id: int = 6
+
+
+class VisualBaselineReviewRequest(BaseModel):
+    expected_baseline_hash: str = Field(min_length=64, max_length=64)
+    decision: str = Field(max_length=20)
+    comment: str = Field(default="", max_length=2000)
+
+
 class CharacterBase(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)

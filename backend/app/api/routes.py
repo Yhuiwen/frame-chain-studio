@@ -111,6 +111,9 @@ from app.models.schemas import (
     VisualContinuityReviewEventRead,
     VisualRegenerationPlanRequest,
     VisualRegenerationReviewRequest,
+    VisualExperimentPlanRequest,
+    VisualBaselineDraftRequest,
+    VisualBaselineReviewRequest,
 )
 from app.providers.config_loader import load_registry, load_registry_from_env
 from app.providers.exceptions import ProviderError
@@ -133,6 +136,7 @@ from app.services import (
     toapis_video_canary,
     visual_continuity_service,
     visual_regeneration,
+    visual_experiment,
     worker_status,
 )
 from app.workers import render_service
@@ -1386,6 +1390,34 @@ def review_visual_regeneration_plan(
         acknowledgements=(payload.acknowledged_visual_failures, payload.acknowledged_estimated_cost, payload.acknowledged_no_execution),
     )
     return visual_regeneration.plan_payload(plan)
+
+
+@router.post("/visual-experiments/plan-only")
+def visual_experiment_plan_only(payload: VisualExperimentPlanRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+    result = visual_experiment.build_authorization_plan_only(session, project_id=payload.project_id, source_run_id=payload.source_run_id,
+        candidate=payload.candidate, selected_baseline_asset_id=payload.selected_baseline_asset_id)
+    if payload.save_draft:
+        saved = visual_experiment.save_package_draft(session, result)
+        result["savedDraftId"] = saved.id
+        result["databaseUpdated"] = True
+    return result
+
+
+@router.get("/projects/{project_id}/visual-baseline-candidates")
+def get_visual_baseline_candidates(project_id: int, session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return visual_experiment.baseline_candidates(session, project_id)
+
+
+@router.post("/visual-baselines/drafts")
+def create_visual_baseline_draft(payload: VisualBaselineDraftRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+    item=visual_experiment.create_baseline_draft(session,project_id=payload.project_id,source_asset_id=payload.source_asset_id,source_run_id=payload.source_run_id)
+    return {"id":item.id,"baselineHash":item.baseline_hash,"status":item.status,"humanReviewStatus":item.human_review_status}
+
+
+@router.post("/visual-baselines/{baseline_id}/review")
+def review_visual_baseline(baseline_id: int, payload: VisualBaselineReviewRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+    item=visual_experiment.review_baseline(session,baseline_id=baseline_id,expected_hash=payload.expected_baseline_hash,decision=payload.decision,comment=payload.comment)
+    return {"id":item.id,"baselineHash":item.baseline_hash,"status":item.status,"humanReviewStatus":item.human_review_status}
 
 
 @router.delete("/shots/{shot_id}", status_code=204)

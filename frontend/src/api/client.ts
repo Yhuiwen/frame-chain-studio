@@ -158,6 +158,17 @@ export interface VisualRegenerationPlanOnly {
   readyForHumanReview: boolean; readyForPaidExecution: false; recommendationReason: string;
 }
 
+export interface VisualExperimentPlanOnly {
+  candidateType: string; experimentPlanHash: string; selectedRegenerationPlanHash: string;
+  selectedBaselineAssetId: number | null; baselineHash: string | null; baselineCandidates: Array<{assetId:number; automaticScore:number; styleAssessment:string; exclusionReasons:string[]}>;
+  baselineHumanReviewStatus: string; planHumanReviewStatus: string; authorizationStatus: string;
+  recommendedCandidate: string; promptContractHash: string; compiledImagePromptHashes: string[]; compiledVideoPromptHashes: string[];
+  promptContracts: Record<string, Record<string, Record<string, unknown>>>; compiledPrompts: Array<{image:{prompt:string;promptHash:string};video:{prompt:string;promptHash:string}}>;
+  imageRequests:number; videoRequests:number; videoDurationSecondsEach:number; totalVideoSeconds:number;
+  estimatedBillingUnits:string; maximumBillingUnits:string; billingUnit:string;
+  readyForExplicitAuthorization:boolean; readyForPaidExecution:boolean;
+}
+
 export interface GenerationRequest {
   id: number;
   project_id: number;
@@ -837,6 +848,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  planVisualExperiment: (body: {project_id:number;source_run_id:number;candidate:string;selected_baseline_asset_id?:number|null;save_draft?:boolean}) =>
+    request<VisualExperimentPlanOnly>("/api/visual-experiments/plan-only", {method:"POST",body:JSON.stringify(body)}),
   planVisualRegeneration: (body: { project_id: number; source_run_id: number; strategy: string; maximum_billing_units: string; save_draft?: boolean }) =>
     request<VisualRegenerationPlanOnly>("/api/visual-regeneration/plan-only", { method: "POST", body: JSON.stringify(body) }),
   mediaUrl: (assetId: number) => `${API_BASE}/api/media/${assetId}`,
