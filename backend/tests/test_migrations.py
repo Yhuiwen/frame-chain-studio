@@ -198,7 +198,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260721_0022"
+            == "20260721_0023"
         )
         assert (
             connection.execute(
@@ -746,7 +746,7 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     with engine.connect() as connection:
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260721_0022"
+            == "20260721_0023"
         )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")
@@ -897,22 +897,30 @@ def test_visual_continuity_report_migration(tmp_path: Path) -> None:
     config = alembic_config(db_path)
     command.upgrade(config, "head")
     assert {
-        "video_asset_id",
-        "analysis_version",
-        "config_hash",
-        "report_hash",
-        "technical_status",
-        "automatic_visual_status",
-        "human_visual_status",
-        "production_gate_status",
-        "metrics_json",
-        "rejection_reasons_json",
+        "video_asset_id", "analysis_version", "config_hash", "report_hash",
+        "technical_status", "automatic_visual_status", "human_visual_status",
+        "production_gate_status", "metrics_json", "rejection_reasons_json",
     }.issubset(set(columns(db_path, "visualcontinuityreport")))
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
         indexes = connection.execute(sa.text("PRAGMA index_list(visualcontinuityreport)")).all()
         assert any(row[2] for row in indexes)
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+
+
+def test_visual_review_event_migration_from_0022(tmp_path: Path) -> None:
+    db_path = tmp_path / "visual-review-event.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260721_0022")
+    command.upgrade(config, "head")
+    assert {
+        "report_id",
+        "reviewer",
+        "status",
+        "comment",
+        "resulting_production_gate_status",
+        "reviewed_at",
+    }.issubset(set(columns(db_path, "visualcontinuityreviewevent")))
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:

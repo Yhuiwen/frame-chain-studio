@@ -1,5 +1,7 @@
 # Frame Chain Studio
 
+Visual continuity reports can be reviewed from a project’s **视觉连续性审核** entry or `/projects/:projectId/visual-review`. See [the visual review workspace guide](docs/phase-3c-visual-review-workspace.md).
+
 Phase 4A includes an offline-contract-verified dedicated TOAPIS adapter for Seedream 5.0 images and Vidu Q3 Pro first/last-frame video. See [TOAPIS Provider](docs/providers/toapis.md). Live verification remains opt-in, cost-bounded, and blocked by default.
 
 Live enable uses an auditable, expiring `TOAPIS_CREDIT` pricing review, read-only model-access preflight, manual capacity confirmation, and a centralized backend submit gate. It does not convert credits or token quota into USD.

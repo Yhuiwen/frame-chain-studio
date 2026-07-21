@@ -389,6 +389,7 @@ async function uploadTargetKeyframe(event: Event) {
         >
           Shot Spec
         </el-button>
+        <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/visual-review`)">视觉连续性审核</el-button>
         <el-button native-type="button" :icon="Refresh" :loading="store.refreshing" @click="refreshProjectDetail">
           鍒锋柊
         </el-button>

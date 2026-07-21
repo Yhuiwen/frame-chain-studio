@@ -1280,6 +1280,20 @@ class VisualContinuityReport(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class VisualContinuityReviewEvent(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    report_id: int = Field(foreign_key="visualcontinuityreport.id", index=True)
+    reviewer: str = Field(default="local-operator", max_length=160)
+    review_source: str = Field(default="OPERATOR_REVIEW", max_length=80)
+    status: HumanVisualStatus = Field(index=True)
+    rejection_reasons_json: str = Field(default="[]")
+    comment: str = Field(default="", max_length=2000)
+    previous_production_gate_status: ProductionGateStatus
+    resulting_production_gate_status: ProductionGateStatus
+    report_hash: str = Field(max_length=64)
+    reviewed_at: datetime = Field(default_factory=utcnow, index=True)
+
+
 class TaskCommand(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("command_type", "idempotency_key", name="uq_taskcommand_type_idempotency"),

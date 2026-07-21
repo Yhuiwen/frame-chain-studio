@@ -1,6 +1,8 @@
 from pathlib import Path
 from datetime import datetime
 from decimal import Decimal
+import hashlib
+import shutil
 import tempfile
 
 from alembic.config import Config
@@ -15,6 +17,7 @@ from app.core.config import BACKEND_ROOT, get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
 from app.media.ffmpeg import require_binary
+from app.media.visual_continuity import sampled_frames
 from app.models.entities import (
     Asset,
     GenerationKind,
@@ -104,6 +107,7 @@ from app.models.schemas import (
     VisualContinuityAnalyzeRequest,
     VisualContinuityHumanReviewRequest,
     VisualContinuityReportRead,
+    VisualContinuityReviewEventRead,
 )
 from app.providers.config_loader import load_registry, load_registry_from_env
 from app.providers.exceptions import ProviderError
@@ -607,9 +611,15 @@ def asset_response(asset_id: int, *, session: Session, range_header: str | None 
         )
     if not asset_path.exists() or not asset_path.is_file():
         raise AppError("ASSET_FILE_NOT_FOUND", f"Asset file for {asset_id} was not found.", 404)
+    if not (asset.mime_type.startswith("image/") or asset.mime_type.startswith("video/")):
+        raise AppError("ASSET_MEDIA_TYPE_DENIED", "Only image and video Assets may be previewed.", 403)
     if range_header:
         return _range_response(asset_path, asset.mime_type, range_header)
-    return FileResponse(asset_path, media_type=asset.mime_type)
+    return FileResponse(
+        asset_path,
+        media_type=asset.mime_type,
+        headers={"X-Content-Type-Options": "nosniff", "Accept-Ranges": "bytes"},
+    )
 
 
 def _range_response(path: Path, mime_type: str, range_header: str) -> StreamingResponse:
@@ -644,6 +654,7 @@ def _range_response(path: Path, mime_type: str, range_header: str) -> StreamingR
             "Content-Range": f"bytes {start}-{end}/{size}",
             "Accept-Ranges": "bytes",
             "Content-Length": str(length),
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -1217,6 +1228,16 @@ def analyze_visual_continuity(
     return visual_continuity_service.report_payload(report)
 
 
+@router.get("/visual-continuity/reports", response_model=list[VisualContinuityReportRead])
+def list_visual_continuity_reports(
+    project_id: int | None = None, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
+    return [
+        visual_continuity_service.report_payload(report)
+        for report in visual_continuity_service.list_reports(session, project_id)
+    ]
+
+
 @router.get("/visual-continuity/reports/{report_id}", response_model=VisualContinuityReportRead)
 def get_visual_continuity_report(
     report_id: int, session: Session = Depends(get_session)
@@ -1240,8 +1261,63 @@ def review_visual_continuity_report(
         report_id,
         status=payload.status,
         reasons=payload.rejection_reasons,
+        comment=payload.comment,
+        reviewer=payload.reviewer,
+        expected_report_hash=payload.expected_report_hash,
+        expected_updated_at=payload.expected_updated_at,
     )
     return visual_continuity_service.report_payload(report)
+
+
+@router.get(
+    "/visual-continuity/reports/{report_id}/history",
+    response_model=list[VisualContinuityReviewEventRead],
+)
+def get_visual_review_history(
+    report_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
+    if session.get(VisualContinuityReport, report_id) is None:
+        raise AppError("VISUAL_REPORT_NOT_FOUND", "Visual continuity report was not found.", 404)
+    return visual_continuity_service.review_history(session, report_id)
+
+
+@router.get("/visual-continuity/reports/{report_id}/preview-manifest")
+def get_visual_preview_manifest(
+    report_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
+    return visual_continuity_service.preview_manifest(session, report_id)
+
+
+@router.get("/visual-continuity/reports/{report_id}/frames/{timestamp}", response_model=None)
+def get_visual_preview_frame(
+    report_id: int, timestamp: float, session: Session = Depends(get_session)
+) -> Response:
+    report = session.get(VisualContinuityReport, report_id)
+    if report is None:
+        raise AppError("VISUAL_REPORT_NOT_FOUND", "Visual continuity report was not found.", 404)
+    asset = session.get(Asset, report.video_asset_id)
+    if asset is None or not asset.mime_type.startswith("video/"):
+        raise AppError("VISUAL_VIDEO_MISSING", "The report video is unavailable.", 404)
+    if timestamp < 0 or (asset.duration_seconds is not None and timestamp > asset.duration_seconds + 0.01):
+        raise AppError("VISUAL_FRAME_TIME_INVALID", "The preview timestamp is outside the video.", 422)
+    source = Path(asset.path).resolve()
+    storage_root = get_settings().storage_dir.resolve()
+    if storage_root not in source.parents:
+        raise AppError("ASSET_ACCESS_DENIED", "Asset file is outside storage.", 403)
+    key = hashlib.sha256(
+        f"{asset.sha256}:{timestamp:.6f}:{report.analysis_version}".encode()
+    ).hexdigest()
+    cache = BACKEND_ROOT.parent / ".run" / "visual-preview-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / f"{key}.png"
+    if not target.exists():
+        with sampled_frames(source, [timestamp], fps=asset.fps or 24.0) as frames:
+            shutil.copy2(frames[0].path, target)
+    return FileResponse(
+        target,
+        media_type="image/png",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.get("/visual-continuity/reports/{report_id}/production-gate")

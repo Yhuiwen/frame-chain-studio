@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
+from datetime import datetime
 from typing import Any
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.core.errors import AppError
 from app.media.validation import validate_video
@@ -28,8 +29,10 @@ from app.models.entities import (
     AssetType,
     HumanVisualStatus,
     ProductionGateStatus,
+    Shot,
     VisualAnalysisStatus,
     VisualContinuityReport,
+    VisualContinuityReviewEvent,
     utcnow,
 )
 from app.services import provider_management
@@ -217,11 +220,36 @@ def analyze_asset(
 
 
 def review_report(
-    session: Session, report_id: int, *, status: HumanVisualStatus, reasons: list[str]
+    session: Session,
+    report_id: int,
+    *,
+    status: HumanVisualStatus,
+    reasons: list[str],
+    comment: str,
+    reviewer: str,
+    expected_report_hash: str,
+    expected_updated_at: datetime,
 ) -> VisualContinuityReport:
     report = session.get(VisualContinuityReport, report_id)
     if report is None:
         raise AppError("VISUAL_REPORT_NOT_FOUND", "Visual continuity report was not found.", 404)
+    if report.report_hash != expected_report_hash or report.updated_at != expected_updated_at.replace(
+        tzinfo=None
+    ):
+        raise AppError("VISUAL_REVIEW_CONFLICT", "The report changed; refresh before reviewing.", 409)
+    allowed = {
+        "CHARACTER_STYLE_DRIFT", "INTRA_SHOT_SCENE_CUT", "COMPOSITION_DISCONTINUITY",
+        "SUBJECT_SCALE_DRIFT", "CAMERA_DRIFT", "ANCHOR_MISMATCH",
+        "TARGET_KEYFRAME_MISMATCH", "CROSS_SHOT_SEAM_FAILURE", "EXTRA_OBJECT",
+        "TEXT_OR_WATERMARK", "CHARACTER_DEFORMATION", "OTHER",
+    }
+    if any(reason not in allowed for reason in reasons):
+        raise AppError("VISUAL_REVIEW_REASON_INVALID", "A rejection reason is unsupported.", 422)
+    if status == HumanVisualStatus.REJECTED and not reasons:
+        raise AppError("VISUAL_REVIEW_REASON_REQUIRED", "Rejected reviews require a reason.", 422)
+    if "OTHER" in reasons and not comment.strip():
+        raise AppError("VISUAL_REVIEW_COMMENT_REQUIRED", "OTHER requires a comment.", 422)
+    previous_gate = report.production_gate_status
     report.human_visual_status = status
     report.rejection_reasons_json = provider_management.dumps(sorted(set(reasons)))
     report.overall_visual_status = _overall(report.automatic_visual_status, status)
@@ -233,6 +261,18 @@ def review_report(
     )
     report.updated_at = utcnow()
     session.add(report)
+    session.add(
+        VisualContinuityReviewEvent(
+            report_id=report_id,
+            reviewer=reviewer.strip(),
+            status=status,
+            rejection_reasons_json=provider_management.dumps(sorted(set(reasons))),
+            comment=comment.strip(),
+            previous_production_gate_status=previous_gate,
+            resulting_production_gate_status=report.production_gate_status,
+            report_hash=report.report_hash,
+        )
+    )
     session.commit()
     session.refresh(report)
     return report
@@ -262,6 +302,138 @@ def report_payload(report: VisualContinuityReport) -> dict[str, object]:
         **report.model_dump(exclude={"metrics_json", "rejection_reasons_json"}),
         "metrics": provider_management.loads_dict(report.metrics_json),
         "rejection_reasons": provider_management.loads_list(report.rejection_reasons_json),
+    }
+
+
+def list_reports(session: Session, project_id: int | None = None) -> list[VisualContinuityReport]:
+    statement = select(VisualContinuityReport)
+    if project_id is not None:
+        statement = statement.where(VisualContinuityReport.project_id == project_id)
+    return list(session.exec(statement.order_by(col(VisualContinuityReport.created_at).desc())).all())
+
+
+def review_history(session: Session, report_id: int) -> list[dict[str, object]]:
+    events = session.exec(
+        select(VisualContinuityReviewEvent)
+        .where(VisualContinuityReviewEvent.report_id == report_id)
+        .order_by(col(VisualContinuityReviewEvent.reviewed_at).desc())
+    ).all()
+    return [
+        {
+            **event.model_dump(exclude={"rejection_reasons_json"}),
+            "rejection_reasons": provider_management.loads_list(event.rejection_reasons_json),
+        }
+        for event in events
+    ]
+
+
+def preview_manifest(session: Session, report_id: int) -> dict[str, object]:
+    report = session.get(VisualContinuityReport, report_id)
+    if report is None:
+        raise AppError("VISUAL_REPORT_NOT_FOUND", "Visual continuity report was not found.", 404)
+    metrics = provider_management.loads_dict(report.metrics_json)
+    candidates = metrics.get("sceneCutCandidates", [])
+    pairs: list[dict[str, object]] = [
+        _asset_pair("START_ANCHOR_FIRST_FRAME", report.start_anchor_asset_id, report.video_asset_id, 0),
+        _asset_pair("TARGET_KEYFRAME_LAST_FRAME", report.target_keyframe_asset_id, report.video_asset_id, None),
+    ]
+    for candidate in candidates if isinstance(candidates, list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        pairs.append(
+            {
+                "kind": "SCENE_CUT_CANDIDATE",
+                "leftSource": "VIDEO_FRAME",
+                "rightSource": "VIDEO_FRAME",
+                "leftAssetId": report.video_asset_id,
+                "rightAssetId": report.video_asset_id,
+                "leftTimestamp": candidate.get("beforeSeconds"),
+                "rightTimestamp": candidate.get("afterSeconds"),
+                "metrics": candidate.get("metrics", {}),
+                "status": candidate.get("decision", "INCONCLUSIVE"),
+                "reasonCodes": ["INTRA_SHOT_SCENE_CUT"],
+            }
+        )
+    seam = _cross_shot_preview(session, report)
+    if seam is not None:
+        seam_pair = seam.get("comparisonPair")
+        if isinstance(seam_pair, dict):
+            pairs.append(seam_pair)
+    return {
+        "reportId": report.id,
+        "projectId": report.project_id,
+        "shotId": report.shot_id,
+        "videoAssetId": report.video_asset_id,
+        "startAnchorAssetId": report.start_anchor_asset_id,
+        "targetKeyframeAssetId": report.target_keyframe_asset_id,
+        "tailFrameAssetId": report.tail_frame_asset_id,
+        "normalizedAssets": [],
+        "shotBoundaries": [],
+        "sceneCutCandidates": candidates,
+        "comparisonPairs": pairs,
+        "analysisVersion": report.analysis_version,
+        "configHash": report.config_hash,
+        "reportHash": report.report_hash,
+        "promptContract": None,
+        "promptContractWarning": "No structured prompt contract was persisted for this historical report.",
+        "crossShotSeam": seam,
+    }
+
+
+def _asset_pair(kind: str, left_id: int | None, right_id: int, timestamp: float | None) -> dict[str, object]:
+    return {
+        "kind": kind, "leftSource": "ASSET", "rightSource": "VIDEO_FRAME",
+        "leftAssetId": left_id, "rightAssetId": right_id, "leftTimestamp": None,
+        "rightTimestamp": timestamp, "metrics": {}, "status": "INCONCLUSIVE", "reasonCodes": [],
+    }
+
+
+def _cross_shot_preview(
+    session: Session, report: VisualContinuityReport
+) -> dict[str, object] | None:
+    if report.shot_id is None or report.start_anchor_asset_id is None:
+        return None
+    shot = session.get(Shot, report.shot_id)
+    if shot is None:
+        return None
+    previous = session.exec(
+        select(Shot).where(
+            Shot.project_id == report.project_id,
+            Shot.sort_order < shot.sort_order,
+        ).order_by(col(Shot.sort_order).desc())
+    ).first()
+    if previous is None or previous.locked_tail_frame_asset_id is None:
+        return None
+    source = session.get(Asset, report.start_anchor_asset_id)
+    visited: set[int] = set()
+    lineage_verified = False
+    while source is not None and source.source_asset_id is not None and source.id not in visited:
+        if source.id == previous.locked_tail_frame_asset_id:
+            lineage_verified = True
+            break
+        visited.add(source.id or 0)
+        source = session.get(Asset, source.source_asset_id)
+    lineage_verified = lineage_verified or (
+        source is not None and source.id == previous.locked_tail_frame_asset_id
+    )
+    pair = {
+        "kind": "CROSS_SHOT_TAIL_TO_FIRST",
+        "leftSource": "LOCAL_FFMPEG_TAIL_FRAME",
+        "rightSource": "VIDEO_FRAME",
+        "leftAssetId": previous.locked_tail_frame_asset_id,
+        "rightAssetId": report.video_asset_id,
+        "leftTimestamp": None,
+        "rightTimestamp": 0,
+        "metrics": {},
+        "status": "PASSED" if lineage_verified else "FAILED",
+        "reasonCodes": [] if lineage_verified else ["CROSS_SHOT_SEAM_FAILURE"],
+    }
+    return {
+        "lineageSource": "LOCAL_FFMPEG_TAIL_FRAME" if lineage_verified else "UNVERIFIED",
+        "remoteLastFrameUsed": False,
+        "lineageVerified": lineage_verified,
+        "status": pair["status"],
+        "comparisonPair": pair,
     }
 
 

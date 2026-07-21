@@ -415,6 +415,10 @@ class VisualContinuityAnalyzeRequest(BaseModel):
 class VisualContinuityHumanReviewRequest(BaseModel):
     status: HumanVisualStatus
     rejection_reasons: list[str] = Field(default_factory=list, max_length=32)
+    comment: str = Field(default="", max_length=2000)
+    reviewer: str = Field(default="local-operator", min_length=1, max_length=160)
+    expected_report_hash: str = Field(min_length=64, max_length=64)
+    expected_updated_at: datetime
 
 
 class VisualContinuityReportRead(BaseModel):
@@ -445,6 +449,20 @@ class VisualContinuityReportRead(BaseModel):
     rejection_reasons: list[object]
     created_at: datetime
     updated_at: datetime
+
+
+class VisualContinuityReviewEventRead(BaseModel):
+    id: int
+    report_id: int
+    reviewer: str
+    review_source: str
+    status: HumanVisualStatus
+    rejection_reasons: list[object]
+    comment: str
+    previous_production_gate_status: ProductionGateStatus
+    resulting_production_gate_status: ProductionGateStatus
+    report_hash: str
+    reviewed_at: datetime
 
 
 class CharacterBase(BaseModel):

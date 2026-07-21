@@ -84,6 +84,67 @@ export interface Asset {
   fps: number | null;
 }
 
+export type VisualStatus = "PENDING" | "PASSED" | "FAILED" | "INCONCLUSIVE";
+export type HumanVisualStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface VisualContinuityReport {
+  id: number;
+  project_id: number;
+  shot_id: number | null;
+  video_asset_id: number;
+  start_anchor_asset_id: number | null;
+  target_keyframe_asset_id: number | null;
+  tail_frame_asset_id: number | null;
+  analysis_version: string;
+  config_hash: string;
+  report_hash: string;
+  technical_status: VisualStatus;
+  automatic_visual_status: VisualStatus;
+  human_visual_status: HumanVisualStatus;
+  overall_visual_status: VisualStatus;
+  scene_cut_status: VisualStatus;
+  anchor_match_status: VisualStatus;
+  target_match_status: VisualStatus;
+  camera_stability_status: VisualStatus;
+  composition_drift_status: VisualStatus;
+  subject_scale_drift_status: VisualStatus;
+  style_drift_status: VisualStatus;
+  cross_shot_seam_status: VisualStatus;
+  production_gate_status: "BLOCKED" | "ALLOWED";
+  metrics: Record<string, unknown>;
+  rejection_reasons: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VisualComparisonPair {
+  kind: string;
+  leftSource: string;
+  rightSource: string;
+  leftAssetId: number | null;
+  rightAssetId: number | null;
+  leftTimestamp: number | null;
+  rightTimestamp: number | null;
+  metrics: Record<string, unknown>;
+  status: string;
+  reasonCodes: string[];
+}
+
+export interface VisualPreviewManifest {
+  reportId: number;
+  projectId: number;
+  shotId: number | null;
+  videoAssetId: number;
+  sceneCutCandidates: Array<Record<string, unknown>>;
+  comparisonPairs: VisualComparisonPair[];
+  analysisVersion: string;
+  configHash: string;
+  reportHash: string;
+  promptContract: Record<string, unknown> | null;
+  promptContractWarning: string | null;
+  crossShotSeam?: Record<string, unknown> | null;
+}
+
 export interface GenerationRequest {
   id: number;
   project_id: number;
@@ -763,6 +824,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  mediaUrl: (assetId: number) => `${API_BASE}/api/media/${assetId}`,
+  visualFrameUrl: (reportId: number, timestamp: number) =>
+    `${API_BASE}/api/visual-continuity/reports/${reportId}/frames/${timestamp}`,
+  listVisualReports: (projectId?: number) =>
+    request<VisualContinuityReport[]>(`/api/visual-continuity/reports${projectId ? `?project_id=${projectId}` : ""}`),
+  getVisualReport: (reportId: number) =>
+    request<VisualContinuityReport>(`/api/visual-continuity/reports/${reportId}`),
+  getVisualManifest: (reportId: number) =>
+    request<VisualPreviewManifest>(`/api/visual-continuity/reports/${reportId}/preview-manifest`),
+  getVisualReviewHistory: (reportId: number) =>
+    request<Array<Record<string, unknown>>>(`/api/visual-continuity/reports/${reportId}/history`),
+  reviewVisualReport: (reportId: number, body: {
+    status: "APPROVED" | "REJECTED";
+    rejection_reasons: string[];
+    comment: string;
+    reviewer: string;
+    expected_report_hash: string;
+    expected_updated_at: string;
+  }) => request<VisualContinuityReport>(`/api/visual-continuity/reports/${reportId}/human-review`, {
+    method: "POST", body: JSON.stringify(body),
+  }),
+  analyzeVisualReport: (body: {
+    video_asset_id: number;
+    start_anchor_asset_id: number | null;
+    target_keyframe_asset_id: number | null;
+    tail_frame_asset_id: number | null;
+    analysis_version: string;
+  }) => request<VisualContinuityReport>("/api/visual-continuity/reports/analyze", {
+    method: "POST", body: JSON.stringify(body),
+  }),
   usageCsvUrl: (projectId: number) => `${API_BASE}/api/projects/${projectId}/usage/export.csv`,
   listProviders: () => request<ProviderInfo[]>("/api/providers"),
   listProviderProfiles: (includeArchived = false) =>

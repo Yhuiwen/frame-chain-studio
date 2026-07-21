@@ -36,6 +36,7 @@ from app.models.entities import (
     Shot,
     VisualAnalysisStatus,
     VisualContinuityReport,
+    VisualContinuityReviewEvent,
 )
 from app.services.visual_continuity_service import production_gate, review_report
 
@@ -274,8 +275,30 @@ def test_report_identity_and_human_rejection_block(session: Session, tmp_path: P
     session.add(report)
     session.commit()
     rejected = review_report(
-        session, report.id or 0, status=HumanVisualStatus.REJECTED, reasons=["STYLE"]
+        session,
+        report.id or 0,
+        status=HumanVisualStatus.REJECTED,
+        reasons=["CHARACTER_STYLE_DRIFT"],
+        comment="Reviewed locally.",
+        reviewer="tester",
+        expected_report_hash=report.report_hash,
+        expected_updated_at=report.updated_at,
     )
     assert rejected.production_gate_status == ProductionGateStatus.BLOCKED
     assert rejected.overall_visual_status == VisualAnalysisStatus.FAILED
     assert len(session.exec(select(VisualContinuityReport)).all()) == 1
+    events = session.exec(select(VisualContinuityReviewEvent)).all()
+    assert len(events) == 1
+    assert events[0].reviewer == "tester"
+    assert events[0].resulting_production_gate_status == ProductionGateStatus.BLOCKED
+    with pytest.raises(AppError, match="changed"):
+        review_report(
+            session,
+            report.id or 0,
+            status=HumanVisualStatus.APPROVED,
+            reasons=[],
+            comment="",
+            reviewer="stale-reviewer",
+            expected_report_hash=report.report_hash,
+            expected_updated_at=report.updated_at.replace(year=report.updated_at.year - 1),
+        )
