@@ -279,11 +279,44 @@ class ProviderVerificationType(str, Enum):
     LIVE_IMAGE = "LIVE_IMAGE"
     LIVE_VIDEO = "LIVE_VIDEO"
     LIVE_CHAIN = "LIVE_CHAIN"
+    LIVE_CANARY = "LIVE_CANARY"
+    LIVE_VIDEO_CANARY = "LIVE_VIDEO_CANARY"
 
 
 class ProviderVerificationStatus(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    FAILED_BUT_BILLED = "FAILED_BUT_BILLED"
+    BLOCKED = "BLOCKED"
+    CANCELLED = "CANCELLED"
+
+
+class ToApisVerificationStage(str, Enum):
+    CREATED = "CREATED"
+    PROJECT_READY = "PROJECT_READY"
+    SHOTS_READY = "SHOTS_READY"
+    CANARY_REQUESTED = "CANARY_REQUESTED"
+    FRAMES_READY = "FRAMES_READY"
+    VIDEO_REQUESTED = "VIDEO_REQUESTED"
+    VIDEO_ASSET_READY = "VIDEO_ASSET_READY"
+    TAIL_FRAME_READY = "TAIL_FRAME_READY"
+    SHOT_1_KEYFRAME_REQUESTED = "SHOT_1_KEYFRAME_REQUESTED"
+    SHOT_1_KEYFRAME_READY = "SHOT_1_KEYFRAME_READY"
+    SHOT_1_KEYFRAME_APPROVED = "SHOT_1_KEYFRAME_APPROVED"
+    SHOT_1_VIDEO_REQUESTED = "SHOT_1_VIDEO_REQUESTED"
+    SHOT_1_VIDEO_READY = "SHOT_1_VIDEO_READY"
+    SHOT_1_VIDEO_APPROVED = "SHOT_1_VIDEO_APPROVED"
+    SHOT_2_START_FRAME_VERIFIED = "SHOT_2_START_FRAME_VERIFIED"
+    SHOT_2_KEYFRAME_REQUESTED = "SHOT_2_KEYFRAME_REQUESTED"
+    SHOT_2_KEYFRAME_READY = "SHOT_2_KEYFRAME_READY"
+    SHOT_2_KEYFRAME_APPROVED = "SHOT_2_KEYFRAME_APPROVED"
+    SHOT_2_VIDEO_REQUESTED = "SHOT_2_VIDEO_REQUESTED"
+    SHOT_2_VIDEO_READY = "SHOT_2_VIDEO_READY"
+    SHOT_2_VIDEO_APPROVED = "SHOT_2_VIDEO_APPROVED"
+    RENDER_REQUESTED = "RENDER_REQUESTED"
+    RENDER_READY = "RENDER_READY"
     PASSED = "PASSED"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
@@ -674,6 +707,9 @@ class ProviderProfile(SQLModel, table=True):
     account_balance_reviewed_at: datetime | None = None
     account_balance_sufficient: bool = False
     account_balance_note: str | None = Field(default=None, max_length=500)
+    account_balance_pricing_snapshot_hash: str | None = Field(default=None, max_length=64)
+    account_balance_confirmed_units: str | None = Field(default=None, max_length=80)
+    account_balance_evidence_type: str | None = Field(default=None, max_length=80)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -697,6 +733,10 @@ class ProviderModelProfile(SQLModel, table=True):
     billing_unit: str = Field(default="USD", max_length=40, index=True)
     pricing_version: str = Field(default="", max_length=120)
     pricing_source: str = Field(default="", max_length=500)
+    pricing_source_kind: str = Field(default="", max_length=80)
+    pricing_source_checked_at: datetime | None = None
+    pricing_source_reference: str = Field(default="", max_length=500)
+    pricing_assumptions_json: str = Field(default="{}")
     pricing_effective_at: datetime | None = None
     pricing_reviewed_at: datetime | None = None
     pricing_reviewed_by: str | None = Field(default=None, max_length=120)
@@ -773,6 +813,29 @@ class ProviderVerificationRun(SQLModel, table=True):
     completed_at: datetime | None = None
     max_cost: str | None = Field(default=None, max_length=80)
     actual_cost: str | None = Field(default=None, max_length=80)
+    workflow_version: str = Field(default="toapis-two-shot-v1", max_length=80)
+    current_stage: str = Field(default="CREATED", max_length=80, index=True)
+    verification_project_id: int | None = Field(default=None, foreign_key="project.id", index=True)
+    shot_1_id: int | None = Field(default=None, foreign_key="shot.id")
+    shot_2_id: int | None = Field(default=None, foreign_key="shot.id")
+    initial_anchor_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    end_frame_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    tail_frame_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    shot_1_keyframe_request_id: int | None = Field(default=None, foreign_key="generationrequest.id")
+    shot_1_video_request_id: int | None = Field(default=None, foreign_key="generationrequest.id")
+    shot_2_keyframe_request_id: int | None = Field(default=None, foreign_key="generationrequest.id")
+    shot_2_video_request_id: int | None = Field(default=None, foreign_key="generationrequest.id")
+    render_id: int | None = Field(default=None, foreign_key="projectrender.id")
+    final_render_asset_id: int | None = Field(default=None, foreign_key="asset.id")
+    pricing_snapshot_hash: str | None = Field(default=None, max_length=64)
+    billing_unit: str | None = Field(default=None, max_length=40)
+    estimated_billing_units: str | None = Field(default=None, max_length=80)
+    reserved_billing_units: str | None = Field(default=None, max_length=80)
+    auto_approve_for_verification: bool = False
+    canary_image_only: bool = False
+    failure_stage: str | None = Field(default=None, max_length=80)
+    failure_code: str | None = Field(default=None, max_length=120)
+    state_version: int = Field(default=0)
     summary_json: str = Field(default="{}")
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=1000)

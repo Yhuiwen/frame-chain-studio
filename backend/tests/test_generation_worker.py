@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from PIL import Image
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.core.config import get_settings
@@ -23,7 +24,7 @@ from app.models.entities import (
     WorkerHeartbeat,
 )
 from app.providers.async_base import AsyncGenerationProvider
-from app.providers.exceptions import ProviderNetworkError
+from app.providers.exceptions import ProviderNetworkError, ProviderUnsupportedCapabilityError
 from app.providers.http import MappedAsyncHttpProvider
 from app.providers.models import (
     MappedHttpProviderConfig,
@@ -42,7 +43,7 @@ from app.providers.models import (
 from app.providers.registry import ProviderRegistry
 from app.services import task_service
 from app.workers.generation_worker import GenerationWorker
-from app.workers.execution_service import ProviderExecutionService
+from app.workers.execution_service import ProviderExecutionService, _validate_toapis_video_anchors
 from app.workers.settings import WorkerSettings
 from fake_provider.app import app
 
@@ -146,6 +147,25 @@ def create_task(session: Session, *, status: ReliableTaskStatus = ReliableTaskSt
             poll_delay_seconds=0,
         )
     return task_service.get_task(session, task.id or 0)
+
+
+def test_toapis_anchor_aspect_ratio_validation_happens_locally(tmp_path: Path) -> None:
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    Image.new("RGB", (1280, 720), "red").save(first)
+    Image.new("RGB", (720, 720), "blue").save(last)
+
+    with pytest.raises(ProviderUnsupportedCapabilityError, match="ANCHOR_ASPECT_RATIO_MISMATCH"):
+        _validate_toapis_video_anchors([first, last], max_pixels=80_000_000)
+
+
+def test_toapis_anchor_validation_accepts_matching_decodable_images(tmp_path: Path) -> None:
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    Image.new("RGB", (1280, 720), "red").save(first)
+    Image.new("RGB", (640, 360), "blue").save(last)
+
+    _validate_toapis_video_anchors([first, last], max_pixels=80_000_000)
 
 
 class UploadProvider(AsyncGenerationProvider):

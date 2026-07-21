@@ -1,0 +1,10 @@
+{
+  "result": {
+    "type": "image",
+    "data": [
+      {
+        "url": "https://files.example.test/images/existing-canary/result.jpg"
+      }
+    ]
+  }
+}

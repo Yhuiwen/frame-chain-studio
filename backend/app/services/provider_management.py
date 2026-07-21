@@ -268,30 +268,76 @@ def verify_contract(session: Session, provider_id: int) -> dict[str, Any]:
 
 def verify_live(session: Session, provider_id: int, payload: LiveVerificationRequest) -> dict[str, Any]:
     profile = get_provider_profile_or_404(session, provider_id)
-    if profile.provider_key == "toapis" and payload.confirm_live:
-        from app.services import live_orchestration
-        live_orchestration.validate_live_orchestration_gate(session, profile=profile)
     blocked: list[str] = []
-    max_cost = _decimal_or_none(payload.max_cost)
+    max_cost = _decimal_or_none(payload.max_billing_units or payload.max_cost)
     if not payload.confirm_live:
         blocked.append("confirm_live_required")
+    if not payload.execute_paid:
+        blocked.append("execute_paid_required")
     if not profile.secret_env_var or not os.getenv(profile.secret_env_var):
         blocked.append("secret_not_configured")
     if max_cost is None or max_cost <= Decimal("0"):
-        blocked.append("positive_max_cost_required")
-    if max_cost is not None and max_cost > Decimal("50"):
-        blocked.append("max_cost_exceeds_safety_limit")
+        blocked.append("positive_max_billing_units_required")
+    if max_cost is not None and max_cost > Decimal("500"):
+        blocked.append("max_billing_units_exceeds_safety_limit")
+    if payload.canary_image_only and max_cost is not None and max_cost > Decimal("10"):
+        blocked.append("canary_max_billing_units_exceeds_limit")
+    if payload.canary_image_only and payload.canary_video_first_last:
+        blocked.append("canary_modes_are_mutually_exclusive")
+    if payload.canary_video_first_last and max_cost is not None and not Decimal("20") <= max_cost <= Decimal("25"):
+        blocked.append("video_canary_budget_must_be_20_to_25")
+    if profile.provider_key != "toapis":
+        blocked.append("toapis_provider_required")
+    if payload.billing_unit != "TOAPIS_CREDIT":
+        blocked.append("billing_unit_mismatch")
+    estimate: str | None = None
+    if not blocked:
+        from app.services import live_orchestration
+        try:
+            gate = live_orchestration.validate_live_orchestration_gate(
+                session, profile=profile, expected_snapshot_hash=payload.pricing_snapshot_hash,
+                check_active_verification=True, required_billing_units=max_cost,
+            )
+            models = live_orchestration._models(session, profile.id or 0)
+            estimate = (
+                str(live_orchestration._reviewed_rule_price(models[live_orchestration.IMAGE_MODEL_KEY], live_orchestration.IMAGE_UNIT))
+                if payload.canary_image_only else
+                str(live_orchestration._reviewed_rule_price(models[live_orchestration.VIDEO_MODEL_KEY], live_orchestration.VIDEO_UNIT))
+                if payload.canary_video_first_last else live_orchestration.two_shot_estimate(models)
+            )
+            if max_cost is None or Decimal(estimate) > max_cost:
+                blocked.append("budget_below_estimate")
+            if payload.pricing_snapshot_hash != gate["pricing_snapshot_hash"]:
+                blocked.append("pricing_snapshot_mismatch")
+        except AppError as exc:
+            session.rollback()
+            blocked.append(exc.code.lower())
     run = ProviderVerificationRun(
         provider_profile_id=profile.id or 0,
         model_profile_id=payload.model_profile_id,
-        verification_type=ProviderVerificationType.LIVE_CHAIN,
-        status=ProviderVerificationStatus.BLOCKED if blocked else ProviderVerificationStatus.BLOCKED,
+        verification_type=(
+            ProviderVerificationType.LIVE_CANARY if payload.canary_image_only else
+            ProviderVerificationType.LIVE_VIDEO_CANARY if payload.canary_video_first_last else
+            ProviderVerificationType.LIVE_CHAIN
+        ),
+        status=ProviderVerificationStatus.BLOCKED if blocked else ProviderVerificationStatus.RUNNING,
         started_at=utcnow(),
-        completed_at=utcnow(),
+        completed_at=utcnow() if blocked else None,
         max_cost=str(max_cost) if max_cost is not None else None,
-        summary_json=dumps({"blocked": blocked or ["live_execution_not_implemented_in_3c3"], "network_performed": False}),
-        error_code="BLOCKED_LIVE_VERIFICATION",
-        error_message="Live verification is blocked unless explicitly implemented and confirmed.",
+        workflow_version=(
+            "toapis-image-canary-v1" if payload.canary_image_only else
+            "toapis-video-canary-v1" if payload.canary_video_first_last else "toapis-two-shot-v1"
+        ),
+        current_stage="BLOCKED" if blocked else "CREATED",
+        pricing_snapshot_hash=payload.pricing_snapshot_hash,
+        billing_unit=payload.billing_unit,
+        estimated_billing_units=estimate,
+        reserved_billing_units=estimate,
+        auto_approve_for_verification=payload.auto_approve_for_verification,
+        canary_image_only=payload.canary_image_only,
+        summary_json=dumps({"blocked": blocked, "network_performed": False, "approval_semantics": "WORKFLOW_VERIFICATION_APPROVAL"}),
+        error_code="BLOCKED_LIVE_VERIFICATION" if blocked else None,
+        error_message="Live verification creation was blocked by a safety gate." if blocked else "",
     )
     session.add(run)
     session.commit()
@@ -312,7 +358,9 @@ def load_registry_with_db(session: Session) -> ProviderRegistry:
         if profile.adapter_type == ProviderAdapterType.TOAPIS:
             api_key = os.getenv(profile.secret_env_var) if profile.secret_env_var else None
             if api_key:
-                registry.register(ToApisProvider(api_key, base_url=profile.base_url, allow_live_submit=profile.live_orchestration_enabled))
+                # Callers must pass the durable live-orchestration gate before invoking TOAPIS.
+                # Keeping this instance usable avoids caching a stale startup-time flag.
+                registry.register(ToApisProvider(api_key, base_url=profile.base_url, allow_live_submit=True))
             else:
                 registry.register_configuration_error(profile.provider_key, profile.display_name, "TOAPIS_API_KEY is not configured.")
         else:
@@ -711,6 +759,13 @@ def estimated_units(request: GenerationRequest) -> dict[str, Any]:
         "INPUT_IMAGE": len(input_ids) + len(reference_ids),
         "REQUEST": 1,
     }
+
+
+def get_verification_run(session: Session, run_id: int) -> dict[str, Any]:
+    run = session.get(ProviderVerificationRun, run_id)
+    if run is None:
+        raise AppError("PROVIDER_VERIFICATION_RUN_NOT_FOUND", "Provider verification run was not found.", 404)
+    return verification_payload(run)
 
 
 def estimate_cost(units: dict[str, Any], pricing: dict[str, Any]) -> Decimal | None:

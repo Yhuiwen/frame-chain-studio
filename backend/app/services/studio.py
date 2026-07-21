@@ -947,7 +947,9 @@ def _set_inherited_start_frame(session: Session, shot: Shot, tail_asset: Asset) 
         path=tail_asset.path,
         mime_type=tail_asset.mime_type,
         source_asset_id=tail_asset.id,
-        sha256=tail_asset.sha256,
+        # START_FRAME is a relationship record. Its source TAIL_FRAME owns the
+        # content hash, avoiding false identity collisions across rebuilds.
+        sha256=None,
         file_size=tail_asset.file_size,
         width=tail_asset.width,
         height=tail_asset.height,
@@ -1587,6 +1589,9 @@ def approve_video(session: Session, shot_id: int) -> Shot:
             ).first()
             transition_shot(session, shot, ShotStatus.VIDEO_APPROVED, "video_approved", commit=False)
             if tail_asset is None:
+                with Image.open(final_tail_path) as tail_image:
+                    tail_width, tail_height = tail_image.size
+                tail_digest = hashlib.sha256(final_tail_path.read_bytes()).hexdigest()
                 tail_asset = Asset(
                     project_id=shot.project_id,
                     shot_id=shot.id,
@@ -1596,13 +1601,23 @@ def approve_video(session: Session, shot_id: int) -> Shot:
                     path=str(final_tail_path),
                     mime_type="image/png",
                     source_asset_id=video.id,
+                    sha256=tail_digest,
+                    file_size=final_tail_path.stat().st_size,
+                    width=tail_width,
+                    height=tail_height,
                 )
                 session.add(tail_asset)
                 session.flush()
             else:
+                with Image.open(final_tail_path) as tail_image:
+                    tail_width, tail_height = tail_image.size
                 tail_asset.path = str(final_tail_path)
                 tail_asset.status = AssetStatus.APPROVED
                 tail_asset.revision = shot.spec_revision
+                tail_asset.sha256 = hashlib.sha256(final_tail_path.read_bytes()).hexdigest()
+                tail_asset.file_size = final_tail_path.stat().st_size
+                tail_asset.width = tail_width
+                tail_asset.height = tail_height
                 session.add(tail_asset)
                 session.flush()
             supersede_current_asset(session, shot.approved_video_asset_id, superseded_by=video.id)

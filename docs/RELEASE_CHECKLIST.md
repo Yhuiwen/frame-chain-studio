@@ -1,5 +1,14 @@
 # Release Checklist
 
+## TOAPIS two-Shot verification
+
+- Confirm the default real-provider script reports zero network calls, remote tasks, and generation cost.
+- Confirm `-ConfirmLive` without `-ExecutePaid` exits before any paid action.
+- Confirm a run can resume with `-RunId` without duplicate Project, Shot, GenerationRequest, remote submission, or Render records.
+- Confirm automatic approvals are recorded as `WORKFLOW_VERIFICATION_APPROVAL`, not visual or production approval.
+- Confirm Shot 2's start-frame Asset references Shot 1's locally extracted, validated FFmpeg tail Asset; never use `last_frame_url`.
+- Confirm terminal and interrupted live scripts attempt `live-disable`, and manually disable it if that final call fails.
+
 - Run `.\scripts\e2e-real-provider.ps1` and confirm the default output reports `BLOCKED_LIVE_VERIFICATION` with all four network-operation flags false.
 - Do not claim TOAPIS live image, video, first-last-frame, or two-shot verification without sanitized evidence from an explicitly confirmed cost-bounded run.
 - Confirm TOAPIS pricing remains reviewed and unexpired, both target models passed preflight, account capacity was manually confirmed, and the supplied snapshot hash matches before enabling live orchestration.

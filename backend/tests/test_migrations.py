@@ -185,7 +185,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(tm
         assert connection.execute(sa.text("SELECT COUNT(*) FROM shot")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM generationrequest")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
-        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260720_0014"
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0018"
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 1
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE remote_model IN ('doubao-seedream-5-0', 'viduq3-pro')")).scalar_one() == 2
         for table in ("scriptdocument", "scriptblock", "storyboarddraft", "shotdraft", "shotdraftcharacter"):
@@ -398,6 +398,11 @@ def test_continuity_revision_migration_backfills_completed_shot_asset_pointers(t
         assert connection.execute(
             sa.text("SELECT status FROM asset WHERE id IN (1, 3, 6) ORDER BY id")
         ).scalars().all() == ["ACTIVE", "ACTIVE", "ACTIVE"]
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+        assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
+    command.downgrade(config, "20260720_0013")
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
 
@@ -648,11 +653,64 @@ def test_toapis_live_enable_migration_round_trip(tmp_path: Path) -> None:
         assert connection.execute(sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE billing_unit='TOAPIS_CREDIT' AND pricing_review_status='PENDING'")).scalar_one() == 2
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
-    command.downgrade(config, "20260720_0013")
+
+
+def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -> None:
+    db_path = tmp_path / "toapis-verification-roundtrip.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    expected = {
+        "workflow_version", "current_stage", "verification_project_id", "shot_1_id", "shot_2_id",
+        "initial_anchor_asset_id", "shot_1_keyframe_request_id", "shot_1_video_request_id",
+        "shot_2_keyframe_request_id", "shot_2_video_request_id", "render_id",
+        "final_render_asset_id", "pricing_snapshot_hash", "billing_unit",
+        "estimated_billing_units", "reserved_billing_units", "auto_approve_for_verification",
+        "failure_stage", "failure_code", "state_version", "canary_image_only",
+    }
+    assert expected.issubset(set(columns(db_path, "providerverificationrun")))
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "20260721_0018"
+        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+    command.downgrade(config, "20260720_0014")
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
         assert connection.execute(sa.text("PRAGMA integrity_check")).scalar_one() == "ok"
+
+
+def test_toapis_pricing_evidence_migration_round_trip(tmp_path: Path) -> None:
+    db_path = tmp_path / "toapis-pricing-evidence-roundtrip.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    expected = {
+        "pricing_source_kind", "pricing_source_checked_at",
+        "pricing_source_reference", "pricing_assumptions_json",
+    }
+    assert expected.issubset(set(columns(db_path, "providermodelprofile")))
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text("SELECT COUNT(*) FROM providermodelprofile WHERE pricing_version='toapis-public-2026-07-21' AND pricing_review_status='PENDING'")
+        ).scalar_one() == 2
+        assert connection.execute(sa.text("SELECT live_orchestration_enabled FROM providerprofile WHERE provider_key='toapis'")).scalar_one() == 0
+    command.downgrade(config, "20260721_0015")
+    assert not expected.intersection(set(columns(db_path, "providermodelprofile")))
+    command.upgrade(config, "head")
+
+
+def test_toapis_balance_canary_migration_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "toapis-balance-canary.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "head")
+    assert {
+        "account_balance_pricing_snapshot_hash",
+        "account_balance_confirmed_units",
+        "account_balance_evidence_type",
+    }.issubset(set(columns(db_path, "providerprofile")))
+    assert "canary_image_only" in set(columns(db_path, "providerverificationrun"))
+    command.downgrade(config, "20260721_0016")
+    assert "account_balance_evidence_type" not in set(columns(db_path, "providerprofile"))
+    command.upgrade(config, "head")
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:

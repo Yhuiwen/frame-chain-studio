@@ -95,9 +95,12 @@ class ProviderResultUrl(BaseModel):
 
 
 class ProviderSubmitResult(BaseModel):
-    remote_job_id: str
+    remote_job_id: str = ""
     remote_status: RemoteJobStatus
     accepted: bool = True
+    response_mode: Literal["ASYNC_JOB", "INLINE_RESULT"] = "ASYNC_JOB"
+    result_urls: list[ProviderResultUrl] = Field(default_factory=list)
+    client_request_id: str | None = None
     raw_response_summary: str = ""
     submitted_at: datetime = Field(default_factory=utcnow)
 

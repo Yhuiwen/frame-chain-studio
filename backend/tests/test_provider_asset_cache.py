@@ -8,7 +8,7 @@ from app.services import studio
 from app.services.provider_asset_cache import cleanup_expired_provider_asset_cache
 
 
-SECRET_URL = "https://uploads.example.test/file.png?token=TOP_SECRET_UPLOAD_TOKEN&X-Amz-Signature=VERY_SECRET_SIGNATURE"
+PRIVATE_TEST_URL = "https://uploads.example.test/private-test-object"
 
 
 def _cache(session: Session, *, asset_id: int, expires_delta: timedelta | None, updated_delta: timedelta | None = None) -> ProviderAssetCache:
@@ -18,7 +18,7 @@ def _cache(session: Session, *, asset_id: int, expires_delta: timedelta | None, 
         asset_id=asset_id,
         asset_sha256=f"sha-{asset_id}-{expires_delta}-{updated_delta}",
         reference_kind="url",
-        reference_value=SECRET_URL,
+        reference_value=PRIVATE_TEST_URL,
         expires_at=now + expires_delta if expires_delta is not None else None,
         updated_at=now - (updated_delta or timedelta()),
     )

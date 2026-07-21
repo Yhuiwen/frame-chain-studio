@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, UnidentifiedImageError
 from sqlmodel import Session, select
 
 from app.core.errors import AppError
@@ -397,16 +398,30 @@ class ProviderExecutionService:
         if lease_guard:
             lease_guard.ensure_owned()
         with self.session_factory() as session:
-            task_service.mark_task_remote_submitted(
-                session,
-                task_id,
-                remote_job_id=result.remote_job_id,
-                remote_status=result.remote_status.value,
-                response_summary=result.raw_response_summary,
-                poll_delay_seconds=self.settings.poll_interval_seconds,
-                job_timeout_seconds=self.settings.job_timeout_seconds,
-                now=now,
-            )
+            if result.response_mode == "INLINE_RESULT" and result.result_urls:
+                task_service.mark_inline_submit_result_ready(
+                    session,
+                    task_id,
+                    result_urls=[self._result_url_payload(item) for item in result.result_urls],
+                    response_summary=result.raw_response_summary,
+                    now=now,
+                )
+            elif result.remote_job_id:
+                task_service.mark_task_remote_submitted(
+                    session,
+                    task_id,
+                    remote_job_id=result.remote_job_id,
+                    remote_status=result.remote_status.value,
+                    response_summary=result.raw_response_summary,
+                    poll_delay_seconds=self.settings.poll_interval_seconds,
+                    job_timeout_seconds=self.settings.job_timeout_seconds,
+                    now=now,
+                )
+            else:
+                task_service.mark_task_failed(
+                    session, task_id, error_code=TaskErrorCode.INVALID_REMOTE_RESPONSE,
+                    error_message="Provider submit returned neither a job ID nor an inline result.", now=now,
+                )
         return True
 
     def _provider_or_fail(self, session: Session, task: GenerationTask) -> AsyncGenerationProvider:
@@ -446,12 +461,10 @@ class ProviderExecutionService:
         asset_ids = list(dict.fromkeys(input_asset_ids + reference_asset_ids))
         if task.provider_id == "mock" or not asset_ids:
             return {}
-        upload = getattr(provider, "upload_asset", None)
-        if upload is None:
-            raise ProviderUnsupportedCapabilityError("PROVIDER_ASSET_UPLOAD_UNSUPPORTED")
+        assets: dict[int, Asset] = {}
+        paths: dict[int, Path] = {}
         settings = get_settings()
         storage_root = settings.storage_dir.resolve()
-        prepared: dict[int, AssetReference] = {}
         for asset_id in asset_ids:
             asset = session.get(Asset, asset_id)
             if asset is None:
@@ -461,6 +474,24 @@ class ProviderExecutionService:
                 raise ProviderError("Input asset path is outside storage.", retryable=False)
             if not path.exists() or not path.is_file():
                 raise ProviderError("Input asset file is missing.", retryable=False)
+            assets[asset_id] = asset
+            paths[asset_id] = path
+        if (
+            task.provider_id == "toapis"
+            and payload.get("generation_mode") == "FIRST_LAST_FRAME"
+            and len(input_asset_ids) >= 2
+        ):
+            _validate_toapis_video_anchors(
+                [paths[input_asset_ids[0]], paths[input_asset_ids[1]]],
+                max_pixels=settings.result_max_image_pixels,
+            )
+        upload = getattr(provider, "upload_asset", None)
+        if upload is None:
+            raise ProviderUnsupportedCapabilityError("PROVIDER_ASSET_UPLOAD_UNSUPPORTED")
+        prepared: dict[int, AssetReference] = {}
+        for asset_id in asset_ids:
+            asset = assets[asset_id]
+            path = paths[asset_id]
             max_upload_bytes = (
                 settings.result_max_image_bytes
                 if str(asset.mime_type).lower().startswith("image/")
@@ -474,7 +505,6 @@ class ProviderExecutionService:
             cached = session.exec(
                 select(ProviderAssetCache).where(
                     ProviderAssetCache.provider_id == task.provider_id,
-                    ProviderAssetCache.asset_id == asset_id,
                     ProviderAssetCache.asset_sha256 == sha256,
                 )
             ).first()
@@ -505,7 +535,6 @@ class ProviderExecutionService:
             session.commit()
             prepared[asset_id] = AssetReference(asset_id=asset_id, url=result.url)
         return prepared
-
     def _record_provider_error(self, task_id: int, exc: ProviderError, *, now: datetime | None = None) -> None:
         with self.session_factory() as session:
             task = task_service.get_task(session, task_id)
@@ -709,6 +738,33 @@ class ProviderExecutionService:
                 worker_id=self.settings.worker_id,
                 now=now,
             )
+
+
+def _validate_toapis_video_anchors(paths: list[Path], *, max_pixels: int) -> None:
+    """Validate ordered first/last anchors before any remote upload can occur."""
+    dimensions: list[tuple[int, int]] = []
+    for path in paths:
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                image.load()
+                width, height = image.size
+                orientation = image.getexif().get(274, 1)
+                if orientation not in (None, 1):
+                    raise ProviderUnsupportedCapabilityError("ANCHOR_EXIF_ORIENTATION_UNSUPPORTED")
+                if width <= 0 or height <= 0 or width * height > max_pixels:
+                    raise ProviderUnsupportedCapabilityError("ANCHOR_DIMENSIONS_UNSUPPORTED")
+                dimensions.append((width, height))
+        except ProviderUnsupportedCapabilityError:
+            raise
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise ProviderUnsupportedCapabilityError("ANCHOR_IMAGE_INVALID") from exc
+    if len(dimensions) == 2:
+        first_width, first_height = dimensions[0]
+        last_width, last_height = dimensions[1]
+        if first_width * last_height != last_width * first_height:
+            raise ProviderUnsupportedCapabilityError("ANCHOR_ASPECT_RATIO_MISMATCH")
 
 
 def _sha256_file(path: Path) -> str:

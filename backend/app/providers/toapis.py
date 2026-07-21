@@ -108,7 +108,7 @@ class ToApisProvider(AsyncGenerationProvider):
         if image_urls:
             payload["image_urls"] = image_urls[:10]
         raw = await self._json("POST", "/images/generations", json=payload)
-        return self._submit_result(raw, "image")
+        return self._submit_result(raw, "image", client_request_id=request.client_request_id)
 
     async def submit_video(self, request: VideoGenerationRequest) -> ProviderSubmitResult:
         self._require_live_submit()
@@ -128,10 +128,12 @@ class ToApisProvider(AsyncGenerationProvider):
         }
         if image_urls:
             payload["image_urls"] = image_urls
+        elif request.aspect_ratio:
+            payload["aspect_ratio"] = request.aspect_ratio
         if request.seed is not None:
-            payload["metadata"] = {"seed": request.seed}
+            payload["seed"] = request.seed
         raw = await self._json("POST", "/videos/generations", json=payload)
-        return self._submit_result(raw, "video")
+        return self._submit_result(raw, "video", client_request_id=request.client_request_id)
 
     async def get_job(self, remote_job_id: str) -> ProviderJobResult:
         kind, task_id = self._split_remote_id(remote_job_id)
@@ -139,17 +141,21 @@ class ToApisProvider(AsyncGenerationProvider):
         status = self._status(raw)
         urls: list[ProviderResultUrl] = []
         if status == RemoteJobStatus.SUCCEEDED:
-            result = raw.get("result")
-            data = result.get("data") if isinstance(result, dict) else None
-            if not isinstance(data, list) or not data or not isinstance(data[0], dict):
-                raise ProviderInvalidResponseError("TOAPIS completed task response is missing result.data.")
-            item = data[0]
+            item: dict[str, Any]
+            if kind == "video" and isinstance(raw.get("video_url"), str):
+                item = {"url": raw["video_url"]}
+            else:
+                result = raw.get("result")
+                data = result.get("data") if isinstance(result, dict) else None
+                if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+                    raise ProviderInvalidResponseError("TOAPIS completed task response is missing its documented result URL.")
+                item = data[0]
             url = item.get("url")
             if not isinstance(url, str) or not url:
-                raise ProviderInvalidResponseError("TOAPIS completed task response is missing result.data[0].url.")
+                raise ProviderInvalidResponseError("TOAPIS completed task response is missing its documented result URL.")
             metadata = {key: item[key] for key in ("format", "last_frame_url") if isinstance(item.get(key), str)}
-            if isinstance(raw.get("expires_at"), str):
-                metadata["expires_at"] = raw["expires_at"]
+            if isinstance(raw.get("expires_at"), (str, int)):
+                metadata["expires_at"] = str(raw["expires_at"])
             urls.append(ProviderResultUrl(url=url, output_type=kind, metadata=metadata))
         return ProviderJobResult(
             remote_job_id=remote_job_id,
@@ -177,7 +183,6 @@ class ToApisProvider(AsyncGenerationProvider):
                 response = await self._client.post(
                     f"{self.base_url}/uploads/images",
                     headers=self._headers(),
-                    data={"purpose": "generation"},
                     files={"file": (f"asset-{client_request_id[-24:]}", handle, mime)},
                     follow_redirects=False,
                 )
@@ -239,12 +244,36 @@ class ToApisProvider(AsyncGenerationProvider):
             raise ProviderRemoteServerError("TOAPIS service is unavailable.", http_status=status, details=details)
         raise ProviderInvalidResponseError("TOAPIS request failed.", http_status=status, details=details)
 
-    def _submit_result(self, raw: dict[str, Any], kind: Literal["image", "video"]) -> ProviderSubmitResult:
+    def _submit_result(
+        self, raw: dict[str, Any], kind: Literal["image", "video"], *, client_request_id: str | None = None,
+    ) -> ProviderSubmitResult:
         data: dict[str, Any] = raw["data"] if isinstance(raw.get("data"), dict) else raw
         task_id = data.get("task_id") or data.get("taskId") or data.get("id")
+        result = raw.get("result")
+        items = result.get("data") if isinstance(result, dict) else None
+        urls = [
+            ProviderResultUrl(url=item["url"], output_type=kind)
+            for item in items or []
+            if isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"]
+        ] if isinstance(items, list) else []
+        if kind == "video" and not urls and isinstance(raw.get("video_url"), str) and raw["video_url"]:
+            urls = [ProviderResultUrl(url=raw["video_url"], output_type="video")]
+        if urls:
+            return ProviderSubmitResult(
+                remote_status=RemoteJobStatus.SUCCEEDED,
+                response_mode="INLINE_RESULT",
+                result_urls=urls,
+                client_request_id=client_request_id,
+                raw_response_summary=self._summary(raw),
+            )
         if not isinstance(task_id, str) or not task_id:
-            raise ProviderInvalidResponseError("TOAPIS submit response is missing a task ID.")
-        return ProviderSubmitResult(remote_job_id=f"{kind}:{task_id}", remote_status=self._status(raw), raw_response_summary=self._summary(raw))
+            raise ProviderInvalidResponseError("TOAPIS submit response is missing a task ID and result URL.")
+        raw_status = self._raw_status(raw)
+        status = STATUS_MAP.get(raw_status.lower(), RemoteJobStatus.QUEUED) if isinstance(raw_status, str) else RemoteJobStatus.QUEUED
+        return ProviderSubmitResult(
+            remote_job_id=f"{kind}:{task_id}", remote_status=status,
+            client_request_id=client_request_id, raw_response_summary=self._summary(raw),
+        )
 
     def _status(self, raw: dict[str, Any]) -> RemoteJobStatus:
         value = self._raw_status(raw)

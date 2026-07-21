@@ -1,8 +1,10 @@
 from datetime import timedelta
+from decimal import Decimal
 import httpx
 import pytest
 from sqlmodel import Session, select
 
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.models.entities import (
     PricingReviewStatus, ProviderAdapterType, ProviderModelGenerationType,
@@ -11,6 +13,7 @@ from app.models.entities import (
 )
 from app.models.schemas import ToApisAccountBalanceRequest, ToApisLiveEnableRequest, ToApisPricingReviewRequest
 from app.services import live_orchestration
+from app.services.toapis_pricing import TOAPIS_PRICING_CONTRACT
 
 
 @pytest.fixture
@@ -22,15 +25,21 @@ def setup_toapis(session: Session) -> ProviderProfile:
     profile = ProviderProfile(name="TOAPIS", provider_key="toapis", adapter_type=ProviderAdapterType.TOAPIS, display_name="TOAPIS", base_url="https://toapis.com/v1", secret_env_var="TOAPIS_API_KEY")
     session.add(profile)
     session.flush()
-    session.add(ProviderModelProfile(provider_profile_id=profile.id or 0, model_key="toapis-seedream-5", remote_model="doubao-seedream-5-0", generation_type=ProviderModelGenerationType.IMAGE, pricing_json='{"rules":[{"unit":"IMAGE_REQUEST","price":"6.3"}]}', billing_unit="TOAPIS_CREDIT", pricing_version="toapis-public-2026-07", pricing_review_status=PricingReviewStatus.PENDING))
-    session.add(ProviderModelProfile(provider_profile_id=profile.id or 0, model_key="toapis-viduq3-pro", remote_model="viduq3-pro", generation_type=ProviderModelGenerationType.VIDEO, pricing_json='{"rules":[{"unit":"VIDEO_SECOND","price":"20"}]}', billing_unit="TOAPIS_CREDIT", pricing_version="toapis-public-2026-07", pricing_review_status=PricingReviewStatus.PENDING))
+    session.add(ProviderModelProfile(provider_profile_id=profile.id or 0, model_key="toapis-seedream-5", remote_model="doubao-seedream-5-0", generation_type=ProviderModelGenerationType.IMAGE, pricing_json='{"rules":[{"unit":"IMAGE_REQUEST","price":"6.3"}]}', billing_unit="TOAPIS_CREDIT", pricing_version=TOAPIS_PRICING_CONTRACT.version, pricing_review_status=PricingReviewStatus.PENDING))
+    session.add(ProviderModelProfile(provider_profile_id=profile.id or 0, model_key="toapis-viduq3-pro", remote_model="viduq3-pro", generation_type=ProviderModelGenerationType.VIDEO, pricing_json='{"rules":[{"unit":"VIDEO_SECOND","price":"20"}]}', billing_unit="TOAPIS_CREDIT", pricing_version=TOAPIS_PRICING_CONTRACT.version, pricing_review_status=PricingReviewStatus.PENDING))
     session.add(ProviderVerificationRun(provider_profile_id=profile.id or 0, verification_type=ProviderVerificationType.CONTRACT, status=ProviderVerificationStatus.PASSED, started_at=utcnow(), completed_at=utcnow()))
     session.commit()
     return profile
 
 
 def review_request(**changes: object) -> ToApisPricingReviewRequest:
-    values = dict(pricing_version="toapis-public-2026-07", image_price="6.3", image_unit="IMAGE_REQUEST", video_price="20", video_unit="VIDEO_SECOND", billing_unit="TOAPIS_CREDIT", contract_reference="Public pricing reviewed 2026-07-20", acknowledged=True)
+    values = dict(
+        pricing_version=TOAPIS_PRICING_CONTRACT.version,
+        image_price="6.3", image_unit="IMAGE_REQUEST", video_price="20", video_unit="VIDEO_SECOND",
+        billing_unit="TOAPIS_CREDIT", image_model="doubao-seedream-5-0", video_model="viduq3-pro",
+        pricing_source_kind="OFFICIAL_PUBLIC_MODEL_GUIDE",
+        contract_reference="TOAPIS_OFFICIAL_PUBLIC_GUIDES_2026-07-21", acknowledged=True,
+    )
     values.update(changes)
     return ToApisPricingReviewRequest.model_validate(values)
 
@@ -43,6 +52,47 @@ def test_pricing_review_requires_exact_candidate(session: Session) -> None:
     state = live_orchestration.review_pricing(session, review_request())
     assert state["pricing_reviewed"] is True
     assert state["pricing_snapshot_hash"] == live_orchestration.candidate_snapshot_hash()
+    assert state["estimated_two_shot_billing_units"] == "172.6"
+    assert state["estimated_two_shot_breakdown"] == [
+        {"model_key": "toapis-seedream-5", "unit": "IMAGE_REQUEST", "quantity": 2, "unit_price": "6.3", "subtotal": "12.6"},
+        {"model_key": "toapis-viduq3-pro", "unit": "VIDEO_SECOND", "quantity": 8, "unit_price": "20", "subtotal": "160"},
+    ]
+    assert state["recommended_test_ceiling"] == "190"
+    assert state["live_orchestration_enabled"] is False
+    assert state["image"]["pricing_source_kind"] == "OFFICIAL_PUBLIC_MODEL_GUIDE"
+    assert state["video"]["pricing_assumptions"]["generation_classification"] == "STANDARD_GENERATION"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("video_price", "19.9"), ("billing_unit", "USD"),
+        ("image_unit", "REQUEST"), ("video_unit", "REQUEST"),
+        ("image_model", "wrong-model"), ("pricing_source_kind", "UNKNOWN"),
+    ],
+)
+def test_pricing_review_rejects_every_contract_mismatch(session: Session, field: str, value: str) -> None:
+    setup_toapis(session)
+    with pytest.raises(AppError) as caught:
+        live_orchestration.review_pricing(session, review_request(**{field: value}))
+    assert caught.value.code == "PRICING_SNAPSHOT_MISMATCH"
+
+
+def test_pricing_review_requires_acknowledgement_without_mutation(session: Session) -> None:
+    setup_toapis(session)
+    with pytest.raises(AppError) as caught:
+        live_orchestration.review_pricing(session, review_request(acknowledged=False))
+    assert caught.value.code == "PRICING_REVIEW_ACKNOWLEDGEMENT_REQUIRED"
+    assert all(item.pricing_review_status == PricingReviewStatus.PENDING for item in session.exec(select(ProviderModelProfile)).all())
+
+
+def test_new_pricing_hash_is_deterministic_and_invalidates_old_hash(session: Session) -> None:
+    setup_toapis(session)
+    old_hash = "0" * 64
+    result = live_orchestration.review_pricing(session, review_request())
+    assert result["pricing_snapshot_hash"] == TOAPIS_PRICING_CONTRACT.snapshot_hash()
+    assert result["pricing_snapshot_hash"] == live_orchestration.candidate_snapshot_hash()
+    assert result["pricing_snapshot_hash"] != old_hash
 
 
 @pytest.mark.anyio
@@ -69,6 +119,28 @@ async def test_preflight_missing_video_and_auth(session: Session, monkeypatch: p
     with pytest.raises(AppError) as caught:
         await live_orchestration.run_preflight(session, transport=httpx.MockTransport(lambda request: httpx.Response(401, json={"secret": "test-secret"})))
     assert caught.value.code == "AUTHENTICATION_ERROR"
+    session.refresh(session.exec(select(ProviderProfile)).one())
+    persisted = session.exec(select(ProviderProfile)).one()
+    assert persisted.preflight_response_schema_valid is False
+    assert persisted.preflight_image_model_accessible is False
+    assert persisted.live_orchestration_enabled is False
+
+
+@pytest.mark.anyio
+async def test_preflight_rejects_oversized_response(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile = setup_toapis(session)
+    monkeypatch.setenv("TOAPIS_API_KEY", "test-secret")
+    monkeypatch.setenv("FCS_TOAPIS_PREFLIGHT_MAX_RESPONSE_BYTES", "1024")
+    get_settings.cache_clear()
+    try:
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"{" + b" " * 2048 + b"}"))
+        with pytest.raises(AppError) as caught:
+            await live_orchestration.run_preflight(session, transport=transport)
+        assert caught.value.code == "PREFLIGHT_RESPONSE_TOO_LARGE"
+        session.refresh(profile)
+        assert profile.live_orchestration_enabled is False
+    finally:
+        get_settings.cache_clear()
 
 
 def test_live_enable_full_gate_and_disable(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,10 +156,67 @@ def test_live_enable_full_gate_and_disable(session: Session, monkeypatch: pytest
     profile.preflight_response_schema_valid = True
     session.add(profile)
     session.commit()
-    live_orchestration.confirm_account_balance(session, ToApisAccountBalanceRequest(acknowledged=True, sufficient=True))
+    live_orchestration.confirm_account_balance(
+        session,
+        ToApisAccountBalanceRequest(
+            acknowledged=True,
+            sufficient=True,
+            evidence_type="TOKEN_BALANCE_READ_ONLY",
+            pricing_snapshot_hash=reviewed["pricing_snapshot_hash"],
+            confirmed_billing_units="190",
+        ),
+    )
     enabled = live_orchestration.enable_live(session, ToApisLiveEnableRequest(acknowledged=True, pricing_snapshot_hash=reviewed["pricing_snapshot_hash"], reason="isolated verification"))
     assert enabled["live_orchestration_enabled"] is True
     assert live_orchestration.disable_live(session)["live_orchestration_enabled"] is False
+
+
+def test_balance_confirmation_is_bound_to_current_pricing_and_coverage(session: Session) -> None:
+    profile = setup_toapis(session)
+    reviewed = live_orchestration.review_pricing(session, review_request())
+    base = {
+        "acknowledged": True,
+        "sufficient": True,
+        "evidence_type": "TOKEN_BALANCE_READ_ONLY",
+        "pricing_snapshot_hash": reviewed["pricing_snapshot_hash"],
+        "confirmed_billing_units": "10",
+    }
+    with pytest.raises(AppError) as caught:
+        live_orchestration.confirm_account_balance(
+            session, ToApisAccountBalanceRequest.model_validate({**base, "pricing_snapshot_hash": "0" * 64})
+        )
+    assert caught.value.code == "PRICING_SNAPSHOT_MISMATCH"
+    state = live_orchestration.confirm_account_balance(session, ToApisAccountBalanceRequest.model_validate(base))
+    assert state["account_balance_pricing_snapshot_hash"] == reviewed["pricing_snapshot_hash"]
+    assert state["account_balance_confirmed_units"] == "10"
+    assert state["account_balance_evidence_type"] == "TOKEN_BALANCE_READ_ONLY"
+    assert state["live_orchestration_enabled"] is False
+    profile.preflight_checked_at = utcnow()
+    profile.preflight_image_model_accessible = True
+    profile.preflight_video_model_accessible = True
+    profile.preflight_response_schema_valid = True
+    session.add(profile)
+    session.commit()
+    with pytest.raises(AppError) as caught:
+        live_orchestration.validate_live_orchestration_gate(
+            session,
+            require_enabled=False,
+            expected_snapshot_hash=reviewed["pricing_snapshot_hash"],
+            required_billing_units=Decimal("10.1"),
+        )
+    assert caught.value.code == "ACCOUNT_BALANCE_NOT_CONFIRMED"
+    session.refresh(profile)
+    profile.account_balance_reviewed_at = utcnow() - timedelta(hours=25)
+    session.add(profile)
+    session.commit()
+    with pytest.raises(AppError) as caught:
+        live_orchestration.validate_live_orchestration_gate(
+            session,
+            require_enabled=False,
+            expected_snapshot_hash=reviewed["pricing_snapshot_hash"],
+            required_billing_units=Decimal("6.3"),
+        )
+    assert caught.value.code == "ACCOUNT_BALANCE_NOT_CONFIRMED"
 
 
 def test_stale_pricing_disables_live(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:

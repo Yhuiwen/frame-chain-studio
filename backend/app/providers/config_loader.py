@@ -73,7 +73,9 @@ def load_registry(session: "Session | None" = None) -> ProviderRegistry:
         if profile.adapter_type == ProviderAdapterType.TOAPIS:
             api_key = os.getenv(profile.secret_env_var) if profile.secret_env_var else None
             if api_key:
-                registry.register(ToApisProvider(api_key, base_url=profile.base_url, allow_live_submit=profile.live_orchestration_enabled))
+                # The long-lived Worker validates the durable live gate immediately before each
+                # task. Do not freeze the startup-time flag into its Provider instance.
+                registry.register(ToApisProvider(api_key, base_url=profile.base_url, allow_live_submit=True))
             else:
                 registry.register_configuration_error(profile.provider_key, profile.display_name, "TOAPIS_API_KEY is not configured.")
         else:

@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -18,6 +19,7 @@ from app.models.entities import (
     PricingReviewStatus,
     ProviderVerificationStatus,
     ProviderVerificationType,
+    ToApisVerificationStage,
     ProjectRenderStatus,
     QualityCheckSeverity,
     ReliableTaskStatus,
@@ -272,6 +274,29 @@ class ProviderVerificationRunRead(BaseModel):
     completed_at: datetime | None
     max_cost: str | None
     actual_cost: str | None
+    workflow_version: str
+    current_stage: str
+    verification_project_id: int | None
+    shot_1_id: int | None
+    shot_2_id: int | None
+    initial_anchor_asset_id: int | None
+    end_frame_asset_id: int | None
+    tail_frame_asset_id: int | None
+    shot_1_keyframe_request_id: int | None
+    shot_1_video_request_id: int | None
+    shot_2_keyframe_request_id: int | None
+    shot_2_video_request_id: int | None
+    render_id: int | None
+    final_render_asset_id: int | None
+    pricing_snapshot_hash: str | None
+    billing_unit: str | None
+    estimated_billing_units: str | None
+    reserved_billing_units: str | None
+    auto_approve_for_verification: bool
+    canary_image_only: bool
+    failure_stage: str | None
+    failure_code: str | None
+    state_version: int
     summary: dict[str, object]
     error_code: str | None
     error_message: str | None
@@ -280,17 +305,45 @@ class ProviderVerificationRunRead(BaseModel):
 
 class LiveVerificationRequest(BaseModel):
     confirm_live: bool = False
+    execute_paid: bool = False
     model_profile_id: int | None = None
     max_cost: str | None = None
+    billing_unit: str | None = Field(default=None, max_length=40)
+    max_billing_units: str | None = None
+    pricing_snapshot_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    auto_approve_for_verification: bool = False
+    canary_image_only: bool = False
+    canary_video_first_last: bool = False
+
+
+class ProviderVerificationAdvanceRead(BaseModel):
+    run_id: int
+    status: ProviderVerificationStatus
+    stage: ToApisVerificationStage
+    waiting_for: str | None = None
+    project_id: int | None = None
+    shot_ids: list[int] = Field(default_factory=list)
+    request_ids: dict[str, int] = Field(default_factory=dict)
+    render_id: int | None = None
+    final_render_asset_id: int | None = None
+    image_requests_created: int = 0
+    video_requests_created: int = 0
+    estimated_billing_units: str | None = None
+    actual_billing_units: str | None = None
+    can_advance: bool = False
+    terminal: bool = False
 
 
 class ToApisPricingReviewRequest(BaseModel):
     pricing_version: str
-    image_price: str
+    image_price: Decimal = Field(gt=0)
     image_unit: str
-    video_price: str
+    video_price: Decimal = Field(gt=0)
     video_unit: str
     billing_unit: str
+    image_model: str
+    video_model: str
+    pricing_source_kind: str
     contract_reference: str = Field(min_length=1, max_length=500)
     acknowledged: bool = False
 
@@ -305,6 +358,23 @@ class ToApisAccountBalanceRequest(BaseModel):
     acknowledged: bool = False
     sufficient: bool = False
     note: str = Field(default="", max_length=500)
+    evidence_type: str = Field(default="", max_length=80)
+    pricing_snapshot_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    confirmed_billing_units: str | None = Field(default=None, max_length=80)
+
+
+class ToApisCanaryRecoveryRequest(BaseModel):
+    existing_remote_task_id: str = Field(min_length=1, max_length=160)
+    existing_result_url: str = Field(min_length=10, max_length=4000)
+    acknowledge_existing_task_recovery: bool = False
+
+
+class ToApisVideoCanaryConsoleReviewRequest(BaseModel):
+    acknowledged: bool = False
+    existing_remote_task_id: str = Field(min_length=1, max_length=160)
+    actual_billing_units: Decimal = Field(gt=0)
+    billing_unit: str = Field(max_length=40)
+    evidence_type: str = Field(max_length=80)
 
 
 class CharacterBase(BaseModel):

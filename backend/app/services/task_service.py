@@ -652,6 +652,91 @@ def mark_task_result_ready(
     )
 
 
+def mark_inline_submit_result_ready(
+    session: Session,
+    task_id: int,
+    *,
+    result_urls: list[dict[str, Any]],
+    response_summary: str,
+    now: datetime | None = None,
+) -> GenerationTask:
+    task = get_task(session, task_id)
+    if task.status != ReliableTaskStatus.SUBMITTING:
+        raise AppError("TASK_NOT_SUBMITTING", "Inline submit result requires a SUBMITTING task.", 409)
+    if not result_urls:
+        raise AppError("TASK_RESULT_URLS_REQUIRED", "Inline submit result requires a URL.", 409)
+    current_time = db_time(now)
+    raw_values = [dict(item) for item in result_urls if isinstance(item.get("url"), str) and "://" in str(item["url"])]
+    if not raw_values:
+        raise AppError("TASK_RESULT_URLS_REQUIRED", "Inline submit result requires a valid URL.", 409)
+    task.raw_result_urls_json = dumps_sanitized(raw_values)
+    task.result_urls_json = dumps_sanitized(
+        [result_url_summary(item, is_primary=index == 0) for index, item in enumerate(raw_values)]
+    )
+    task.remote_status = ReliableTaskStatus.SUCCEEDED.value
+    task.submitted_at = current_time
+    task.processing_stage = "result_ready"
+    task.processing_progress = 1
+    task.response_summary_json = dumps_sanitized({"submit": response_summary, "response_mode": "INLINE_RESULT"})
+    task.updated_at = current_time
+    session.add(task)
+    session.commit()
+    return transition_task(
+        session, task_id, ReliableTaskStatus.RESULT_READY,
+        expected_current=ReliableTaskStatus.SUBMITTING,
+        reason_code="inline_submit_result_ready", now=current_time,
+    )
+
+
+def recover_failed_canary_result_ready(
+    session: Session,
+    task_id: int,
+    *,
+    existing_remote_task_id: str,
+    result_url: str,
+    response_summary: str,
+    now: datetime | None = None,
+) -> GenerationTask:
+    """Attach a console-confirmed existing result without submitting a new task."""
+    task = get_task(session, task_id)
+    if task.provider_id != "toapis" or task.status != ReliableTaskStatus.FAILED:
+        raise AppError("CANARY_TASK_NOT_RECOVERABLE", "Only a failed TOAPIS Canary task can be recovered.", 409)
+    if task.remote_job_id and task.remote_job_id != f"image:{existing_remote_task_id}":
+        raise AppError("REMOTE_TASK_ID_MISMATCH", "Existing remote task ID does not match persisted state.", 409)
+    if not result_url.startswith("https://"):
+        raise AppError("RECOVERY_RESULT_URL_INVALID", "Recovery result URL must use HTTPS.", 409)
+    current_time = db_time(now)
+    task.remote_job_id = f"image:{existing_remote_task_id}"
+    task.remote_status = "completed"
+    task.raw_result_urls_json = dumps_sanitized([{"url": result_url, "output_type": "image"}])
+    task.result_urls_json = dumps_sanitized(
+        [result_url_summary({"url": result_url, "output_type": "image"}, is_primary=True)]
+    )
+    task.response_summary_json = dumps_sanitized({"recovery": response_summary})
+    task.error_code = None
+    task.error_message = None
+    task.error_details_json = "{}"
+    task.processing_stage = "result_ready"
+    task.processing_progress = 1
+    task.next_retry_at = None
+    task.next_poll_at = None
+    task.completed_at = None
+    task.updated_at = current_time
+    task.status = ReliableTaskStatus.RESULT_READY
+    session.add(task)
+    session.add(TaskStateChange(
+        task_id=task_id,
+        from_status=ReliableTaskStatus.FAILED,
+        to_status=ReliableTaskStatus.RESULT_READY,
+        reason_code="console_confirmed_canary_result_recovery",
+        reason="Restricted recovery of an already billed Canary result.",
+        created_at=current_time,
+    ))
+    session.commit()
+    session.refresh(task)
+    return task
+
+
 def mark_task_processing_result(
     session: Session,
     task_id: int,

@@ -4,7 +4,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.providers.exceptions import ProviderCancellationError, ProviderInvalidResponseError, ProviderRateLimitError
+from app.providers.exceptions import ProviderCancellationError, ProviderRateLimitError
 from app.providers.models import AssetReference, ImageGenerationRequest, RemoteJobStatus, VideoGenerationRequest
 from app.providers.toapis import IMAGE_MODEL, VIDEO_MODEL, ToApisProvider
 
@@ -40,11 +40,36 @@ async def test_seedream_submit_and_poll_contract() -> None:
     assert submitted.remote_job_id == "image:img-1"
     assert seen[0]["model"] == IMAGE_MODEL
     assert seen[0]["metadata"] == {"resolution": "2K", "watermark": False}
+    assert seen[0]["n"] == 1
     assert "negative_prompt" not in seen[0]
     assert seen[0]["client_business_id"] == "fcs-182-a1"
     result = await provider.get_job(submitted.remote_job_id)
     assert result.normalized_status == RemoteJobStatus.SUCCEEDED
     assert result.result_urls[0].url.endswith("result.png")
+    await provider.aclose()
+
+
+@pytest.mark.anyio
+async def test_seedream_inline_result_submit_is_success_without_task_id() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "toapis" / "seedream-inline-result-submit-sanitized.json"
+    raw = json.loads(fixture.read_text(encoding="utf-8"))
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        assert request.method == "POST"
+        posts += 1
+        return httpx.Response(200, json=raw)
+
+    provider = ToApisProvider("test-secret", transport=httpx.MockTransport(handler), allow_live_submit=True)
+    submitted = await provider.submit_image(image_request(client_request_id="existing-business-id"))
+    assert submitted.accepted is True
+    assert submitted.response_mode == "INLINE_RESULT"
+    assert submitted.remote_job_id == ""
+    assert submitted.remote_status == RemoteJobStatus.SUCCEEDED
+    assert submitted.client_request_id == "existing-business-id"
+    assert submitted.result_urls[0].url.endswith("result.jpg")
+    assert posts == 1
     await provider.aclose()
 
 
@@ -63,15 +88,56 @@ async def test_vidu_anchor_order(anchors: int) -> None:
     assert payload.get("image_urls", []) == [item.url for item in refs[:anchors]]
     assert payload["audio"] is False
     assert payload["resolution"] == "720p"
-    assert payload["metadata"] == {"seed": 123456}
+    assert payload["seed"] == 123456
+    assert (payload.get("aspect_ratio") == "16:9") is (anchors == 0)
+    await provider.aclose()
+
+
+@pytest.mark.anyio
+async def test_vidu_null_seed_is_omitted() -> None:
+    payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload.update(json.loads(request.content))
+        return httpx.Response(200, json={"id": "vid-1", "status": "queued"})
+
+    provider = ToApisProvider("secret", transport=httpx.MockTransport(handler), allow_live_submit=True)
+    await provider.submit_video(video_request(seed=None))
+    assert "seed" not in payload
+    await provider.aclose()
+
+
+@pytest.mark.anyio
+async def test_vidu_video_canary_contract_and_inline_result() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"result": {"type": "video", "data": [{"url": "https://cdn.example/canary.mp4"}]}})
+
+    refs = [AssetReference(asset_id=1, url="https://cdn.example/start.jpg"), AssetReference(asset_id=2, url="https://cdn.example/end.jpg")]
+    provider = ToApisProvider("secret", transport=httpx.MockTransport(handler), allow_live_submit=True)
+    result = await provider.submit_video(video_request(duration_seconds=1, start_frame=refs[0], end_frame=refs[1], seed=None))
+    assert result.response_mode == "INLINE_RESULT"
+    assert result.result_urls[0].url.endswith("canary.mp4")
+    assert captured == {
+        "model": VIDEO_MODEL,
+        "prompt": "camera move",
+        "client_business_id": "fcs-182-a1",
+        "duration": 1,
+        "resolution": "720p",
+        "audio": False,
+        "image_urls": [refs[0].url, refs[1].url],
+    }
     await provider.aclose()
 
 
 @pytest.mark.anyio
 async def test_unknown_status_and_cancel_are_not_guessed() -> None:
     provider = ToApisProvider("secret", transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"data": {"id": "x", "status": "mystery"}})), allow_live_submit=True)
-    with pytest.raises(ProviderInvalidResponseError):
-        await provider.submit_image(image_request())
+    submitted = await provider.submit_image(image_request())
+    assert submitted.remote_job_id == "image:x"
+    assert submitted.remote_status == RemoteJobStatus.QUEUED
     with pytest.raises(ProviderCancellationError):
         await provider.cancel_job("image:x")
     await provider.aclose()
@@ -93,9 +159,32 @@ async def test_png_upload(tmp_path: Path) -> None:
     source = tmp_path / "frame.png"
     source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 20)
     def handler(request: httpx.Request) -> httpx.Response:
-        assert b'name="purpose"' in request.content and b"generation" in request.content
+        assert b'name="file"' in request.content
+        assert b'name="purpose"' not in request.content
         return httpx.Response(200, json={"success": True, "data": {"id": "up-1", "url": "https://cdn.example/u.png", "mime_type": "image/png", "size": 28}})
     provider = ToApisProvider("secret", transport=httpx.MockTransport(handler), allow_live_submit=True)
     result = await provider.upload_asset(source, client_request_id="fcs-1-a1:asset:1")
     assert result.url == "https://cdn.example/u.png"
+    await provider.aclose()
+
+
+@pytest.mark.anyio
+async def test_video_completed_contract_uses_top_level_video_url() -> None:
+    provider = ToApisProvider(
+        "secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "id": "vid-1",
+                    "status": "completed",
+                    "video_url": "https://cdn.example/result.mp4",
+                    "expires_at": 1768466622,
+                },
+            )
+        ),
+        allow_live_submit=True,
+    )
+    result = await provider.get_job("video:vid-1")
+    assert result.result_urls[0].url == "https://cdn.example/result.mp4"
     await provider.aclose()

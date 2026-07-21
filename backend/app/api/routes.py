@@ -14,7 +14,7 @@ from app.core.config import BACKEND_ROOT, get_settings
 from app.core.errors import AppError
 from app.db import engine, get_session
 from app.media.ffmpeg import require_binary
-from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, ProjectRender, Shot, TaskCommandType
+from app.models.entities import Asset, GenerationKind, GenerationRequest, Project, ProjectRender, ProviderVerificationRun, ProviderVerificationType, Shot, TaskCommandType
 from app.models.schemas import (
     CharacterCreate,
     CharacterRead,
@@ -81,7 +81,10 @@ from app.models.schemas import (
     ProviderProfileUpdate,
     ProviderValidationRead,
     ProviderVerificationRunRead,
+    ProviderVerificationAdvanceRead,
     ToApisAccountBalanceRequest,
+    ToApisCanaryRecoveryRequest,
+    ToApisVideoCanaryConsoleReviewRequest,
     ToApisLiveEnableRequest,
     ToApisPricingReviewRequest,
     UsageSummaryRead,
@@ -91,7 +94,7 @@ from app.providers.exceptions import ProviderError
 from app.providers.models import ProviderCapabilities, ProviderInfo
 from app.providers.mock import MockGenerationProvider
 from app.models.entities import ShotDraftStatus
-from app.services import live_orchestration, provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, worker_status
+from app.services import live_orchestration, provider_management, provider_resolution, quality_service, script_workflow, studio, structured, task_service, toapis_canary, toapis_canary_recovery, toapis_verification, toapis_video_canary, worker_status
 from app.workers import render_service
 
 router = APIRouter()
@@ -257,13 +260,63 @@ def verify_provider_contract(provider_id: int, session: Session = Depends(get_se
     return provider_management.verify_contract(session, provider_id)
 
 
-@router.post("/provider-profiles/{provider_id}/verify-live", response_model=ProviderVerificationRunRead)
+@router.post("/provider-profiles/{provider_id}/verify-live", response_model=ProviderVerificationRunRead, status_code=202)
 def verify_provider_live(
     provider_id: int,
     payload: LiveVerificationRequest,
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return provider_management.verify_live(session, provider_id, payload)
+
+
+@router.get("/provider-verification-runs/{run_id}", response_model=ProviderVerificationRunRead)
+def get_provider_verification_run(run_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.get_verification_run(session, run_id)
+
+
+@router.post("/provider-verification-runs/{run_id}/advance", response_model=ProviderVerificationAdvanceRead)
+def advance_provider_verification_run(run_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    run = session.get(ProviderVerificationRun, run_id)
+    if run and run.verification_type == ProviderVerificationType.LIVE_CANARY:
+        return toapis_canary.advance(session, run_id)
+    if run and run.verification_type == ProviderVerificationType.LIVE_VIDEO_CANARY:
+        return toapis_video_canary.advance(session, run_id)
+    return toapis_verification.advance(session, run_id)
+
+
+@router.post("/provider-verification-runs/{run_id}/recover-existing-canary-result")
+def recover_existing_canary_result(
+    run_id: int,
+    payload: ToApisCanaryRecoveryRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return toapis_canary_recovery.prepare_existing_result_recovery(
+        session,
+        run_id=run_id,
+        existing_remote_task_id=payload.existing_remote_task_id,
+        existing_result_url=payload.existing_result_url,
+        acknowledged=payload.acknowledge_existing_task_recovery,
+    )
+
+
+@router.post("/provider-verification-runs/{run_id}/video-canary-console-review")
+def review_video_canary_console(
+    run_id: int,
+    payload: ToApisVideoCanaryConsoleReviewRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return toapis_canary_recovery.review_video_canary_console_billing(session, run_id=run_id, payload=payload)
+
+
+@router.post("/provider-verification-runs/{run_id}/initial-anchor", response_model=ProviderVerificationAdvanceRead)
+async def set_provider_verification_initial_anchor(
+    run_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return toapis_verification.set_initial_anchor(
+        session, run_id, content=await file.read(get_settings().upload_max_image_bytes + 1), content_type=file.content_type,
+    )
 
 
 @router.get("/provider-profiles/{provider_id}/models", response_model=list[ProviderModelProfileRead])
