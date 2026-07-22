@@ -75,24 +75,24 @@ async function run(action: () => Promise<void>) {
 <template>
   <main class="page">
     <header class="toolbar">
-      <el-button :icon="Refresh" :loading="loading" @click="loadScripts" />
-      <el-button :icon="Upload" :loading="busy" @click="fileInput?.click()" />
+      <el-button :icon="Refresh" aria-label="刷新脚本" title="刷新脚本" :loading="loading" @click="loadScripts" />
+      <el-button :icon="Upload" aria-label="上传脚本" title="上传脚本" :loading="busy" @click="fileInput?.click()" />
       <input ref="fileInput" class="hidden-input" type="file" accept=".txt,.md,.fountain,.docx" @change="importFile" />
-      <el-button @click="router.push(`/projects/${projectId}`)">Back</el-button>
+      <el-button @click="router.push(`/projects/${projectId}`)">返回项目</el-button>
     </header>
 
     <section class="workspace">
       <aside class="panel import-panel">
-        <h2>Import</h2>
-        <el-input v-model="pasteForm.title" placeholder="Title" />
+        <h2>导入脚本</h2>
+        <el-input v-model="pasteForm.title" placeholder="脚本标题" />
         <el-select v-model="pasteForm.source_type">
-          <el-option label="Pasted" value="PASTED" />
-          <el-option label="Text" value="PLAIN_TEXT" />
+          <el-option label="粘贴文本" value="PASTED" />
+          <el-option label="纯文本" value="PLAIN_TEXT" />
           <el-option label="Markdown" value="MARKDOWN" />
           <el-option label="Fountain" value="FOUNTAIN" />
         </el-select>
-        <el-input v-model="pasteForm.text" type="textarea" :rows="14" placeholder="Paste script text" />
-        <el-button type="primary" :icon="DocumentAdd" :loading="busy" @click="importPaste">Import</el-button>
+        <el-input v-model="pasteForm.text" type="textarea" :rows="14" placeholder="在此粘贴脚本文本" />
+        <el-button type="primary" :icon="DocumentAdd" :loading="busy" @click="importPaste">导入</el-button>
       </aside>
 
       <section v-loading="loading" class="script-list">
@@ -100,11 +100,11 @@ async function run(action: () => Promise<void>) {
           <div>
             <h3>{{ script.title }}</h3>
             <p>{{ script.source_type }} · v{{ script.version }} · {{ script.status }}</p>
-            <p>{{ script.block_count }} blocks · {{ script.storyboard_count }} storyboards</p>
+            <p>{{ script.block_count }} 个文本块 · {{ script.storyboard_count }} 个分镜草稿</p>
           </div>
           <div class="row-actions">
-            <el-button @click="router.push(`/projects/${projectId}/scripts/${script.id}`)">Open</el-button>
-            <el-button :disabled="script.status === 'ARCHIVED'" @click="archiveScript(script)">Archive</el-button>
+            <el-button @click="router.push(`/projects/${projectId}/scripts/${script.id}`)">打开</el-button>
+            <el-button :disabled="script.status === 'ARCHIVED'" @click="archiveScript(script)">归档</el-button>
           </div>
         </article>
       </section>

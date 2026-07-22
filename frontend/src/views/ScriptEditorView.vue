@@ -85,9 +85,9 @@ async function run(action: () => Promise<void>) {
 <template>
   <main v-loading="loading" class="page">
     <header class="toolbar">
-      <el-button :icon="Refresh" :loading="busy" @click="parseNow">Parse</el-button>
-      <el-button type="primary" :loading="busy" @click="createStoryboard">New Storyboard</el-button>
-      <el-button @click="router.push(`/projects/${projectId}/scripts`)">Scripts</el-button>
+      <el-button :icon="Refresh" :loading="busy" @click="parseNow">解析脚本</el-button>
+      <el-button type="primary" :loading="busy" @click="createStoryboard">新建分镜草稿</el-button>
+      <el-button @click="router.push(`/projects/${projectId}/scripts`)">返回脚本列表</el-button>
     </header>
 
     <section class="editor-grid">
@@ -106,20 +106,20 @@ async function run(action: () => Promise<void>) {
           </div>
           <p>{{ block.effective_text }}</p>
           <small>{{ block.source_start }}-{{ block.source_end }} · {{ block.speaker || "no speaker" }}</small>
-          <el-button v-if="block.parse_warnings.length && !block.warnings_confirmed" size="small" @click="confirmWarnings(block)">Confirm</el-button>
+          <el-button v-if="block.parse_warnings.length && !block.warnings_confirmed" size="small" @click="confirmWarnings(block)">确认警告</el-button>
         </article>
       </section>
 
       <aside class="panel side">
-        <h2>Review</h2>
-        <p>Status: {{ script?.status }}</p>
-        <p>Parser revision: {{ script?.parse_revision }}</p>
-        <p>Blocks: {{ blocks.length }}</p>
-        <p>Storyboards: {{ storyboards.length }}</p>
+        <h2>分镜审核</h2>
+        <p>状态：{{ script?.status }}</p>
+        <p>解析器版本：{{ script?.parse_revision }}</p>
+        <p>文本块：{{ blocks.length }}</p>
+        <p>分镜稿：{{ storyboards.length }}</p>
         <article v-for="storyboard in storyboards" :key="storyboard.id" class="storyboard-row">
           <strong>{{ storyboard.name }}</strong>
           <span>{{ storyboard.status }} · {{ storyboard.shot_draft_count }} drafts</span>
-          <el-button size="small" @click="router.push(`/projects/${projectId}/storyboards/${storyboard.id}`)">Open</el-button>
+          <el-button size="small" @click="router.push(`/projects/${projectId}/storyboards/${storyboard.id}`)">打开</el-button>
         </article>
       </aside>
     </section>

@@ -5,6 +5,7 @@ import { computed, onMounted, ref } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 
 import { api, type GenerationUsageRecord, type ProjectBudgetPolicy, type UsageSummary } from "@/api/client";
+import { statusLabel } from "@/constants/uiText";
 
 const route = useRoute();
 const projectId = computed(() => Number(route.params.projectId));
@@ -87,12 +88,12 @@ function statusTag(status: GenerationUsageRecord["status"]) {
   <main class="usage-page" v-loading="loading">
     <header class="page-header">
       <div>
-        <h1>Project Usage</h1>
-        <RouterLink :to="`/projects/${projectId}`">Project</RouterLink>
+        <h1>用量与预算</h1>
+        <RouterLink :to="`/projects/${projectId}`">返回项目</RouterLink>
       </div>
       <div class="actions">
-        <el-button :icon="Download" tag="a" :href="api.usageCsvUrl(projectId)">CSV</el-button>
-        <el-button :icon="Refresh" :loading="loading" @click="loadUsage">Refresh</el-button>
+        <el-button :icon="Download" tag="a" :href="api.usageCsvUrl(projectId)">导出 CSV</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="loadUsage">刷新</el-button>
       </div>
     </header>
 
@@ -100,61 +101,61 @@ function statusTag(status: GenerationUsageRecord["status"]) {
       <div class="metric" v-for="item in summary?.currencies ?? []" :key="item.currency">
         <span>{{ item.currency }}</span>
         <strong>{{ item.actual_total }}</strong>
-        <small>estimated {{ item.estimated_total }}</small>
+        <small>预估 {{ item.estimated_total }}</small>
       </div>
       <div class="metric">
-        <span>Requests</span>
+        <span>生成请求</span>
         <strong>{{ summary?.request_count ?? 0 }}</strong>
         <small>{{ summary?.image_request_count ?? 0 }} image · {{ summary?.video_request_count ?? 0 }} video</small>
       </div>
       <div class="metric">
-        <span>Unknown Costs</span>
+        <span>费用未知</span>
         <strong>{{ summary?.unknown_cost_count ?? 0 }}</strong>
-        <small>kept as UNKNOWN, never zero-filled</small>
+        <small>保持“未知”状态，不会按零费用处理</small>
       </div>
     </section>
 
     <section class="budget-panel">
       <header class="panel-header">
-        <h2>Budget Policy</h2>
-        <el-button type="primary" :loading="saving" @click="saveBudget">Save</el-button>
+        <h2>预算策略</h2>
+        <el-button type="primary" :loading="saving" @click="saveBudget">保存预算</el-button>
       </header>
       <el-form label-position="top" class="budget-form">
-        <el-form-item label="Enabled"><el-switch v-model="budgetForm.enabled" /></el-form-item>
-        <el-form-item label="Currency"><el-input v-model="budgetForm.currency" /></el-form-item>
-        <el-form-item label="Warning Limit"><el-input v-model="budgetForm.warning_limit" /></el-form-item>
-        <el-form-item label="Hard Limit"><el-input v-model="budgetForm.hard_limit" /></el-form-item>
-        <el-form-item label="Per Request Limit"><el-input v-model="budgetForm.per_request_limit" /></el-form-item>
-        <el-form-item label="Unknown Cost">
+        <el-form-item label="启用"><el-switch v-model="budgetForm.enabled" /></el-form-item>
+        <el-form-item label="币种"><el-input v-model="budgetForm.currency" /></el-form-item>
+        <el-form-item label="警告额度"><el-input v-model="budgetForm.warning_limit" /></el-form-item>
+        <el-form-item label="硬性额度"><el-input v-model="budgetForm.hard_limit" /></el-form-item>
+        <el-form-item label="单次请求额度"><el-input v-model="budgetForm.per_request_limit" /></el-form-item>
+        <el-form-item label="未知费用策略">
           <el-select v-model="budgetForm.unknown_cost_policy">
-            <el-option label="Allow with warning" value="ALLOW_WITH_WARNING" />
-            <el-option label="Block" value="BLOCK" />
+            <el-option label="允许并警告" value="ALLOW_WITH_WARNING" />
+            <el-option label="阻止" value="BLOCK" />
           </el-select>
         </el-form-item>
       </el-form>
     </section>
 
     <el-table :data="records" stripe>
-      <el-table-column prop="created_at" label="Created" min-width="180" />
-      <el-table-column label="Request" width="110">
+      <el-table-column prop="created_at" label="创建时间" min-width="180" />
+      <el-table-column label="请求" width="110">
         <template #default="{ row }">#{{ row.generation_request_id ?? "-" }}</template>
       </el-table-column>
-      <el-table-column label="Task" width="100">
+      <el-table-column label="任务" width="100">
         <template #default="{ row }">#{{ row.generation_task_id ?? "-" }}</template>
       </el-table-column>
-      <el-table-column prop="record_type" label="Type" min-width="150" />
-      <el-table-column label="Status" width="130">
+      <el-table-column prop="record_type" label="类型" min-width="150" />
+      <el-table-column label="状态" width="130">
         <template #default="{ row }">
-          <el-tag :type="statusTag(row.status)">{{ row.status }}</el-tag>
+          <el-tag :type="statusTag(row.status)" :title="row.status">{{ statusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="Estimate" min-width="150">
+      <el-table-column label="预估费用" min-width="150">
         <template #default="{ row }">{{ displayCost(row.estimated_cost, row.currency) }}</template>
       </el-table-column>
-      <el-table-column label="Actual" min-width="150">
+      <el-table-column label="实际费用" min-width="150">
         <template #default="{ row }">{{ displayCost(row.actual_cost, row.currency) }}</template>
       </el-table-column>
-      <el-table-column prop="cost_source" label="Source" min-width="150" />
+      <el-table-column prop="cost_source" label="费用来源" min-width="150" />
     </el-table>
   </main>
 </template>

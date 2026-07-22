@@ -66,9 +66,9 @@ describe("ProjectDetailView phase 2F", () => {
 
     const wrapper = await mountView();
 
-    expect(wrapper.text()).toContain("Generation Settings");
-    expect(wrapper.text()).toContain("Workers");
-    expect(wrapper.text()).toContain("Start: python -m app.workers.cli generation");
+    expect(wrapper.text()).toContain("生成设置");
+    expect(wrapper.text()).toContain("工作进程");
+    expect(wrapper.text()).toContain("启动命令：python -m app.workers.cli generation");
   });
 
   it("groups task attempts by request and shows actual generation mode", async () => {
@@ -107,10 +107,10 @@ describe("ProjectDetailView phase 2F", () => {
 
     const wrapper = await mountView();
 
-    expect(wrapper.text()).toContain("Request #10 KEYFRAME");
-    expect(wrapper.text()).toContain("mode TEXT_TO_IMAGE");
-    expect(wrapper.text()).toContain("job remote...3456");
-    expect(wrapper.text()).toContain("progress 50%");
+    expect(wrapper.text()).toContain("请求 #10 关键帧");
+    expect(wrapper.text()).toContain("生成模式 文字生成图片");
+    expect(wrapper.text()).toContain("任务标识 remote...3456");
+    expect(wrapper.text()).toContain("进度 50%");
   });
 
   it("uses backend shot actions to disable unavailable generation commands", async () => {
@@ -327,7 +327,7 @@ describe("ProjectDetailView", () => {
     mocks.confirm.mockRejectedValueOnce(new Error("cancel"));
     const wrapper = await mountView();
 
-    expect(wrapper.text()).toContain("删除 Shot");
+    expect(wrapper.text()).toContain("删除镜头");
     await wrapper.find(".delete-shot").trigger("click");
     await flushPromises();
 
@@ -447,10 +447,10 @@ describe("ProjectDetailView", () => {
 
     const wrapper = await mountView();
 
-    expect(wrapper.text()).toContain("Quality checks: 1 warnings, 0 errors");
+    expect(wrapper.text()).toContain("质量检查：1 个警告，0 个错误");
     expect(wrapper.text()).toContain("Current warning");
     expect(wrapper.text()).not.toContain("Old error");
-    await wrapper.findAll("button").find((button) => button.text().includes("Rerun"))?.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text().includes("重新检查"))?.trigger("click");
     await flushPromises();
     expect(api.runQualityChecks).toHaveBeenCalledWith(1);
   });

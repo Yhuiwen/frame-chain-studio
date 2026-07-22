@@ -106,8 +106,8 @@ async function run(action: () => Promise<void>) {
   <main v-loading="loading" class="page">
     <header class="toolbar">
       <el-button :icon="Refresh" :loading="loading" @click="loadAll" />
-      <el-button type="primary" :disabled="!selectedIds.length" :loading="busy" @click="applySelected">Apply Selected</el-button>
-      <el-button @click="router.push(`/projects/${projectId}/scripts/${storyboard?.script_document_id}`)">Script</el-button>
+      <el-button type="primary" :disabled="!selectedIds.length" :loading="busy" @click="applySelected">应用所选镜头</el-button>
+      <el-button @click="router.push(`/projects/${projectId}/scripts/${storyboard?.script_document_id}`)">返回脚本</el-button>
     </header>
 
     <section class="board">
@@ -121,20 +121,20 @@ async function run(action: () => Promise<void>) {
           <p>{{ draft.summary }}</p>
           <small>{{ draft.source_text }}</small>
           <div class="actions">
-            <el-button size="small" @click="startEdit(draft)">Edit</el-button>
-            <el-button size="small" @click="previewDraft(draft)">Preview</el-button>
-            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="splitDraft(draft)">Split</el-button>
-            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="api.mergeShotDraftNext(draft.id).then(loadAll)">Merge</el-button>
-            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="api.skipShotDraft(draft.id).then(loadAll)">Skip</el-button>
-            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="api.restoreShotDraft(draft.id).then(loadAll)">Restore</el-button>
-            <el-button size="small" type="primary" :disabled="draft.status === 'APPLIED' || draft.status === 'SKIPPED'" @click="applyDraft(draft)">Apply</el-button>
+            <el-button size="small" @click="startEdit(draft)">编辑</el-button>
+            <el-button size="small" @click="previewDraft(draft)">预览</el-button>
+            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="splitDraft(draft)">拆分</el-button>
+            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="api.mergeShotDraftNext(draft.id).then(loadAll)">合并</el-button>
+            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="api.skipShotDraft(draft.id).then(loadAll)">跳过</el-button>
+            <el-button size="small" :disabled="draft.status === 'APPLIED'" @click="api.restoreShotDraft(draft.id).then(loadAll)">恢复</el-button>
+            <el-button size="small" type="primary" :disabled="draft.status === 'APPLIED' || draft.status === 'SKIPPED'" @click="applyDraft(draft)">应用</el-button>
           </div>
         </article>
       </section>
 
       <aside class="side">
         <section class="panel">
-          <h2>Edit Draft</h2>
+          <h2>编辑镜头草稿</h2>
           <el-input v-model="edit.title" placeholder="Title" />
           <el-input v-model="edit.summary" type="textarea" :rows="3" placeholder="Summary" />
           <el-input v-model="edit.action" type="textarea" :rows="3" placeholder="Action" />
@@ -146,19 +146,19 @@ async function run(action: () => Promise<void>) {
             <el-option v-for="style in styles" :key="style.id" :label="style.name" :value="style.id" />
           </el-select>
           <el-input v-model="edit.free_prompt" type="textarea" :rows="3" placeholder="Free prompt" />
-          <el-button type="primary" :disabled="!edit.id" :loading="busy" @click="saveEdit">Save</el-button>
+          <el-button type="primary" :disabled="!edit.id" :loading="busy" @click="saveEdit">保存</el-button>
         </section>
 
         <section class="panel">
-          <h2>Characters</h2>
+          <h2>角色</h2>
           <el-select v-if="edit.characters?.length" v-model="edit.characters[0].character_id" clearable placeholder="Character">
             <el-option v-for="character in characters" :key="character.id" :label="character.name" :value="character.id" />
           </el-select>
-          <p v-else>No parsed character row selected.</p>
+          <p v-else>尚未选择已解析的角色行。</p>
         </section>
 
         <section class="panel preview">
-          <h2>Prompt Preview</h2>
+          <h2>提示词预览</h2>
           <p>{{ preview?.compiler_version }}</p>
           <pre>{{ preview?.compiled_prompt }}</pre>
         </section>

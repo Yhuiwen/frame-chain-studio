@@ -122,7 +122,7 @@ function removeCharacter(index: number) {
 }
 
 function characterName(characterId: number) {
-  return characters.value.find((item) => item.id === characterId)?.name ?? `Character #${characterId}`;
+  return characters.value.find((item) => item.id === characterId)?.name ?? `角色 #${characterId}`;
 }
 
 function parseList(value: string) {
@@ -193,14 +193,14 @@ async function syncSpec() {
   <main class="page" v-loading="loading">
     <section class="toolbar">
       <div>
-        <h1>Shot Spec</h1>
-        <p v-if="spec">Revision {{ spec.revision }} · {{ spec.compiler_version }}</p>
+        <h1>镜头规范</h1>
+        <p v-if="spec">第 {{ spec.revision }} 版 · {{ spec.compiler_version }}</p>
       </div>
       <div class="actions">
-        <el-button native-type="button" @click="router.push(`/projects/${projectId}`)">Project</el-button>
-        <el-button native-type="button" :icon="Refresh" :loading="loading" @click="loadAll">Refresh</el-button>
-        <el-button native-type="button" :loading="busy" @click="syncSpec">Sync Defaults</el-button>
-        <el-button native-type="button" type="primary" :loading="busy" @click="saveRevision">Save Revision</el-button>
+        <el-button native-type="button" @click="router.push(`/projects/${projectId}`)">返回项目</el-button>
+        <el-button native-type="button" :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
+        <el-button native-type="button" :loading="busy" @click="syncSpec">同步默认值</el-button>
+        <el-button native-type="button" type="primary" :loading="busy" @click="saveRevision">保存新版本</el-button>
       </div>
     </section>
 
@@ -208,56 +208,56 @@ async function syncSpec() {
       <div class="editor-panel">
         <div class="field-row">
           <label>
-            Location
+            场景
             <el-select v-model="form.location_id" clearable>
               <el-option v-for="item in locations" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </label>
           <label>
-            Style
+            风格
             <el-select v-model="form.style_profile_id" clearable>
               <el-option v-for="item in styles" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </label>
         </div>
-        <el-input v-model="reason" placeholder="Revision reason" />
-        <el-input v-model="form.summary" type="textarea" :rows="2" placeholder="Summary" />
-        <el-input v-model="form.action" type="textarea" :rows="2" placeholder="Action" />
-        <el-input v-model="form.emotion" placeholder="Emotion" />
+        <el-input v-model="reason" placeholder="版本修改原因" />
+        <el-input v-model="form.summary" type="textarea" :rows="2" placeholder="镜头摘要" />
+        <el-input v-model="form.action" type="textarea" :rows="2" placeholder="动作" />
+        <el-input v-model="form.emotion" placeholder="情绪" />
         <div class="field-row">
-          <el-input v-model="form.composition" placeholder="Composition" />
-          <el-input v-model="form.shot_size" placeholder="Shot size" />
-          <el-input v-model="form.camera_angle" placeholder="Camera angle" />
+          <el-input v-model="form.composition" placeholder="构图" />
+          <el-input v-model="form.shot_size" placeholder="景别" />
+          <el-input v-model="form.camera_angle" placeholder="机位角度" />
         </div>
-        <el-input v-model="form.camera_movement" placeholder="Camera movement" />
+        <el-input v-model="form.camera_movement" placeholder="镜头运动" />
         <div class="field-row">
-          <el-input v-model="form.lighting" placeholder="Lighting" />
-          <el-input v-model="form.time_of_day" placeholder="Time of day" />
-          <el-input v-model="form.weather" placeholder="Weather" />
+          <el-input v-model="form.lighting" placeholder="光照" />
+          <el-input v-model="form.time_of_day" placeholder="时间段" />
+          <el-input v-model="form.weather" placeholder="天气" />
         </div>
-        <el-input v-model="form.dialogue" type="textarea" :rows="2" placeholder="Dialogue" />
-        <el-input v-model="form.continuity_notes" type="textarea" :rows="3" placeholder="Continuity notes" />
-        <el-input v-model="propsText" type="textarea" :rows="3" placeholder="Props, one per line" />
-        <el-input v-model="overridesText" type="textarea" :rows="4" placeholder="Provider overrides JSON" />
+        <el-input v-model="form.dialogue" type="textarea" :rows="2" placeholder="对白" />
+        <el-input v-model="form.continuity_notes" type="textarea" :rows="3" placeholder="连续性说明" />
+        <el-input v-model="propsText" type="textarea" :rows="3" placeholder="道具，每行一个" />
+        <el-input v-model="overridesText" type="textarea" :rows="4" placeholder="服务商覆盖参数 JSON" />
       </div>
 
       <div class="characters-panel">
         <div class="panel-title">
-          <h2>Characters</h2>
+          <h2>角色</h2>
           <div class="add-row">
-            <el-select v-model="selectedCharacterId" placeholder="Add character" clearable>
+            <el-select v-model="selectedCharacterId" placeholder="选择角色" clearable>
               <el-option v-for="item in characters" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
-            <el-button native-type="button" :icon="Plus" @click="addCharacter">Add</el-button>
+            <el-button native-type="button" :icon="Plus" @click="addCharacter">添加</el-button>
           </div>
         </div>
         <article v-for="(item, index) in characterRows" :key="item.character_id" class="character-card">
           <div class="card-title">
             <strong>{{ characterName(item.character_id) }}</strong>
             <el-select v-model="item.role">
-              <el-option label="Primary" value="PRIMARY" />
-              <el-option label="Secondary" value="SECONDARY" />
-              <el-option label="Background" value="BACKGROUND" />
+              <el-option label="主要角色" value="PRIMARY" />
+              <el-option label="次要角色" value="SECONDARY" />
+              <el-option label="背景角色" value="BACKGROUND" />
             </el-select>
           </div>
           <el-input v-model="item.appearance_override" placeholder="Appearance override" />
@@ -266,27 +266,27 @@ async function syncSpec() {
           <el-input v-model="item.action" placeholder="Action" />
           <el-input v-model="item.position" placeholder="Position" />
           <el-input v-model="item.continuity_notes" type="textarea" :rows="2" placeholder="Continuity notes" />
-          <el-button native-type="button" type="danger" @click="removeCharacter(index)">Remove</el-button>
+          <el-button native-type="button" type="danger" @click="removeCharacter(index)">移除</el-button>
         </article>
       </div>
 
       <div class="preview-panel">
         <div class="panel-title">
-          <h2>Compiled Prompt</h2>
-          <el-tag size="small">{{ spec.reference_asset_ids.length }} refs</el-tag>
+          <h2>编译后的提示词</h2>
+          <el-tag size="small">{{ spec.reference_asset_ids.length }} 个参考素材</el-tag>
         </div>
         <pre>{{ spec.compiled_prompt }}</pre>
-        <h3>Negative</h3>
-        <pre>{{ spec.compiled_negative_prompt || "none" }}</pre>
-        <h3>Structured Payload</h3>
+        <h3>负面提示词</h3>
+        <pre>{{ spec.compiled_negative_prompt || "无" }}</pre>
+        <h3>结构化参数</h3>
         <pre>{{ JSON.stringify(spec.structured_payload, null, 2) }}</pre>
       </div>
 
       <div class="history-panel">
-        <h2>History</h2>
+        <h2>版本历史</h2>
         <el-timeline>
           <el-timeline-item v-for="item in history" :key="item.id" :timestamp="item.created_at">
-            Revision {{ item.revision }} · {{ item.compiler_version }}
+            第 {{ item.revision }} 版 · {{ item.compiler_version }}
           </el-timeline-item>
         </el-timeline>
       </div>

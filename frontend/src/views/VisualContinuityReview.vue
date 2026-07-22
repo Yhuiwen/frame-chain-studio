@@ -7,6 +7,7 @@ import { ApiError, api, type ProjectDetail, type VisualComparisonPair, type Visu
 import FrameComparison from "@/components/FrameComparison.vue";
 import ProviderRunVisualReview from "@/components/ProviderRunVisualReview.vue";
 import VisualReviewPlayer, { type TimelineMarker } from "@/components/VisualReviewPlayer.vue";
+import { reviewReasonLabel, statusLabel } from "@/constants/uiText";
 
 const route = useRoute();
 const projectId = computed(() => Number(route.params.projectId || route.query.projectId || 22));
@@ -48,10 +49,10 @@ const markers = computed<TimelineMarker[]>(() => {
   return result;
 });
 const statusCards = computed(() => selected.value ? [
-  ["技术任务", selected.value.technical_status], ["媒体验证", selected.value.technical_status],
-  ["Lineage 连续性", selected.value.tail_frame_asset_id ? "PASSED" : "FAILED"],
-  ["自动视觉", selected.value.automatic_visual_status], ["人工审核", selected.value.human_visual_status],
-  ["生产门禁", selected.value.production_gate_status],
+  ["技术验证", selected.value.technical_status], ["媒体验证", selected.value.technical_status],
+  ["数据血缘", selected.value.tail_frame_asset_id ? "PASSED" : "FAILED"],
+  ["自动视觉检查", selected.value.automatic_visual_status], ["人工视觉审核", selected.value.human_visual_status],
+  ["生产状态", selected.value.production_gate_status],
 ] : []);
 
 async function load() {
@@ -90,8 +91,8 @@ async function reanalyze() {
 async function submitReview() {
   if (!selected.value) return;
   if (form.checks.length !== confirmations.length) return ElMessage.warning("请完成全部审核确认项。");
-  if (form.status === "REJECTED" && !form.reasons.length) return ElMessage.warning("REJECTED 至少选择一个原因。");
-  if (form.reasons.includes("OTHER") && !form.comment.trim()) return ElMessage.warning("选择 OTHER 时必须填写说明。");
+  if (form.status === "REJECTED" && !form.reasons.length) return ElMessage.warning("选择“未通过”时至少选择一个原因。");
+  if (form.reasons.includes("OTHER") && !form.comment.trim()) return ElMessage.warning("选择“其他（OTHER）”时必须填写说明。");
   state.value = "submitting";
   try {
     const updated = await api.reviewVisualReport(selected.value.id, { status: form.status, rejection_reasons: form.status === "REJECTED" ? form.reasons : [], comment: form.comment, reviewer: "local-operator", expected_report_hash: selected.value.report_hash, expected_updated_at: selected.value.updated_at });
@@ -114,17 +115,17 @@ watch(projectId, () => void load()); onMounted(() => void load());
     <el-empty v-else-if="state === 'empty'" description="该项目暂无视觉分析报告" />
     <div v-else class="review-layout" v-loading="state === 'loading'">
       <aside class="report-sidebar">
-        <h2>Project {{ projectId }} 报告</h2><el-select v-model="filter"><el-option label="全部" value="ALL"/><el-option label="FAILED" value="FAILED"/><el-option label="INCONCLUSIVE" value="INCONCLUSIVE"/><el-option label="待人工审核" value="PENDING"/></el-select><el-checkbox v-model="onlyBlocked">只看 BLOCKED</el-checkbox>
-        <button v-for="item in visibleReports" :key="item.id" class="report-item" :class="{active:selected?.id===item.id}" @click="selectReport(item)"><strong>Shot {{ item.shot_id }} · Asset {{ item.video_asset_id }}</strong><span>{{ item.analysis_version }} · {{ item.report_hash.slice(0, 10) }}</span><span>{{ item.automatic_visual_status }} / {{ item.human_visual_status }} / {{ item.production_gate_status }}</span></button>
+        <h2>项目 {{ projectId }} 报告</h2><el-select v-model="filter"><el-option label="全部" value="ALL"/><el-option label="失败" value="FAILED"/><el-option label="证据不足" value="INCONCLUSIVE"/><el-option label="待人工审核" value="PENDING"/></el-select><el-checkbox v-model="onlyBlocked">只看已阻断</el-checkbox>
+        <button v-for="item in visibleReports" :key="item.id" class="report-item" :class="{active:selected?.id===item.id}" @click="selectReport(item)"><strong>镜头 {{ item.shot_id }} · 素材 {{ item.video_asset_id }}</strong><span>{{ item.analysis_version }} · {{ item.report_hash.slice(0, 10) }}</span><span>{{ statusLabel(item.automatic_visual_status) }} / {{ statusLabel(item.human_visual_status) }} / {{ statusLabel(item.production_gate_status) }}</span></button>
       </aside>
       <section v-if="selected" class="review-main">
-        <div class="status-grid"><article v-for="card in statusCards" :key="card[0]" class="status-card"><span>{{ card[0] }}</span><strong :class="String(card[1]).toLowerCase()">{{ card[1] }}</strong></article></div>
+        <div class="status-grid"><article v-for="card in statusCards" :key="card[0]" class="status-card"><span>{{ card[0] }}</span><strong :class="String(card[1]).toLowerCase()">{{ statusLabel(String(card[1])) }}</strong></article></div>
         <VisualReviewPlayer :src="videoUrl" :markers="markers" :fps="Number((selected.metrics.video as any)?.fps || 24)" />
         <section class="panel"><h2>帧对比工作区</h2><el-select v-model="activePair" value-key="kind"><el-option v-for="pair in manifest?.comparisonPairs" :key="pair.kind + pair.leftTimestamp" :label="pair.kind" :value="pair"/></el-select><FrameComparison v-if="activePair" :left-url="pairUrl('left')" :right-url="pairUrl('right')" :left-label="`${activePair.leftSource} · Asset ${activePair.leftAssetId ?? '-'} · ${activePair.leftTimestamp ?? '-'}s`" :right-label="`${activePair.rightSource} · Asset ${activePair.rightAssetId ?? '-'} · ${activePair.rightTimestamp ?? '尾帧'}s`" /></section>
         <section class="panel"><h2>自动指标详情</h2><el-descriptions :column="3" border><el-descriptions-item label="场景切换">{{ selected.scene_cut_status }}</el-descriptions-item><el-descriptions-item label="Anchor">{{ selected.anchor_match_status }}</el-descriptions-item><el-descriptions-item label="Target">{{ selected.target_match_status }}</el-descriptions-item><el-descriptions-item label="相机">{{ selected.camera_stability_status }}</el-descriptions-item><el-descriptions-item label="构图">{{ selected.composition_drift_status }}</el-descriptions-item><el-descriptions-item label="主体尺度">{{ selected.subject_scale_drift_status }}</el-descriptions-item><el-descriptions-item label="风格">{{ selected.style_drift_status }}</el-descriptions-item><el-descriptions-item label="跨 Shot">{{ manifest?.crossShotSeam?.status || selected.cross_shot_seam_status }}</el-descriptions-item></el-descriptions><p v-if="manifest?.crossShotSeam?.status === 'PASSED'">正式 Shot 接缝 lineage 通过，不是本次主要失败原因；Shot 内异常仍独立阻断。</p><p>启发式指标，不等同于语义主体识别。INCONCLUSIVE 表示证据不足，必须人工判断并继续阻断生产。</p><details><summary>原始数值与阈值</summary><pre>{{ JSON.stringify(selected.metrics, null, 2) }}</pre></details></section>
         <section class="panel"><h2>关键帧差异预算与 Prompt Contract</h2><p>TOO_SIMILAR：动作差异不足；TOO_DIFFERENT：容易重绘或跳切；INCONCLUSIVE：必须人工判断。</p><el-alert v-if="manifest?.promptContractWarning" :title="manifest.promptContractWarning" type="warning" :closable="false"/><pre v-else>{{ JSON.stringify(manifest?.promptContract, null, 2) }}</pre></section>
       </section>
-      <aside v-if="selected" class="review-aside"><section class="panel"><h2>人工审核</h2><el-alert v-if="selected.human_visual_status === 'REJECTED'" title="历史 REJECTED 已锁定展示；本阶段不修改 Run 6 结论。" type="error" :closable="false"/><el-radio-group v-model="form.status"><el-radio value="APPROVED">APPROVED</el-radio><el-radio value="REJECTED">REJECTED</el-radio></el-radio-group><el-checkbox-group v-model="form.reasons"><el-checkbox v-for="reason in reasons" :key="reason" :value="reason">{{ reason }}</el-checkbox></el-checkbox-group><el-input v-model="form.comment" type="textarea" maxlength="2000" show-word-limit placeholder="纯文本审核说明"/><el-checkbox-group v-model="form.checks"><el-checkbox v-for="item in confirmations" :key="item" :value="item">{{ item }}</el-checkbox></el-checkbox-group><el-button type="primary" :disabled="selected.project_id === 22 && selected.human_visual_status === 'REJECTED'" @click="submitReview">提交人工审核</el-button><p v-if="form.status === 'APPROVED' && selected.automatic_visual_status !== 'PASSED'">人工 APPROVED 不能绕过自动失败；Production gate 仍为 BLOCKED。</p></section><section class="panel"><h2>拒绝原因</h2><el-tag v-for="reason in selected.rejection_reasons" :key="reason" type="danger">{{ reason }}</el-tag></section><section class="panel"><h2>审核历史</h2><p>分析版本 {{ selected.analysis_version }}<br/>Config {{ selected.config_hash.slice(0,12) }}<br/>Report {{ selected.report_hash.slice(0,12) }}</p><div v-for="event in history" :key="String(event.id)">{{ event.reviewed_at }} · {{ event.reviewer }} · {{ event.status }}</div></section><section class="panel gate"><h2>生产质量门禁</h2><strong>{{ selected.production_gate_status }}</strong><p>技术、媒体验证、自动视觉、人工审核与 lineage 必须全部通过。客户端无法提交 ALLOWED。</p></section></aside>
+      <aside v-if="selected" class="review-aside"><section class="panel"><h2>人工审核</h2><el-alert v-if="selected.human_visual_status === 'REJECTED'" title="历史未通过结论已锁定展示；本阶段不修改第 6 次运行的结论。" type="error" :closable="false"/><el-radio-group v-model="form.status"><el-radio value="APPROVED">已通过</el-radio><el-radio value="REJECTED">未通过</el-radio></el-radio-group><el-checkbox-group v-model="form.reasons"><el-checkbox v-for="reason in reasons" :key="reason" :value="reason">{{ reviewReasonLabel(reason) }}</el-checkbox></el-checkbox-group><el-input v-model="form.comment" type="textarea" maxlength="2000" show-word-limit placeholder="纯文本审核说明"/><el-checkbox-group v-model="form.checks"><el-checkbox v-for="item in confirmations" :key="item" :value="item">{{ item }}</el-checkbox></el-checkbox-group><el-button type="primary" :disabled="selected.project_id === 22 && selected.human_visual_status === 'REJECTED'" @click="submitReview">提交人工审核</el-button><p v-if="form.status === 'APPROVED' && selected.automatic_visual_status !== 'PASSED'">人工批准不能绕过自动检查失败；生产门禁仍为已阻断。</p></section><section class="panel"><h2>拒绝原因</h2><el-tag v-for="reason in selected.rejection_reasons" :key="reason" type="danger">{{ reviewReasonLabel(reason) }}</el-tag></section><section class="panel"><h2>审核历史</h2><p>分析版本 {{ selected.analysis_version }}<br/>配置摘要 {{ selected.config_hash.slice(0,12) }}<br/>报告摘要 {{ selected.report_hash.slice(0,12) }}</p><div v-for="event in history" :key="String(event.id)">{{ event.reviewed_at }} · {{ event.reviewer }} · {{ statusLabel(event.status) }}</div></section><section class="panel gate"><h2>生产质量门禁</h2><strong>{{ statusLabel(selected.production_gate_status) }}</strong><p>技术、媒体验证、自动视觉、人工审核与数据血缘必须全部通过。客户端无法提交“允许生产”。</p></section></aside>
     </div>
   </main>
 </template>

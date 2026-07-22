@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import { ApiError, api, type ProviderRunReadiness, type ProviderVisualReview } from "@/api/client";
+import { formatDateTime, productionBlockerLabel, reviewReasonLabel, statusLabel } from "@/constants/uiText";
 
 const props = defineProps<{ projectId: number }>();
 const runs = ref<ProviderRunReadiness[]>([]);
@@ -23,8 +24,8 @@ const cards = computed(() => selected.value ? [
   ["生产状态", selected.value.production_status],
 ] : []);
 const validationMessage = computed(() => {
-  if (form.decision === "REJECTED" && !form.reasons.length) return "REJECTED 必须选择至少一个原因。";
-  if (form.reasons.includes("OTHER") && !form.notes.trim()) return "选择 OTHER 时必须填写说明。";
+  if (form.decision === "REJECTED" && !form.reasons.length) return "选择“未通过”时必须选择至少一个原因。";
+  if (form.reasons.includes("OTHER") && !form.notes.trim()) return "选择“其他（OTHER）”时必须填写说明。";
   return "";
 });
 
@@ -79,53 +80,53 @@ onMounted(() => void load());
   <section class="provider-run-review" v-loading="busy">
     <header>
       <div>
-        <h2>Provider Run 生产门禁</h2>
-        <p>技术批准不代表生产批准；人工审核只对当前明确绑定的 Asset 生效。</p>
+        <h2>服务商验证运行的生产门禁</h2>
+        <p>技术批准不代表生产批准；人工审核只对当前明确绑定的素材生效。</p>
       </div>
       <el-select v-if="runs.length" :model-value="selected?.id" @change="(id:number) => choose(runs.find((run) => run.id === id)!)">
-        <el-option v-for="run in runs" :key="run.id" :label="`Run ${run.id} · ${run.status}`" :value="run.id" />
+        <el-option v-for="run in runs" :key="run.id" :label="`运行 #${run.id} · ${statusLabel(run.status)}`" :value="run.id" />
       </el-select>
     </header>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
-    <el-empty v-else-if="!runs.length && !busy" description="该项目没有 Provider verification Run" />
+    <el-empty v-else-if="!runs.length && !busy" description="该项目没有服务商验证运行记录" />
     <template v-if="selected">
       <div class="gate-cards">
-        <article v-for="card in cards" :key="card[0]"><span>{{ card[0] }}</span><strong :class="String(card[1]).toLowerCase()">{{ card[1] }}</strong></article>
+        <article v-for="card in cards" :key="card[0]"><span>{{ card[0] }}</span><strong :class="String(card[1]).toLowerCase()">{{ statusLabel(String(card[1])) }}</strong></article>
       </div>
       <el-alert v-if="selected.technical_status === 'PASSED' && selected.production_status === 'BLOCKED'" title="技术流程已通过，但视觉或其他生产门禁未通过，不能进入生产。" type="warning" :closable="false" />
       <section class="scene-cut-panel">
         <h3>离线场景硬切证据</h3>
-        <p><strong>{{ selected.scene_cut_check.status }}</strong> · {{ selected.scene_cut_check.algorithm_version }}</p>
+        <p><strong>{{ statusLabel(selected.scene_cut_check.status) }}</strong> · 算法版本 {{ selected.scene_cut_check.algorithm_version }}</p>
         <p>硬切：{{ selected.scene_cut_check.hard_cut_count }} · 待复核：{{ selected.scene_cut_check.review_candidate_count }}</p>
-        <el-alert v-if="selected.scene_cut_check.hard_cut_count" title="UNEXPECTED_SCENE_CUT 阻止生产，但不会修改技术任务结果。" type="error" :closable="false" />
-        <p class="calibration">CALIBRATION_SCOPE={{ selected.scene_cut_check.calibration_scope }}；自动证据不会修改技术状态或人工审核。</p>
+        <el-alert v-if="selected.scene_cut_check.hard_cut_count" title="意外场景硬切（UNEXPECTED_SCENE_CUT）会阻止生产，但不会修改技术任务结果。" type="error" :closable="false" />
+        <p class="calibration">校准范围：{{ selected.scene_cut_check.calibration_scope === 'SYNTHETIC_FIXTURES_ONLY' ? '仅使用合成测试样本校准（SYNTHETIC_FIXTURES_ONLY）' : selected.scene_cut_check.calibration_scope }}；自动场景切换检测仅作为视觉证据，不改变技术任务结果。</p>
         <ul v-if="selected.scene_cut_check.events.length">
           <li v-for="event in selected.scene_cut_check.events" :key="`${event.asset_id}-${event.timestamp_seconds}`">
-            Asset {{ event.asset_id }} · {{ event.timestamp_seconds }}s · pixel {{ event.pixel_delta }} · histogram {{ event.histogram_delta }} · {{ event.classification }}
+            素材 {{ event.asset_id }} · 时间点 {{ event.timestamp_seconds }} 秒 · 像素变化分数 {{ event.pixel_delta }} · 直方图变化分数 {{ event.histogram_delta }} · {{ event.classification }}
           </li>
         </ul>
       </section>
       <div class="run-layout">
         <section class="asset-panel">
-          <h3>当前被审核 Asset</h3>
+          <h3>当前被审核素材</h3>
           <template v-if="selected.selected_review_asset">
             <video v-if="selected.selected_review_asset.type === 'PROJECT_RENDER' || selected.selected_review_asset.type === 'VIDEO'" controls :src="api.mediaUrl(selected.selected_review_asset.id)" />
-            <img v-else :src="api.mediaUrl(selected.selected_review_asset.id)" alt="被审核 Asset 预览" />
+            <img v-else :src="api.mediaUrl(selected.selected_review_asset.id)" alt="被审核素材预览" />
             <dl>
-              <dt>Asset ID</dt><dd>{{ selected.selected_review_asset.id }}</dd>
+              <dt>素材 ID</dt><dd>{{ selected.selected_review_asset.id }}</dd>
               <dt>类型</dt><dd>{{ selected.selected_review_asset.type }}</dd>
               <dt>SHA-256</dt><dd>{{ selected.selected_review_asset.sha256.slice(0, 16) }}…</dd>
-              <dt>创建时间</dt><dd>{{ selected.selected_review_asset.created_at }}</dd>
+              <dt>创建时间</dt><dd>{{ formatDateTime(selected.selected_review_asset.created_at) }}</dd>
             </dl>
           </template>
-          <p v-else>当前 Run 没有可审核的结果 Asset，生产状态保持 BLOCKED。</p>
+          <p v-else>当前运行没有可审核的结果素材，生产状态保持“已阻断（BLOCKED）”。</p>
           <h3>阻断原因</h3>
-          <el-tag v-for="blocker in selected.production_blockers" :key="blocker" type="danger">{{ blocker }}</el-tag>
+          <el-tag v-for="blocker in selected.production_blockers" :key="blocker" type="danger">{{ productionBlockerLabel(blocker) }}</el-tag>
         </section>
         <section class="form-panel">
           <h3>追加人工视觉审核</h3>
-          <el-radio-group v-model="form.decision"><el-radio value="APPROVED">APPROVED</el-radio><el-radio value="REJECTED">REJECTED</el-radio></el-radio-group>
-          <el-checkbox-group v-if="form.decision === 'REJECTED'" v-model="form.reasons"><el-checkbox v-for="reason in reasonCodes" :key="reason" :value="reason">{{ reason }}</el-checkbox></el-checkbox-group>
+          <el-radio-group v-model="form.decision"><el-radio value="APPROVED">已通过</el-radio><el-radio value="REJECTED">未通过</el-radio></el-radio-group>
+          <el-checkbox-group v-if="form.decision === 'REJECTED'" v-model="form.reasons"><el-checkbox v-for="reason in reasonCodes" :key="reason" :value="reason">{{ reviewReasonLabel(reason) }}</el-checkbox></el-checkbox-group>
           <el-input v-model="form.notes" type="textarea" maxlength="2000" show-word-limit placeholder="审核说明" />
           <p v-if="validationMessage" class="validation">{{ validationMessage }}</p>
           <el-button type="primary" :loading="busy" :disabled="busy || !selected.selected_review_asset || Boolean(validationMessage)" @click="submit">提交审核</el-button>
@@ -135,8 +136,8 @@ onMounted(() => void load());
           <p v-if="selected.legacy_review_evidence">存在旧版 Asset 绑定报告证据；未伪造新的迁移审核记录。</p>
           <el-empty v-if="!history.length" description="尚无新版审核记录" />
           <article v-for="review in history" :key="review.id">
-            <strong>{{ review.decision }}</strong> · Asset {{ review.asset_id }} · {{ review.reviewer_source }}
-            <p>{{ review.reviewed_at }}</p><p>{{ review.reason_codes.join(", ") }}</p>
+            <strong>{{ statusLabel(review.decision) }}</strong> · 素材 {{ review.asset_id }} · {{ review.reviewer_source }}
+            <p>{{ formatDateTime(review.reviewed_at) }}</p><p>{{ review.reason_codes.map(reviewReasonLabel).join("，") }}</p>
           </article>
         </section>
       </div>

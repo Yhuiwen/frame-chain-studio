@@ -39,8 +39,8 @@ describe("VisualContinuityReview", () => {
   it("separates technical, automatic, human and production states", async () => {
     const wrapper = mount(VisualContinuityReview, { global: { stubs: { ElDescriptions: false, ElDescriptionsItem: false, ProviderRunVisualReview: true } } });
     await flushPromises();
-    expect(wrapper.text()).toContain("技术任务"); expect(wrapper.text()).toContain("自动视觉");
-    expect(wrapper.text()).toContain("REJECTED"); expect(wrapper.text()).toContain("BLOCKED");
+    expect(wrapper.text()).toContain("技术验证"); expect(wrapper.text()).toContain("自动视觉");
+    expect(wrapper.text()).toContain("未通过"); expect(wrapper.text()).toContain("已阻断");
     expect(wrapper.text()).toContain("供应商任务成功和视频可播放，不代表生产视觉质量通过");
     expect(wrapper.text()).toContain("启发式指标，不等同于语义主体识别");
     expect(wrapper.text()).toContain("零费用");
@@ -52,7 +52,7 @@ describe("VisualContinuityReview", () => {
     const wrapper = mount(VisualContinuityReview, { global: { stubs: { ProviderRunVisualReview: true } } }); await flushPromises();
     const submit = wrapper.findAll("el-button").find((item) => item.text().includes("提交人工审核"));
     expect(submit?.attributes("disabled")).toBe("true");
-    expect(wrapper.html()).toContain("历史 REJECTED 已锁定展示");
+    expect(wrapper.html()).toContain("历史未通过结论已锁定展示");
   });
 });
 

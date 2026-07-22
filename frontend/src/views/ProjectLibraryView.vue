@@ -180,23 +180,23 @@ async function run(action: () => Promise<unknown>) {
   <main class="page" v-loading="loading">
     <section class="toolbar">
       <div>
-        <h1>Continuity Library</h1>
-        <p>Characters, locations, and reusable style profiles for this project.</p>
+        <h1>连续性资料库</h1>
+        <p>管理当前项目中的角色、场景和可复用风格配置。</p>
       </div>
       <div class="actions">
         <input ref="referenceInput" class="hidden-input" type="file" accept="image/png,image/jpeg,image/webp" @change="uploadReference" />
-        <el-button native-type="button" @click="router.push(`/projects/${projectId}`)">Project</el-button>
-        <el-button native-type="button" :icon="Refresh" :loading="loading" @click="loadLibrary">Refresh</el-button>
+        <el-button native-type="button" @click="router.push(`/projects/${projectId}`)">返回项目</el-button>
+        <el-button native-type="button" :icon="Refresh" :loading="loading" @click="loadLibrary">刷新</el-button>
       </div>
     </section>
 
     <el-tabs v-model="activeTab">
-      <el-tab-pane label="Characters" name="characters">
+      <el-tab-pane label="角色" name="characters">
         <section class="create-row">
           <el-input v-model="characterForm.name" placeholder="Name" />
           <el-input v-model="characterForm.appearance" placeholder="Appearance" />
           <el-input v-model="characterForm.default_clothing" placeholder="Default clothing" />
-          <el-button native-type="button" type="primary" :icon="DocumentAdd" :loading="busy" @click="createCharacter">Create</el-button>
+          <el-button native-type="button" type="primary" :icon="DocumentAdd" :loading="busy" @click="createCharacter">新建角色</el-button>
         </section>
         <section class="library-list">
           <article v-for="item in characters" :key="item.id" class="library-card">
@@ -211,20 +211,20 @@ async function run(action: () => Promise<unknown>) {
             <el-input v-model="item.continuity_notes" type="textarea" :rows="2" placeholder="Continuity notes" />
             <div class="card-actions">
               <span>{{ item.reference_count }} refs · primary {{ item.primary_reference_asset_id ?? "none" }}</span>
-              <el-button native-type="button" :icon="Picture" @click="chooseReference('character', item.id)">Reference</el-button>
-              <el-button native-type="button" type="primary" :loading="busy" @click="saveCharacter(item)">Save</el-button>
-              <el-button native-type="button" type="danger" :icon="Delete" @click="archiveCharacter(item.id)">Archive</el-button>
+              <el-button native-type="button" :icon="Picture" @click="chooseReference('character', item.id)">参考图</el-button>
+              <el-button native-type="button" type="primary" :loading="busy" @click="saveCharacter(item)">保存</el-button>
+              <el-button native-type="button" type="danger" :icon="Delete" @click="archiveCharacter(item.id)">归档</el-button>
             </div>
           </article>
         </section>
       </el-tab-pane>
 
-      <el-tab-pane label="Locations" name="locations">
+      <el-tab-pane label="场景" name="locations">
         <section class="create-row">
           <el-input v-model="locationForm.name" placeholder="Name" />
           <el-input v-model="locationForm.description" placeholder="Description" />
           <el-input v-model="locationForm.lighting" placeholder="Lighting" />
-          <el-button native-type="button" type="primary" :icon="DocumentAdd" :loading="busy" @click="createLocation">Create</el-button>
+          <el-button native-type="button" type="primary" :icon="DocumentAdd" :loading="busy" @click="createLocation">新建场景</el-button>
         </section>
         <section class="library-list">
           <article v-for="item in locations" :key="item.id" class="library-card">
@@ -243,20 +243,20 @@ async function run(action: () => Promise<unknown>) {
             <el-input v-model="item.continuity_notes" type="textarea" :rows="2" placeholder="Continuity notes" />
             <div class="card-actions">
               <span>{{ item.reference_count }} refs · primary {{ item.primary_reference_asset_id ?? "none" }}</span>
-              <el-button native-type="button" :icon="Picture" @click="chooseReference('location', item.id)">Reference</el-button>
-              <el-button native-type="button" type="primary" :loading="busy" @click="saveLocation(item)">Save</el-button>
-              <el-button native-type="button" type="danger" :icon="Delete" @click="archiveLocation(item.id)">Archive</el-button>
+              <el-button native-type="button" :icon="Picture" @click="chooseReference('location', item.id)">参考图</el-button>
+              <el-button native-type="button" type="primary" :loading="busy" @click="saveLocation(item)">保存</el-button>
+              <el-button native-type="button" type="danger" :icon="Delete" @click="archiveLocation(item.id)">归档</el-button>
             </div>
           </article>
         </section>
       </el-tab-pane>
 
-      <el-tab-pane label="Styles" name="styles">
+      <el-tab-pane label="风格" name="styles">
         <section class="create-row">
           <el-input v-model="styleForm.name" placeholder="Name" />
           <el-input v-model="styleForm.positive_prompt" placeholder="Positive prompt" />
           <el-input v-model="styleForm.negative_prompt" placeholder="Negative prompt" />
-          <el-button native-type="button" type="primary" :icon="DocumentAdd" :loading="busy" @click="createStyle">Create</el-button>
+          <el-button native-type="button" type="primary" :icon="DocumentAdd" :loading="busy" @click="createStyle">新建风格</el-button>
         </section>
         <section class="library-list">
           <article v-for="item in styles" :key="item.id" class="library-card">
@@ -275,8 +275,8 @@ async function run(action: () => Promise<unknown>) {
             </div>
             <div class="card-actions">
               <span>{{ item.color_palette.join(", ") || "No palette" }}</span>
-              <el-button native-type="button" type="primary" :loading="busy" @click="saveStyle(item)">Save</el-button>
-              <el-button native-type="button" type="danger" :icon="Delete" @click="archiveStyle(item.id)">Archive</el-button>
+              <el-button native-type="button" type="primary" :loading="busy" @click="saveStyle(item)">保存</el-button>
+              <el-button native-type="button" type="danger" :icon="Delete" @click="archiveStyle(item.id)">归档</el-button>
             </div>
           </article>
         </section>

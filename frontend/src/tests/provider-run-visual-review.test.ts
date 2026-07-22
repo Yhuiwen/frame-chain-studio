@@ -37,12 +37,12 @@ describe("ProviderRunVisualReview", () => {
     vi.spyOn(api, "getProviderVisualReviews").mockResolvedValue({ current: null, history: [] });
     const wrapper = mount(ProviderRunVisualReview, { props: { projectId: 22 }, global: { stubs, directives: { loading: () => undefined } } });
     await flushPromises();
-    expect(wrapper.text()).toContain("技术验证PASSED");
-    expect(wrapper.text()).toContain("人工视觉审核REJECTED");
-    expect(wrapper.text()).toContain("生产状态BLOCKED");
-    expect(wrapper.text()).toContain("Asset ID94");
+    expect(wrapper.text()).toContain("技术验证通过");
+    expect(wrapper.text()).toContain("人工视觉审核未通过");
+    expect(wrapper.text()).toContain("生产状态已阻断");
+    expect(wrapper.text()).toContain("素材 ID94");
     expect(wrapper.text()).toContain("scene-cut-v1");
-    expect(wrapper.text()).toContain("2.083333s");
+    expect(wrapper.text()).toContain("2.083333 秒");
     expect(wrapper.text()).toContain("UNEXPECTED_SCENE_CUT");
     expect(wrapper.text()).toContain("SYNTHETIC_FIXTURES_ONLY");
     expect(wrapper.text()).toContain("技术批准不代表生产批准");
@@ -54,7 +54,7 @@ describe("ProviderRunVisualReview", () => {
     vi.spyOn(api, "getProviderVisualReviews").mockResolvedValue({ current: null, history: [] });
     const wrapper = mount(ProviderRunVisualReview, { props: { projectId: 22 }, global: { stubs, directives: { loading: () => undefined } } });
     await flushPromises();
-    expect(wrapper.text()).toContain("REJECTED 必须选择至少一个原因");
+    expect(wrapper.text()).toContain("选择“未通过”时必须选择至少一个原因");
     expect(wrapper.find("button").attributes("disabled")).toBeDefined();
   });
 
