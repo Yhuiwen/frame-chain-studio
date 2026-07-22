@@ -16,6 +16,8 @@
 * { box-sizing: border-box; }
 html, body { background: var(--app-bg); }
 body { margin: 0; min-width: 320px; }
+.page:has(> .project-workspace-nav) { max-width: 1680px; padding-left: 250px; }
+@media (max-width: 900px) { .page:has(> .project-workspace-nav) { padding-left: 16px; } }
 button, input, textarea, select { font: inherit; }
 a { color: var(--primary); text-decoration: none; }
 a:hover { text-decoration: underline; }

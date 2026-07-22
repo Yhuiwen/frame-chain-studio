@@ -97,6 +97,8 @@ from app.models.schemas import (
     ProviderConfigImport,
     ProviderProfileRead,
     ProviderProfileUpdate,
+    ProviderModelSyncRequest,
+    ProviderModelSyncRead,
     ProviderValidationRead,
     ProviderVerificationRunRead,
     ProviderVerificationAdvanceRead,
@@ -318,6 +320,17 @@ def archive_provider_profile(
     provider_id: int, session: Session = Depends(get_session)
 ) -> dict[str, object]:
     return provider_management.archive_provider_profile(session, provider_id)
+
+
+@router.delete("/provider-configs/{provider_id}", status_code=204)
+def delete_provider_config(provider_id: int, session: Session = Depends(get_session)) -> Response:
+    provider_management.delete_provider_profile(session, provider_id)
+    return Response(status_code=204)
+
+
+@router.post("/provider-configs/{provider_id}/sync-models", response_model=ProviderModelSyncRead)
+async def sync_provider_models(provider_id: int, payload: ProviderModelSyncRequest, session: Session = Depends(get_session)) -> dict[str, object]:
+    return await provider_management.sync_provider_models(session, provider_id, payload)
 
 
 @router.post("/provider-profiles/{provider_id}/validate", response_model=ProviderValidationRead)

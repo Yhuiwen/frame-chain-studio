@@ -673,6 +673,14 @@ export interface ProviderModelProfile {
   updated_at: string;
 }
 
+export interface ProviderSyncModel {
+  model_key: string; remote_model: string; display_name: string;
+  type: ProviderModelGenerationType; enabled: boolean; capabilities: Record<string, unknown>;
+}
+export interface ProviderModelSyncResult {
+  provider_id: number; supported: boolean; confirmed: boolean; models: ProviderSyncModel[]; message: string;
+}
+
 export interface ProviderValidation {
   provider_profile_id: number;
   configuration_valid: boolean;
@@ -1017,6 +1025,8 @@ export const api = {
     method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName, irreversible_acknowledged: true }),
   }),
   importProviderConfig: (body: Record<string, unknown>) => request<ProviderProfile>("/api/provider-configs/import", { method: "POST", body: JSON.stringify(body) }),
+  deleteProviderConfig: (id: number) => request<void>(`/api/provider-configs/${id}`, { method: "DELETE" }),
+  syncProviderModels: (id: number, body: { confirm: boolean; models?: ProviderSyncModel[] }) => request<ProviderModelSyncResult>(`/api/provider-configs/${id}/sync-models`, { method: "POST", body: JSON.stringify(body) }),
   createCharacterFromImage: (projectId: number, file: File, fields: { name: string; description: string; appearance: string }) => {
     const body = new FormData(); body.append("file", file); body.append("name", fields.name); body.append("description", fields.description); body.append("appearance", fields.appearance);
     return request<{ character: Character; asset: Asset }>(`/api/projects/${projectId}/characters/from-image`, { method: "POST", body });

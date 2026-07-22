@@ -3,7 +3,6 @@ import {
   CaretRight,
   Check,
   Close,
-  Delete,
   Picture,
   Plus,
   Refresh,
@@ -11,10 +10,11 @@ import {
   VideoPlay,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { api, type GenerationStartOptions, type GenerationTask, type ProviderModelProfile, type ProviderProfile, type QualityCheckResult, type Shot, type ShotAssetSummary } from "@/api/client";
+import ProjectWorkspaceNav from "@/components/ProjectWorkspaceNav.vue";
 import { useProjectPolling } from "@/composables/useProjectPolling";
 import { useStudioStore } from "@/stores/studio";
 import { formatDateTime, statusLabel } from "@/constants/uiText";
@@ -30,6 +30,7 @@ const settingsBusy = ref(false);
 const providerProfiles = ref<ProviderProfile[]>([]);
 const providerModels = ref<Record<string, ProviderModelProfile[]>>({});
 const renderBusy = ref(false);
+const activeMediaStep = ref("start");
 const expandedLogIds = ref<Set<number>>(new Set());
 const startFrameInput = ref<HTMLInputElement | null>(null);
 const targetKeyframeInput = ref<HTMLInputElement | null>(null);
@@ -69,6 +70,16 @@ const selectedTaskGroups = computed(() => {
 const latestRender = computed(() => [...(store.current?.renders ?? [])].reverse()[0] ?? null);
 const generationWorkerOnline = computed(() => (store.workerStatus?.generation.online_count ?? 0) > 0);
 const resultWorkerOnline = computed(() => (store.workerStatus?.result.online_count ?? 0) > 0);
+const renderWorkerOnline = computed(() => (store.workerStatus?.render.online_count ?? 0) > 0);
+const completedShotCount = computed(() => store.current?.completion.completed_shots ?? 0);
+const totalShotCount = computed(() => store.current?.completion.total_shots ?? 0);
+const settingsSummary = computed(() => {
+  const imageProvider = selectableProviders.value.find(item => item.provider_key === settingsForm.value.image_provider_id);
+  const videoProvider = selectableProviders.value.find(item => item.provider_key === settingsForm.value.video_provider_id);
+  const imageModel = imageModels.value.find(item => item.model_key === settingsForm.value.image_model);
+  const videoModel = videoModels.value.find(item => item.model_key === settingsForm.value.video_model);
+  return `图片：${imageProvider?.display_name ?? "未选择"} / ${imageModel?.display_name ?? "未选择"} · 视频：${videoProvider?.display_name ?? "未选择"} / ${videoModel?.display_name ?? "未选择"} · 比例：${settingsForm.value.default_aspect_ratio || "未设置"} · 时长：${settingsForm.value.default_video_duration_seconds ?? "未设置"} 秒`;
+});
 
 onMounted(async () => {
   await store.loadProject(projectId.value);
@@ -80,6 +91,11 @@ onMounted(async () => {
   }
   startPolling();
 });
+
+watch(selected, (shot) => {
+  if (!shot) return;
+  activeMediaStep.value = shot.status === "KEYFRAME_REVIEW" ? "keyframe" : shot.status === "VIDEO_REVIEW" ? "video" : shot.status === "COMPLETED" || shot.status === "TAIL_FRAME_LOCKED" ? "tail" : "start";
+}, { immediate: true });
 
 function syncSettingsForm() {
   const project = store.current;
@@ -178,11 +194,21 @@ async function rerunQualityChecks() {
 }
 
 function assetFileName(asset: ShotAssetSummary | null) {
-  return asset?.file_name ?? "none";
+  return asset?.file_name ?? "暂无";
 }
 
 function assetIdLabel(asset: ShotAssetSummary | null) {
-  return asset?.asset_id ?? "none";
+  return asset?.asset_id ?? "暂无";
+}
+
+function displayShotTitle(shot: Shot) {
+  return /^Shot\s+\d+$/i.test(shot.title) ? `镜头 ${shot.sort_order + 1}` : shot.title;
+}
+
+function renderDisabledReason(reason: string | null | undefined) {
+  if (!reason) return "";
+  const missing = reason.match(/^Missing approved video for Shot (\d+)$/i);
+  return missing ? `镜头 ${missing[1]} 还没有已通过的视频。` : reason;
 }
 
 function assetCreatedAt(asset: ShotAssetSummary | null) {
@@ -195,6 +221,15 @@ function selectedShotId() {
 
 function navigateTo(path: string) {
   globalThis.location.assign(path);
+}
+
+async function archiveCurrentProject() {
+  if (!store.current) return;
+  try {
+    await ElMessageBox.confirm(`移除项目“${store.current.name}”？之后可在已移除项目中恢复。`, "移除项目", { confirmButtonText: "移除", cancelButtonText: "取消", type: "warning" });
+    await api.archiveProject(store.current.id);
+    navigateTo("/");
+  } catch { /* cancelled */ }
 }
 
 void [sourceLabel, assetFileName, assetIdLabel, assetCreatedAt];
@@ -381,44 +416,19 @@ async function uploadTargetKeyframe(event: Event) {
   <main class="workspace" v-loading="store.loading">
     <section class="workspace-header">
       <div>
-        <h1>{{ store.current?.name }}</h1>
+        <el-tooltip :content="store.current?.name" placement="bottom"><h1>{{ store.current?.name }}</h1></el-tooltip>
         <p>{{ store.current?.description || "包含审核、工作进程、服务商与最终渲染的连续性生成工作流。" }}</p>
+        <div class="project-meta"><el-tag type="primary">{{ completedShotCount === totalShotCount && totalShotCount ? "已完成" : "制作中" }}</el-tag><span>{{ totalShotCount }} 个镜头</span><span>更新于 {{ formatDateTime(store.current?.updated_at) }}</span></div>
       </div>
       <div class="header-actions">
-        <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/library`)">
-          连续性资料库
-        </el-button>
-        <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/scripts`)">
-          脚本与分镜
-        </el-button>
-        <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/usage`)">
-          用量与预算
-        </el-button>
-        <el-button native-type="button" @click="navigateTo('/settings/providers')">
-          服务商设置
-        </el-button>
-        <el-button
-          v-if="selected"
-          native-type="button"
-          @click="navigateTo(`/projects/${projectId}/shot/${selected.id}/spec`)"
-        >
-          镜头规范
-        </el-button>
-        <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/visual-review`)">视觉连续性审核</el-button>
         <el-button native-type="button" :icon="Refresh" :loading="store.refreshing" @click="refreshProjectDetail">
           刷新
         </el-button>
-        <el-button
-          native-type="button"
-          type="primary"
-          :icon="Plus"
-          :loading="actionBusy"
-          @click="guarded(() => store.createShot(projectId))"
-        >
-          添加镜头
-        </el-button>
+        <el-button @click="archiveCurrentProject">移除项目</el-button><el-button @click="navigateTo('/')">返回项目列表</el-button>
       </div>
     </section>
+
+    <ProjectWorkspaceNav :project-id="projectId" :shot-id="selected?.id" />
 
     <section class="ops-panel">
       <div class="settings-panel">
@@ -476,12 +486,13 @@ async function uploadTargetKeyframe(event: Event) {
             <el-switch v-model="settingsForm.allow_capability_fallback" />
           </label>
         </div>
+        <p class="settings-summary">{{ settingsSummary }}</p>
       </div>
       <div class="worker-panel">
         <div class="panel-title">
-          <h2>工作进程</h2>
-          <el-button native-type="button" text :loading="store.workersRefreshing" @click="store.refreshWorkers">
-            刷新
+          <h2>工作进度</h2>
+          <el-button native-type="button" :icon="Refresh" :loading="store.workersRefreshing" @click="store.refreshWorkers">
+            刷新工作状态
           </el-button>
         </div>
         <div class="worker-row">
@@ -490,6 +501,8 @@ async function uploadTargetKeyframe(event: Event) {
           </el-tag>
           <span v-if="!generationWorkerOnline">启动命令：python -m app.workers.cli generation</span>
         </div>
+        <div class="worker-row"><el-tag :type="renderWorkerOnline ? 'success' : 'danger'">渲染工作进程：{{ renderWorkerOnline ? '在线' : '离线' }}</el-tag></div>
+        <div class="progress-summary"><span>当前镜头：{{ selected ? statusLabel(selected.status) : '暂无' }}</span><span>运行任务：{{ store.hasActiveTasks ? '有' : '无' }}</span><span>镜头进度：{{ completedShotCount }} / {{ totalShotCount }}</span><el-progress :percentage="totalShotCount ? Math.round(completedShotCount / totalShotCount * 100) : 0" /></div>
         <div class="worker-row">
           <el-tag :type="resultWorkerOnline ? 'success' : 'danger'">
             结果工作进程 {{ store.workerStatus?.result.online_count ?? 0 }}/{{ store.workerStatus?.result.total_count ?? 0 }}
@@ -501,6 +514,7 @@ async function uploadTargetKeyframe(event: Event) {
 
     <section class="layout">
       <aside class="timeline">
+        <div class="timeline-header"><h2>镜头列表</h2><el-button type="primary" size="small" :icon="Plus" :loading="actionBusy" @click="guarded(() => store.createShot(projectId))">添加镜头</el-button></div>
         <div
           v-for="shot in store.current?.shots"
           :key="shot.id"
@@ -515,26 +529,16 @@ async function uploadTargetKeyframe(event: Event) {
           @click="store.selectShot(shot.id)"
         >
           <span class="order">{{ shot.sort_order + 1 }}</span>
-          <span class="shot-title">{{ shot.title }}</span>
+          <span class="shot-title">{{ displayShotTitle(shot) }}</span>
           <el-tag size="small" :type="statusType(shot.status)">{{ statusLabel(shot.status) }}</el-tag>
-          <el-button
-            class="delete-shot"
-            native-type="button"
-            text
-            type="danger"
-            :icon="Delete"
-            :loading="deletingShotId === shot.id"
-            @click="deleteShot(shot, $event)"
-          >
-            删除镜头
-          </el-button>
+          <div class="shot-flags"><span>{{ shot.approved_keyframe_asset_id ? '关键帧已通过' : '关键帧待处理' }}</span><span>{{ shot.approved_video_asset_id ? '视频已通过' : '视频待处理' }}</span><span>{{ shot.locked_tail_frame_asset_id ? '尾帧已锁定' : '尾帧未锁定' }}</span></div><el-dropdown trigger="click" @click.stop><el-button text aria-label="更多镜头操作">更多</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item class="delete-shot" @click="deleteShot(shot, $event)">删除镜头</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
         </div>
       </aside>
 
       <section v-if="selected" class="review-grid">
         <div class="editor-panel">
           <div class="panel-title">
-            <h2>{{ selected.title }}</h2>
+            <h2>{{ displayShotTitle(selected) }}</h2>
             <el-tag :type="statusType(selected.status)">{{ statusLabel(selected.status) }}</el-tag>
           </div>
           <div class="revision-meta">
@@ -583,7 +587,9 @@ async function uploadTargetKeyframe(event: Event) {
           </el-form>
         </div>
 
-        <div class="asset-panel">
+        <nav class="media-steps" aria-label="镜头素材流程"><button :class="{active:activeMediaStep==='start'}" @click="activeMediaStep='start'">1 起始帧</button><button :class="{active:activeMediaStep==='keyframe'}" @click="activeMediaStep='keyframe'">2 目标关键帧</button><button :class="{active:activeMediaStep==='video'}" @click="activeMediaStep='video'">3 视频</button><button :class="{active:activeMediaStep==='tail'}" @click="activeMediaStep='tail'">4 已锁定尾帧</button></nav>
+
+        <div v-show="activeMediaStep === 'start'" class="asset-panel media-detail">
           <div class="panel-title">
             <h2>起始帧</h2>
             <div class="button-row compact">
@@ -624,7 +630,7 @@ async function uploadTargetKeyframe(event: Event) {
           </div>
         </div>
 
-        <div class="review-panel">
+        <div v-show="activeMediaStep === 'keyframe'" class="review-panel media-detail">
           <div class="panel-title">
             <h2>目标关键帧</h2>
             <input ref="targetKeyframeInput" class="hidden-input" type="file" accept="image/png,image/jpeg,image/webp" @change="uploadTargetKeyframe" />
@@ -676,7 +682,7 @@ async function uploadTargetKeyframe(event: Event) {
           </div>
         </div>
 
-        <div class="review-panel">
+        <div v-show="activeMediaStep === 'video'" class="review-panel media-detail">
           <div class="panel-title">
             <h2>视频审核</h2>
             <el-button
@@ -743,7 +749,7 @@ async function uploadTargetKeyframe(event: Event) {
           </div>
         </div>
 
-        <div class="asset-panel">
+        <div v-show="activeMediaStep === 'tail'" class="asset-panel media-detail">
           <div class="panel-title">
             <h2>已锁定尾帧</h2>
           </div>
@@ -846,7 +852,7 @@ async function uploadTargetKeyframe(event: Event) {
 
         <div class="render-panel">
           <div class="panel-title">
-            <h2>最终渲染</h2>
+            <h2>成片导出</h2>
             <el-button
               native-type="button"
               type="primary"
@@ -854,13 +860,13 @@ async function uploadTargetKeyframe(event: Event) {
               :disabled="renderBusy || !store.current?.completion.can_render"
               @click="createRender"
             >
-              导出成片
+              生成最终成片
             </el-button>
           </div>
           <div class="render-summary">
             <span>已完成 {{ store.current?.completion.completed_shots ?? 0 }}/{{ store.current?.completion.total_shots ?? 0 }} 个镜头</span>
             <span>预计 {{ Math.round(store.current?.completion.estimated_duration_seconds ?? 0) }} 秒</span>
-            <span v-if="store.current?.completion.render_disabled_reason">{{ store.current.completion.render_disabled_reason }}</span>
+            <span v-if="store.current?.completion.render_disabled_reason">{{ renderDisabledReason(store.current.completion.render_disabled_reason) }}</span>
           </div>
           <div v-if="latestRender" class="render-card">
             <div class="task-main">
@@ -884,6 +890,25 @@ async function uploadTargetKeyframe(event: Event) {
 </template>
 
 <style scoped>
+.workspace { padding-left: 250px; position: relative; }
+.project-nav { position: fixed; z-index: 10; left: max(18px, calc((100vw - 1600px) / 2 + 18px)); top: 28px; width: 205px; max-height: calc(100vh - 56px); overflow:auto; padding:14px; background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow); display:grid; gap:6px; }
+.project-nav strong { padding:8px 10px; }
+.project-nav button { border:0; background:transparent; color:var(--muted); border-radius:8px; padding:10px; text-align:left; cursor:pointer; }
+.project-nav button:hover,.project-nav button.active { color:var(--primary); background:#edf3ff; font-weight:700; }
+.workspace-header h1 { max-width:680px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.project-meta,.progress-summary,.shot-flags { display:flex; flex-wrap:wrap; align-items:center; gap:10px; color:var(--muted); font-size:13px; margin-top:10px; }
+.progress-summary { display:grid; align-items:stretch; }
+.settings-summary { margin-top:14px; padding:10px; background:var(--surface-soft); border-radius:8px; }
+.timeline { max-height:720px; overflow:auto; position:sticky; top:18px; }
+.timeline-header { position:sticky; top:-12px; z-index:2; background:var(--surface); display:flex; justify-content:space-between; align-items:center; padding:8px 0 12px; }
+.timeline-item { grid-template-columns:34px minmax(0,1fr) auto; }
+.shot-flags { grid-column:2 / -1; margin:0; gap:6px; font-size:11px; }
+.media-steps { grid-column:2; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:12px; }
+.media-steps button { border:1px solid var(--border); border-radius:8px; padding:10px 6px; background:var(--surface-soft); cursor:pointer; }
+.media-steps button.active { border-color:var(--primary); color:var(--primary); background:#edf3ff; font-weight:700; }
+.media-detail { grid-column:2; }
+.editor-panel { grid-row:1 / span 2; }
+.render-panel { border-left:4px solid var(--primary) !important; }
 .task-list {
   display: grid;
   gap: 10px;
@@ -1056,9 +1081,17 @@ async function uploadTargetKeyframe(event: Event) {
 }
 
 @media (max-width: 900px) {
+  .workspace { padding-left:14px; }
+  .project-nav { position:static; width:auto; max-height:none; display:flex; overflow-x:auto; margin-bottom:16px; }
+  .project-nav strong { display:none; }
+  .project-nav button { flex:0 0 auto; }
   .ops-panel,
   .settings-grid {
     grid-template-columns: 1fr;
   }
+  .media-steps { grid-column:1; grid-template-columns:repeat(2,1fr); }
+  .media-detail { grid-column:1; }
+  .editor-panel { grid-row:auto; }
+  .timeline { position:static; max-height:300px; }
 }
 </style>

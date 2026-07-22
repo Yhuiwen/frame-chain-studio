@@ -7,7 +7,7 @@ from sqlmodel import Session
 
 from app.core.errors import AppError
 from app.models.entities import ProviderAdapterType, ProviderModelGenerationType
-from app.models.schemas import ProjectCreate, ProjectUpdate, ProviderConfigImport, ProviderConfigImportModel
+from app.models.schemas import ProjectCreate, ProjectUpdate, ProviderConfigImport, ProviderConfigImportModel, ProviderModelSyncRequest
 from app.services import provider_management, studio
 
 
@@ -79,3 +79,34 @@ def test_self_rename_is_allowed(session: Session) -> None:
     project = studio.create_project(session, ProjectCreate(name="Original"))
     updated = studio.update_project(session, project.id or 0, ProjectUpdate(name="Original"))
     assert updated.name == "Original"
+
+
+def test_provider_delete_blocks_project_reference_and_deletes_unused(session: Session) -> None:
+    used = provider_management.import_provider_config(session, ProviderConfigImport(display_name="Used", provider_key="used", adapter=ProviderAdapterType.FAKE, base_url="http://127.0.0.1:8091/fake/v1"))
+    studio.create_project(session, ProjectCreate(name="Uses provider", image_provider_id="used", image_model=None))
+    with pytest.raises(AppError) as caught:
+        provider_management.delete_provider_profile(session, int(used["id"]))
+    assert caught.value.code == "PROVIDER_IN_USE"
+    unused = provider_management.import_provider_config(session, ProviderConfigImport(display_name="Unused", provider_key="unused", adapter=ProviderAdapterType.FAKE, base_url="http://127.0.0.1:8091/fake/v1"))
+    provider_management.delete_provider_profile(session, int(unused["id"]))
+    with pytest.raises(AppError):
+        provider_management.get_provider_profile_or_404(session, int(unused["id"]))
+
+
+@pytest.mark.anyio
+async def test_fake_model_sync_previews_then_saves_disabled(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile = provider_management.import_provider_config(session, ProviderConfigImport(display_name="Fake sync", provider_key="fake-sync", adapter=ProviderAdapterType.FAKE, base_url="http://127.0.0.1:8091/fake/v1"))
+
+    async def handler(request):
+        return __import__("httpx").Response(200, json={"models": [{"model_key": "new-image", "remote_model": "remote-image", "display_name": "New image", "type": "IMAGE", "capabilities": {"text_to_image": True}}]}, request=request)
+
+    transport = __import__("httpx").MockTransport(handler)
+    original_client = __import__("httpx").AsyncClient
+    monkeypatch.setattr(provider_management.httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+    preview = await provider_management.sync_provider_models(session, int(profile["id"]), ProviderModelSyncRequest())
+    assert preview["confirmed"] is False
+    assert provider_management.list_provider_models(session, int(profile["id"])) == []
+    confirmed = await provider_management.sync_provider_models(session, int(profile["id"]), ProviderModelSyncRequest(confirm=True, models=preview["models"]))
+    assert confirmed["confirmed"] is True
+    saved = provider_management.list_provider_models(session, int(profile["id"]))
+    assert saved[0]["enabled"] is False

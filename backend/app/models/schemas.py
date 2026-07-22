@@ -119,6 +119,19 @@ class ProviderConfigImport(BaseModel):
     models: list[ProviderConfigImportModel] = Field(default_factory=list)
 
 
+class ProviderModelSyncRequest(BaseModel):
+    confirm: bool = False
+    models: list[ProviderConfigImportModel] = Field(default_factory=list)
+
+
+class ProviderModelSyncRead(BaseModel):
+    provider_id: int
+    supported: bool
+    confirmed: bool
+    models: list[ProviderConfigImportModel]
+    message: str
+
+
 class CharacterFromImageRead(BaseModel):
     character: "CharacterRead"
     asset: "AssetRead"

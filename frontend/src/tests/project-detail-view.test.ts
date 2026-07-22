@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("vue-router", () => ({
   useRoute: () => ({ params: { id: "1" } }),
+  useRouter: () => ({ push: vi.fn() }),
 }));
 
 vi.mock("element-plus", async () => {
@@ -283,6 +284,9 @@ const stubs = {
   ElSwitch: { template: "<input type=\"checkbox\" />" },
   ElImage: { props: ["src"], template: "<img :src=\"src\" />" },
   ElEmpty: { props: ["description"], template: "<div>{{ description }}</div>" },
+  ElDropdown: { template: "<div><slot /><slot name='dropdown' /></div>" },
+  ElDropdownMenu: { template: "<div><slot /></div>" },
+  ElDropdownItem: { emits: ["click"], inheritAttrs: false, template: "<button v-bind='$attrs' @click='$emit(\"click\", $event)'><slot /></button>" },
   ElTimeline: { template: "<div><slot /></div>" },
   ElTimelineItem: { template: "<div><slot /></div>" },
 };
@@ -348,8 +352,8 @@ describe("ProjectDetailView", () => {
 
     expect(api.deleteShot).toHaveBeenCalledWith(1);
     const timelineText = wrapper.find(".timeline").text();
-    expect(timelineText).not.toContain("Shot 1");
-    expect(timelineText).toContain("Shot 2");
+    expect(timelineText).not.toContain("镜头 1");
+    expect(timelineText).toContain("镜头 2");
     expect(window.location.href).toBe(beforeHref);
   });
 

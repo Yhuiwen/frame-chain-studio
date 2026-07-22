@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import httpx
 from decimal import Decimal, InvalidOperation
 from collections.abc import Sequence
 from typing import Any
@@ -42,6 +43,7 @@ from app.models.schemas import (
     ProviderProfileCreate,
     ProviderProfileUpdate,
     ProviderConfigImport,
+    ProviderModelSyncRequest,
 )
 from app.providers.config_loader import load_registry_from_env
 from app.providers.http import MappedAsyncHttpProvider
@@ -198,6 +200,112 @@ def archive_provider_profile(session: Session, provider_id: int) -> dict[str, An
     session.commit()
     session.refresh(profile)
     return provider_profile_payload(session, profile)
+
+
+def delete_provider_profile(session: Session, provider_id: int) -> None:
+    profile = get_provider_profile_or_404(session, provider_id)
+    projects = session.exec(
+        select(Project).where(
+            (Project.image_provider_id == profile.provider_key)
+            | (Project.video_provider_id == profile.provider_key)
+        )
+    ).all()
+    active_tasks = session.exec(
+        select(GenerationTask).where(
+            GenerationTask.provider_id == profile.provider_key,
+            col(GenerationTask.status).in_([
+                "QUEUED", "SUBMITTING", "RUNNING", "RETRY_WAIT",
+                "RESULT_READY", "PROCESSING_RESULT", "CANCELLING",
+            ]),
+        )
+    ).first()
+    referenced_model = session.exec(
+        select(GenerationRequest).where(
+            (GenerationRequest.provider_key == profile.provider_key)
+            | (GenerationRequest.effective_provider_id == profile.provider_key)
+        )
+    ).first()
+    usage_reference = session.exec(
+        select(GenerationUsageRecord).where(
+            GenerationUsageRecord.provider_profile_id == provider_id
+        )
+    ).first()
+    verification_reference = session.exec(
+        select(ProviderVerificationRun).where(
+            ProviderVerificationRun.provider_profile_id == provider_id
+        )
+    ).first()
+    if projects or active_tasks or referenced_model or usage_reference or verification_reference:
+        names = [item.name for item in projects[:5]]
+        detail = f"该服务商正被 {len(projects)} 个项目使用，无法删除。"
+        if names:
+            detail += f" 引用项目：{'、'.join(names)}。"
+        elif active_tasks:
+            detail = "该服务商仍有运行中的任务，无法删除。"
+        else:
+            detail = "该服务商模型仍被历史生成记录引用，无法删除。"
+        raise AppError("PROVIDER_IN_USE", detail, 409)
+    try:
+        for model in session.exec(select(ProviderModelProfile).where(ProviderModelProfile.provider_profile_id == provider_id)).all():
+            session.delete(model)
+        session.delete(profile)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+
+async def sync_provider_models(
+    session: Session, provider_id: int, payload: ProviderModelSyncRequest
+) -> dict[str, Any]:
+    profile = get_provider_profile_or_404(session, provider_id)
+    if profile.adapter_type != ProviderAdapterType.FAKE:
+        return {"provider_id": provider_id, "supported": False, "confirmed": False, "models": [], "message": "该服务商不支持自动同步，请重新导入包含模型列表的配置文件。"}
+    if not payload.confirm:
+        hostname = (urlsplit(profile.base_url).hostname or "").lower()
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise AppError(
+                "PROVIDER_MODEL_SYNC_UNSAFE_URL",
+                "模拟服务商模型同步只允许访问本地回环地址。",
+                400,
+            )
+        url = f"{profile.base_url.rstrip('/')}/models"
+        try:
+            async with httpx.AsyncClient(
+                timeout=5.0,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                raw_models = response.json().get("models", [])
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            raise AppError("PROVIDER_MODEL_SYNC_FAILED", "无法读取模拟服务商模型列表。", 502) from exc
+        models = []
+        for raw in raw_models:
+            if not isinstance(raw, dict):
+                continue
+            models.append({
+                "model_key": str(raw.get("model_key") or ""),
+                "remote_model": str(raw.get("remote_model") or ""),
+                "display_name": str(raw.get("display_name") or raw.get("model_key") or ""),
+                "type": str(raw.get("type") or ""),
+                "enabled": False,
+                "capabilities": raw.get("capabilities") if isinstance(raw.get("capabilities"), dict) else {},
+            })
+        return {"provider_id": provider_id, "supported": True, "confirmed": False, "models": models, "message": f"发现 {len(models)} 个模型，请确认后保存。"}
+    for item in payload.models:
+        existing = session.exec(select(ProviderModelProfile).where(ProviderModelProfile.provider_profile_id == provider_id, ProviderModelProfile.model_key == item.model_key)).first()
+        if existing:
+            existing.display_name = item.display_name or item.model_key
+            existing.remote_model = item.remote_model
+            existing.capabilities_json = dumps(item.capabilities)
+            existing.updated_at = utcnow()
+            session.add(existing)
+        else:
+            session.add(ProviderModelProfile(provider_profile_id=provider_id, model_key=item.model_key, remote_model=item.remote_model, display_name=item.display_name or item.model_key, generation_type=item.type, enabled=False, capabilities_json=dumps(item.capabilities), limits_json="{}", pricing_json="{}"))
+    session.commit()
+    return {"provider_id": provider_id, "supported": True, "confirmed": True, "models": payload.models, "message": "模型同步结果已保存，新模型默认停用。"}
 
 
 def list_provider_models(session: Session, provider_id: int) -> list[dict[str, Any]]:

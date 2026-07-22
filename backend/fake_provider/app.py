@@ -125,6 +125,16 @@ def ready() -> dict[str, object]:
     return {"status": "ready", "service": "fake-provider", "checks": {"routes": "ok"}}
 
 
+@app.get("/fake/v1/models")
+def models() -> dict[str, object]:
+    return {
+        "models": [
+            {"model_key": "fake-image-v2", "remote_model": "fake-image-v2", "display_name": "模拟图片模型 V2", "type": "IMAGE", "capabilities": {"text_to_image": True}},
+            {"model_key": "fake-video-v2", "remote_model": "fake-video-v2", "display_name": "模拟视频模型 V2", "type": "VIDEO", "capabilities": {"image_to_video": True, "first_last_frame": True}},
+        ]
+    }
+
+
 @app.get("/fake/v1/test/stats")
 def test_stats() -> dict[str, object]:
     return {
