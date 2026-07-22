@@ -341,6 +341,8 @@ class Project(ProjectBase, table=True):
     id: int | None = Field(default=None, primary_key=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    archived_at: datetime | None = Field(default=None, index=True)
+    archived_by_source: str | None = Field(default=None, max_length=80)
     shots: list["Shot"] = Relationship(back_populates="project")
 
 

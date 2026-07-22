@@ -198,7 +198,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260722_0028"
+            == "20260722_0029"
         )
         assert (
             connection.execute(
@@ -746,7 +746,7 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     with engine.connect() as connection:
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260722_0028"
+            == "20260722_0029"
         )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")

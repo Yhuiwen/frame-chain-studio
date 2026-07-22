@@ -22,6 +22,8 @@ export interface Project {
   default_seed: number | null;
   created_at: string;
   updated_at: string;
+  archived_at?: string | null;
+  archived_by_source?: string | null;
 }
 
 export interface Shot {
@@ -890,13 +892,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as {
       error?: { code?: string; message?: string; request_id?: string };
+      error_code?: string; message?: string; request_id?: string; field_errors?: Record<string, string>;
     } | null;
-    const requestId = payload?.error?.request_id ?? response.headers.get("X-Request-ID");
-    const message = payload?.error?.message ?? `Request failed: ${response.status}`;
+    const requestId = payload?.request_id ?? payload?.error?.request_id ?? response.headers.get("X-Request-ID");
+    const message = payload?.message ?? payload?.error?.message ?? `请求失败：${response.status}`;
     const suffix = requestId ? ` (request id: ${requestId})` : "";
     throw new ApiError(`${message}${suffix}`, {
       status: response.status,
-      code: payload?.error?.code ?? null,
+      code: payload?.error_code ?? payload?.error?.code ?? null,
       requestId,
     });
   }
@@ -1002,12 +1005,22 @@ export const api = {
     request<ProjectBudgetPolicy>(`/api/projects/${projectId}/budget`, { method: "PUT", body: JSON.stringify(body) }),
   getWorkerStatus: () => request<WorkersStatus>("/api/workers/status"),
   listTasks: () => request<GenerationTask[]>("/api/tasks"),
-  listProjects: () => request<Project[]>("/api/projects"),
+  listProjects: (archived = false) => request<Project[]>(`/api/projects?archived=${archived}`),
   createProject: (body: { name: string; description: string }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   getProject: (id: number) => request<ProjectDetail>(`/api/projects/${id}`),
   updateProject: (id: number, body: Partial<Project>) =>
     request<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  archiveProject: (id: number) => request<Project>(`/api/projects/${id}/archive`, { method: "POST" }),
+  restoreProject: (id: number) => request<Project>(`/api/projects/${id}/restore`, { method: "POST" }),
+  permanentlyDeleteProject: (id: number, confirmationName: string) => request<void>(`/api/projects/${id}`, {
+    method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName, irreversible_acknowledged: true }),
+  }),
+  importProviderConfig: (body: Record<string, unknown>) => request<ProviderProfile>("/api/provider-configs/import", { method: "POST", body: JSON.stringify(body) }),
+  createCharacterFromImage: (projectId: number, file: File, fields: { name: string; description: string; appearance: string }) => {
+    const body = new FormData(); body.append("file", file); body.append("name", fields.name); body.append("description", fields.description); body.append("appearance", fields.appearance);
+    return request<{ character: Character; asset: Asset }>(`/api/projects/${projectId}/characters/from-image`, { method: "POST", body });
+  },
   createShot: (projectId: number, body: Partial<Shot>) =>
     request<Shot>(`/api/projects/${projectId}/shots`, { method: "POST", body: JSON.stringify(body) }),
   updateShot: (shotId: number, body: Partial<Shot>) =>

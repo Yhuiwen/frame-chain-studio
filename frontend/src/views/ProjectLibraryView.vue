@@ -17,6 +17,8 @@ const locations = ref<Location[]>([]);
 const styles = ref<StyleProfile[]>([]);
 const selectedReferenceTarget = reactive({ type: "character" as "character" | "location", id: 0 });
 const referenceInput = ref<HTMLInputElement | null>(null);
+const newCharacterFile = ref<File | null>(null);
+const newCharacterPreview = ref("");
 
 const characterForm = reactive({
   name: "",
@@ -70,9 +72,9 @@ async function loadLibrary() {
 }
 
 async function createCharacter() {
-  if (!characterForm.name.trim()) return;
+  if (!characterForm.name.trim() || !newCharacterFile.value) { ElMessage.warning("请填写角色名称并上传参考图片。"); return; }
   await run(async () => {
-    await api.createCharacter(projectId.value, { ...characterForm });
+    await api.createCharacterFromImage(projectId.value, newCharacterFile.value as File, { name: characterForm.name, description: characterForm.description, appearance: characterForm.appearance });
     Object.assign(characterForm, {
       name: "",
       description: "",
@@ -81,7 +83,15 @@ async function createCharacter() {
       default_clothing: "",
       continuity_notes: "",
     });
+    newCharacterFile.value = null;
+    newCharacterPreview.value = "";
   });
+}
+
+function selectCharacterImage(file: { raw: File }) {
+  newCharacterFile.value = file.raw;
+  if (newCharacterPreview.value) URL.revokeObjectURL(newCharacterPreview.value);
+  newCharacterPreview.value = URL.createObjectURL(file.raw);
 }
 
 async function createLocation() {
@@ -192,11 +202,14 @@ async function run(action: () => Promise<unknown>) {
 
     <el-tabs v-model="activeTab">
       <el-tab-pane label="角色" name="characters">
-        <section class="create-row">
+        <section class="character-create">
+          <div class="image-picker"><el-upload :auto-upload="false" :show-file-list="false" accept="image/png,image/jpeg,image/webp" :on-change="selectCharacterImage"><el-button :icon="Picture">上传参考图片</el-button></el-upload><img v-if="newCharacterPreview" :src="newCharacterPreview" alt="角色参考图片预览" /></div>
+          <div class="create-row">
           <el-input v-model="characterForm.name" placeholder="Name" />
           <el-input v-model="characterForm.appearance" placeholder="Appearance" />
           <el-input v-model="characterForm.default_clothing" placeholder="Default clothing" />
-          <el-button native-type="button" type="primary" :icon="DocumentAdd" :loading="busy" @click="createCharacter">新建角色</el-button>
+          <el-button native-type="button" type="primary" :icon="DocumentAdd" :disabled="!characterForm.name.trim() || !newCharacterFile" :loading="busy" @click="createCharacter">新建角色</el-button>
+          </div>
         </section>
         <section class="library-list">
           <article v-for="item in characters" :key="item.id" class="library-card">
@@ -299,6 +312,9 @@ async function run(action: () => Promise<unknown>) {
 .create-row {
   margin: 0 0 16px;
 }
+.character-create { display:grid; grid-template-columns:160px minmax(0,1fr); gap:16px; margin-bottom:18px; }
+.image-picker { display:grid; gap:8px; align-content:start; }
+.image-picker img { width:150px; height:110px; object-fit:cover; border-radius:8px; }
 
 .library-list {
   display: grid;

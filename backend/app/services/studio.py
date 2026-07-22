@@ -3,6 +3,8 @@ import logging
 import os
 import shutil
 import hashlib
+import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -36,6 +38,11 @@ from app.models.entities import (
     Project,
     ProjectRender,
     ProviderAssetCache,
+    ProviderModelGenerationType,
+    ProviderModelProfile,
+    ProviderProfile,
+    ProviderVerificationRun,
+    ProviderVerificationStatus,
     ReliableTaskStatus,
     Shot,
     ShotCharacter,
@@ -93,6 +100,19 @@ def get_shot_or_404(session: Session, shot_id: int) -> Shot:
     return shot
 
 
+def normalize_project_name(value: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value).strip()).casefold()
+
+
+def _validate_project_name(session: Session, name: str, *, exclude_id: int | None = None) -> None:
+    if not name.strip():
+        raise AppError("PROJECT_NAME_REQUIRED", "请输入项目名称。", 422, {"name": "请输入项目名称。"})
+    wanted = normalize_project_name(name)
+    for project in session.exec(select(Project).where(col(Project.archived_at).is_(None))).all():
+        if project.id != exclude_id and normalize_project_name(project.name) == wanted:
+            raise AppError("PROJECT_NAME_CONFLICT", "已存在同名项目，请使用其他名称。", 409, {"name": "已存在同名项目，请使用其他名称。"})
+
+
 def create_project(session: Session, payload: ProjectCreate) -> Project:
     if hasattr(payload, "model_dump"):
         data = payload.model_dump()
@@ -101,6 +121,7 @@ def create_project(session: Session, payload: ProjectCreate) -> Project:
             "name": getattr(payload, "name"),
             "description": getattr(payload, "description", ""),
         }
+    _validate_project_name(session, str(data["name"]))
     project = Project(**data)
     session.add(project)
     session.commit()
@@ -111,6 +132,9 @@ def create_project(session: Session, payload: ProjectCreate) -> Project:
 def update_project(session: Session, project_id: int, payload: ProjectUpdate) -> Project:
     project = get_project_or_404(session, project_id)
     updates = payload.model_dump(exclude_unset=True)
+    if "name" in updates and updates["name"] is not None:
+        _validate_project_name(session, str(updates["name"]), exclude_id=project_id)
+    _validate_generation_settings(session, project, updates)
     for key, value in updates.items():
         setattr(project, key, value)
     project.updated_at = utcnow()
@@ -120,8 +144,36 @@ def update_project(session: Session, project_id: int, payload: ProjectUpdate) ->
     return project
 
 
-def delete_project(session: Session, project_id: int) -> None:
+def archive_project(session: Session, project_id: int) -> Project:
     project = get_project_or_404(session, project_id)
+    project.archived_at = project.archived_at or utcnow()
+    project.archived_by_source = "USER"
+    project.updated_at = utcnow()
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return project
+
+
+def restore_project(session: Session, project_id: int) -> Project:
+    project = get_project_or_404(session, project_id)
+    _validate_project_name(session, project.name, exclude_id=project_id)
+    project.archived_at = None
+    project.archived_by_source = None
+    project.updated_at = utcnow()
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return project
+
+
+def delete_project(session: Session, project_id: int, *, confirmation_name: str | None = None, acknowledged: bool | None = None) -> None:
+    project = get_project_or_404(session, project_id)
+    if confirmation_name is not None or acknowledged is not None:
+        if project.archived_at is None:
+            raise AppError("PROJECT_NOT_ARCHIVED", "只能永久删除已移除的项目。", 409)
+        if not acknowledged or confirmation_name != project.name:
+            raise AppError("PROJECT_DELETE_CONFIRMATION_MISMATCH", "请输入完整项目名称并确认该操作不可恢复。", 409)
     _ensure_project_deletable(session, project_id)
     paths = _asset_paths_for_project(session, project_id)
     try:
@@ -166,8 +218,30 @@ def delete_project(session: Session, project_id: int) -> None:
     _cleanup_unreferenced_paths(session, paths)
 
 
-def list_projects(session: Session) -> list[Project]:
-    return list(session.exec(select(Project).order_by(col(Project.created_at))).all())
+def list_projects(session: Session, *, archived: bool = False) -> list[Project]:
+    predicate = col(Project.archived_at).is_not(None) if archived else col(Project.archived_at).is_(None)
+    return list(session.exec(select(Project).where(predicate).order_by(col(Project.updated_at).desc())).all())
+
+
+def _validate_generation_settings(session: Session, project: Project, updates: dict[str, object]) -> None:
+    pairs = (("image_provider_id", "image_model", ProviderModelGenerationType.IMAGE), ("video_provider_id", "video_model", ProviderModelGenerationType.VIDEO))
+    for provider_field, model_field, expected_type in pairs:
+        provider_key = updates.get(provider_field, getattr(project, provider_field))
+        model_key = updates.get(model_field, getattr(project, model_field))
+        if bool(provider_key) != bool(model_key):
+            raise AppError("GENERATION_SETTINGS_INCOMPLETE", "服务商和模型必须同时选择。", 422)
+        if not provider_key:
+            continue
+        profile = session.exec(select(ProviderProfile).where(ProviderProfile.provider_key == str(provider_key), col(ProviderProfile.archived_at).is_(None))).first()
+        if profile is None or not profile.enabled:
+            raise AppError("MODEL_NOT_FOUND", "所选服务商不存在或未启用。", 422)
+        model = session.exec(select(ProviderModelProfile).where(ProviderModelProfile.provider_profile_id == profile.id, ProviderModelProfile.model_key == str(model_key))).first()
+        if model is None:
+            raise AppError("MODEL_PROVIDER_MISMATCH", "所选模型不属于该服务商。", 422)
+        if not model.enabled:
+            raise AppError("MODEL_NOT_FOUND", "所选模型未启用。", 422)
+        if model.generation_type != expected_type:
+            raise AppError("MODEL_TYPE_MISMATCH", "所选模型类型与生成类型不匹配。", 422)
 
 
 def create_shot(session: Session, project_id: int, payload: ShotCreate) -> Shot:
@@ -578,6 +652,17 @@ def _ensure_project_deletable(session: Session, project_id: int) -> None:
     ).first()
     if active_render:
         raise AppError("PROJECT_HAS_ACTIVE_RENDER", "Project has an active render.", 409)
+    active_verification = session.exec(
+        select(ProviderVerificationRun).where(
+            ProviderVerificationRun.verification_project_id == project_id,
+            col(ProviderVerificationRun.status).in_([
+                ProviderVerificationStatus.PENDING.value,
+                ProviderVerificationStatus.RUNNING.value,
+            ]),
+        )
+    ).first()
+    if active_verification:
+        raise AppError("PROJECT_HAS_ACTIVE_TASKS", "项目仍有进行中的服务商验证。", 409)
 
 
 def _delete_task_records(session: Session, task_ids: list[int]) -> None:
@@ -706,6 +791,50 @@ def create_project_image_asset(
         return asset
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def create_character_from_upload(
+    session: Session, project_id: int, *, name: str, description: str,
+    appearance: str, content: bytes, content_type: str | None,
+) -> dict[str, object]:
+    get_project_or_404(session, project_id)
+    clean_name = name.strip()
+    if not clean_name:
+        raise AppError("CHARACTER_NAME_REQUIRED", "请输入角色名称。", 422, {"name": "请输入角色名称。"})
+    collision = session.exec(select(Character).where(Character.project_id == project_id, col(Character.archived_at).is_(None))).all()
+    if any(item.name.strip().casefold() == clean_name.casefold() for item in collision):
+        raise AppError("CHARACTER_NAME_CONFLICT", "该项目中已存在同名角色。", 409, {"name": "角色名称不能重复。"})
+    digest = hashlib.sha256(content).hexdigest() if content else ""
+    existing = session.exec(select(Asset).where(Asset.project_id == project_id, Asset.sha256 == digest)).first() if digest else None
+    try:
+        asset = create_project_image_asset(session, project_id, content=content, content_type=content_type)
+    except AppError as exc:
+        mapping = {
+            "UPLOAD_EMPTY": ("CHARACTER_IMAGE_REQUIRED", "请上传角色参考图片。"),
+            "UPLOAD_TOO_LARGE": ("CHARACTER_IMAGE_TOO_LARGE", "图片不能超过 20 MB。"),
+            "UPLOAD_MIME_MISMATCH": ("CHARACTER_IMAGE_UNSUPPORTED", "图片内容与声明格式不一致。"),
+            "MEDIA_VALIDATION_ERROR": ("CHARACTER_IMAGE_DECODE_FAILED", "图片无法解码，请上传 PNG、JPEG 或 WebP。"),
+        }
+        code, message = mapping.get(exc.code, ("CHARACTER_IMAGE_UNSUPPORTED", "图片格式不支持。"))
+        raise AppError(code, message, exc.status_code) from exc
+    try:
+        character = Character(project_id=project_id, name=clean_name, description=description, appearance=appearance)
+        session.add(character)
+        session.flush()
+        session.add(CharacterReference(character_id=character.id or 0, asset_id=asset.id or 0, is_primary=True))
+        session.commit()
+        session.refresh(character)
+        return {"character": structured.character_payload(session, character), "asset": asset_payload(asset)}
+    except Exception:
+        session.rollback()
+        if existing is None:
+            path = Path(asset.path)
+            stored = session.get(Asset, asset.id)
+            if stored is not None:
+                session.delete(stored)
+                session.commit()
+            _cleanup_unreferenced_paths(session, [path])
+        raise
 
 
 def set_shot_start_frame(session: Session, shot_id: int, *, action: str, asset_id: int | None = None) -> Shot:

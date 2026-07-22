@@ -8,7 +8,7 @@ import tempfile
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy import text
 from sqlmodel import Session, col, select
@@ -46,6 +46,7 @@ from app.models.schemas import (
     LocationReferenceRead,
     LocationUpdate,
     ProjectCreate,
+    ProjectDeleteRequest,
     ProjectBudgetPolicyRead,
     ProjectBudgetPolicyUpdate,
     ProjectDetail,
@@ -93,6 +94,7 @@ from app.models.schemas import (
     ProviderModelProfileRead,
     ProviderModelProfileUpdate,
     ProviderProfileCreate,
+    ProviderConfigImport,
     ProviderProfileRead,
     ProviderProfileUpdate,
     ProviderValidationRead,
@@ -282,6 +284,16 @@ def create_provider_profile(
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return provider_management.create_provider_profile(session, payload)
+
+
+@router.post("/provider-configs/import", response_model=ProviderProfileRead, status_code=201)
+def import_provider_config(payload: ProviderConfigImport, session: Session = Depends(get_session)) -> dict[str, object]:
+    return provider_management.import_provider_config(session, payload)
+
+
+@router.get("/provider-configs", response_model=list[ProviderProfileRead])
+def list_provider_configs(session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return provider_management.list_provider_profiles(session)
 
 
 @router.get("/provider-profiles/{provider_id}", response_model=ProviderProfileRead)
@@ -755,8 +767,8 @@ def _parse_range(value: str, size: int) -> tuple[int, int] | None:
 
 
 @router.get("/projects", response_model=list[ProjectRead])
-def list_projects(session: Session = Depends(get_session)) -> list[Project]:
-    return studio.list_projects(session)
+def list_projects(archived: bool = False, session: Session = Depends(get_session)) -> list[Project]:
+    return studio.list_projects(session, archived=archived)
 
 
 @router.post("/projects", response_model=ProjectRead, status_code=201)
@@ -789,9 +801,19 @@ def update_project(
     return studio.update_project(session, project_id, payload)
 
 
+@router.post("/projects/{project_id}/archive", response_model=ProjectRead)
+def archive_project(project_id: int, session: Session = Depends(get_session)) -> Project:
+    return studio.archive_project(session, project_id)
+
+
+@router.post("/projects/{project_id}/restore", response_model=ProjectRead)
+def restore_project(project_id: int, session: Session = Depends(get_session)) -> Project:
+    return studio.restore_project(session, project_id)
+
+
 @router.delete("/projects/{project_id}", status_code=204)
-def delete_project(project_id: int, session: Session = Depends(get_session)) -> Response:
-    studio.delete_project(session, project_id)
+def delete_project(project_id: int, payload: ProjectDeleteRequest, session: Session = Depends(get_session)) -> Response:
+    studio.delete_project(session, project_id, confirmation_name=payload.confirmation_name, acknowledged=payload.irreversible_acknowledged)
     return Response(status_code=204)
 
 
@@ -1054,6 +1076,17 @@ def create_project_character(
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return structured.create_character(session, project_id, payload)
+
+
+@router.post("/projects/{project_id}/characters/from-image", response_model=dict, status_code=201)
+async def create_character_from_image(
+    project_id: int, file: UploadFile = File(...), name: str = Form(""),
+    description: str = Form(""), appearance: str = Form(""), session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return studio.create_character_from_upload(
+        session, project_id, name=name, description=description, appearance=appearance,
+        content=await file.read(), content_type=file.content_type,
+    )
 
 
 @router.get("/characters/{character_id}", response_model=CharacterRead)

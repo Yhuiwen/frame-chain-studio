@@ -11,17 +11,21 @@ logger = logging.getLogger("frame_chain_studio.errors")
 
 
 class AppError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
+    def __init__(self, code: str, message: str, status_code: int = 400, field_errors: dict[str, str] | None = None) -> None:
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.field_errors = field_errors or {}
         super().__init__(message)
 
 
-def error_payload(code: str, message: str, request_id: str | None = None) -> dict[str, dict[str, str]]:
-    payload = {"error": {"code": code, "message": message}}
+def error_payload(code: str, message: str, request_id: str | None = None, field_errors: dict[str, str] | None = None) -> dict[str, object]:
+    detail: dict[str, object] = {"code": code, "message": message}
+    payload: dict[str, object] = {"error": detail}
     if request_id:
-        payload["error"]["request_id"] = request_id
+        detail["request_id"] = request_id
+    if field_errors:
+        detail["field_errors"] = field_errors
     return payload
 
 
@@ -39,7 +43,7 @@ def register_error_handlers(app: FastAPI) -> None:
         request_id = _request_id(request)
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_payload(exc.code, exc.message, request_id),
+            content=error_payload(exc.code, exc.message, request_id, exc.field_errors),
             headers=_headers(request_id),
         )
 
@@ -55,9 +59,13 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
         request_id = _request_id(request)
+        field_errors: dict[str, str] = {}
+        for error in exc.errors():
+            field = str(error.get("loc", ["field"])[-1])
+            field_errors[field] = "该字段内容无效，请检查后重试。"
         return JSONResponse(
             status_code=422,
-            content=error_payload("VALIDATION_ERROR", str(exc.errors()), request_id),
+            content=error_payload("VALIDATION_ERROR", "提交内容不完整或格式不正确。", request_id, field_errors),
             headers=_headers(request_id),
         )
 

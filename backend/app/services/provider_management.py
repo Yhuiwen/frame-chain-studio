@@ -41,6 +41,7 @@ from app.models.schemas import (
     ProviderModelProfileUpdate,
     ProviderProfileCreate,
     ProviderProfileUpdate,
+    ProviderConfigImport,
 )
 from app.providers.config_loader import load_registry_from_env
 from app.providers.http import MappedAsyncHttpProvider
@@ -97,6 +98,69 @@ def create_provider_profile(session: Session, payload: ProviderProfileCreate) ->
     session.commit()
     session.refresh(profile)
     return provider_profile_payload(session, profile)
+
+
+def import_provider_config(session: Session, payload: ProviderConfigImport) -> dict[str, Any]:
+    raw = payload.model_dump()
+    sensitive = _find_sensitive_key(raw)
+    if sensitive:
+        raise AppError("PROVIDER_CONFIG_CONTAINS_SECRET", "配置文件不得包含 API Key、令牌或认证信息。", 422)
+    if len({model.model_key for model in payload.models}) != len(payload.models):
+        raise AppError("PROVIDER_CONFIG_INVALID", "服务商配置包含重复模型。", 422, {"models": "模型标识不能重复。"})
+    profile = session.exec(select(ProviderProfile).where(ProviderProfile.provider_key == payload.provider_key)).first()
+    try:
+        if profile is None:
+            profile = ProviderProfile(
+                name=payload.display_name, display_name=payload.display_name,
+                provider_key=payload.provider_key, adapter_type=payload.adapter,
+                base_url=payload.base_url, secret_env_var=payload.secret_env,
+                enabled=payload.enabled, config_json=dumps(validate_provider_config(payload.config)),
+            )
+            session.add(profile)
+            session.flush()
+        else:
+            profile.name = payload.display_name
+            profile.display_name = payload.display_name
+            profile.base_url = payload.base_url
+            profile.secret_env_var = payload.secret_env
+            profile.enabled = payload.enabled
+            profile.archived_at = None
+            profile.config_json = dumps(validate_provider_config(payload.config))
+            profile.config_revision += 1
+            session.add(profile)
+            for old in session.exec(select(ProviderModelProfile).where(ProviderModelProfile.provider_profile_id == profile.id)).all():
+                session.delete(old)
+            session.flush()
+        for item in payload.models:
+            session.add(ProviderModelProfile(
+                provider_profile_id=profile.id or 0, model_key=item.model_key,
+                remote_model=item.remote_model, display_name=item.display_name or item.model_key,
+                generation_type=item.type, enabled=item.enabled,
+                capabilities_json=dumps(item.capabilities), limits_json="{}", pricing_json="{}",
+            ))
+        session.commit()
+        session.refresh(profile)
+        return provider_profile_payload(session, profile)
+    except Exception:
+        session.rollback()
+        raise
+
+
+def _find_sensitive_key(value: object) -> str | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in SENSITIVE_KEYS or any(part in normalized for part in ("api_key", "authorization", "password")):
+                return str(key)
+            found = _find_sensitive_key(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_sensitive_key(child)
+            if found:
+                return found
+    return None
 
 
 def get_provider_profile_or_404(session: Session, provider_id: int) -> ProviderProfile:

@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     render_video_codec: str = "libx264"
     render_audio_codec: str = "aac"
     render_temp_file_ttl_hours: int = 24
-    upload_max_image_bytes: int = 25 * 1024 * 1024
+    upload_max_image_bytes: int = 20 * 1024 * 1024
     upload_max_image_pixels: int = 80_000_000
     script_max_file_bytes: int = Field(default=5 * 1024 * 1024, ge=1_024, le=50 * 1024 * 1024)
     script_max_extracted_text_chars: int = Field(default=250_000, ge=1, le=2_000_000)

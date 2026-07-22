@@ -89,7 +89,39 @@ class ProjectRead(ProjectCreate):
     id: int
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
+    archived_by_source: str | None = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectDeleteRequest(BaseModel):
+    confirmation_name: str = Field(min_length=1, max_length=160)
+    irreversible_acknowledged: bool
+
+
+class ProviderConfigImportModel(BaseModel):
+    model_key: str = Field(min_length=1, max_length=160)
+    remote_model: str = Field(default="", max_length=160)
+    display_name: str = Field(default="", max_length=160)
+    type: ProviderModelGenerationType
+    enabled: bool = True
+    capabilities: dict[str, object] = Field(default_factory=dict)
+
+
+class ProviderConfigImport(BaseModel):
+    display_name: str = Field(min_length=1, max_length=160)
+    provider_key: str = Field(min_length=1, max_length=120)
+    adapter: ProviderAdapterType = ProviderAdapterType.MAPPED_ASYNC_HTTP
+    base_url: str = Field(default="", max_length=1000)
+    secret_env: str = Field(default="", max_length=160)
+    enabled: bool = True
+    config: dict[str, object] = Field(default_factory=dict)
+    models: list[ProviderConfigImportModel] = Field(default_factory=list)
+
+
+class CharacterFromImageRead(BaseModel):
+    character: "CharacterRead"
+    asset: "AssetRead"
 
 
 class ProviderProfileBase(BaseModel):

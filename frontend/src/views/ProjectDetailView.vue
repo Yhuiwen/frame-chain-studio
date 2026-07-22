@@ -14,7 +14,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
-import { api, type GenerationStartOptions, type GenerationTask, type QualityCheckResult, type Shot, type ShotAssetSummary } from "@/api/client";
+import { api, type GenerationStartOptions, type GenerationTask, type ProviderModelProfile, type ProviderProfile, type QualityCheckResult, type Shot, type ShotAssetSummary } from "@/api/client";
 import { useProjectPolling } from "@/composables/useProjectPolling";
 import { useStudioStore } from "@/stores/studio";
 import { formatDateTime, statusLabel } from "@/constants/uiText";
@@ -27,6 +27,8 @@ const deletingShotId = ref<number | null>(null);
 const actionBusy = ref(false);
 const taskActionBusyId = ref<number | null>(null);
 const settingsBusy = ref(false);
+const providerProfiles = ref<ProviderProfile[]>([]);
+const providerModels = ref<Record<string, ProviderModelProfile[]>>({});
 const renderBusy = ref(false);
 const expandedLogIds = ref<Set<number>>(new Set());
 const startFrameInput = ref<HTMLInputElement | null>(null);
@@ -44,9 +46,9 @@ const qualitySummary = computed(() => {
     infos: checks.filter((item) => item.severity === "INFO").length,
   };
 });
-const configuredProviders = computed(() => store.providers.filter((provider) => provider.configured));
-const imageProviders = computed(() => configuredProviders.value.filter((provider) => provider.capabilities.text_to_image));
-const videoProviders = computed(() => configuredProviders.value.filter((provider) => provider.capabilities.image_to_video));
+const selectableProviders = computed(() => providerProfiles.value.filter(p => p.enabled && !p.archived_at));
+const imageModels = computed(() => (providerModels.value[settingsForm.value.image_provider_id] ?? []).filter(m => m.generation_type === "IMAGE"));
+const videoModels = computed(() => (providerModels.value[settingsForm.value.video_provider_id] ?? []).filter(m => m.generation_type === "VIDEO"));
 const settingsForm = ref({
   image_provider_id: "",
   video_provider_id: "",
@@ -72,6 +74,10 @@ onMounted(async () => {
   await store.loadProject(projectId.value);
   syncSettingsForm();
   await Promise.all([store.loadProviders(), store.refreshWorkers()]);
+  if (typeof api.listProviderProfiles === "function") {
+    providerProfiles.value = await api.listProviderProfiles();
+    await Promise.all(providerProfiles.value.map(async p => { providerModels.value[p.provider_key] = await api.listProviderModels(p.id); }));
+  }
   startPolling();
 });
 
@@ -139,6 +145,9 @@ function sourceLabel(asset: ShotAssetSummary | null) {
   if (asset.source_type === "none") return "无";
   return "由当前镜头生成";
 }
+
+function imageProviderChanged() { if (!imageModels.value.some(m => m.model_key === settingsForm.value.image_model)) settingsForm.value.image_model = ""; }
+function videoProviderChanged() { if (!videoModels.value.some(m => m.model_key === settingsForm.value.video_model)) settingsForm.value.video_model = ""; }
 
 function qualityTagType(severity: QualityCheckResult["severity"]) {
   if (severity === "ERROR") return "danger";
@@ -422,33 +431,33 @@ async function uploadTargetKeyframe(event: Event) {
         <div class="settings-grid">
           <label>
             图片服务商
-            <el-select v-model="settingsForm.image_provider_id" placeholder="使用系统默认" clearable>
+            <el-select v-model="settingsForm.image_provider_id" placeholder="选择图片服务商" clearable @change="imageProviderChanged">
               <el-option
-                v-for="provider in imageProviders"
-                :key="provider.provider_id"
+                v-for="provider in selectableProviders"
+                :key="provider.id"
                 :label="provider.display_name"
-                :value="provider.provider_id"
+                :value="provider.provider_key"
               />
             </el-select>
           </label>
           <label>
             视频服务商
-            <el-select v-model="settingsForm.video_provider_id" placeholder="使用系统默认" clearable>
+            <el-select v-model="settingsForm.video_provider_id" placeholder="选择视频服务商" clearable @change="videoProviderChanged">
               <el-option
-                v-for="provider in videoProviders"
-                :key="provider.provider_id"
+                v-for="provider in selectableProviders"
+                :key="provider.id"
                 :label="provider.display_name"
-                :value="provider.provider_id"
+                :value="provider.provider_key"
               />
             </el-select>
           </label>
           <label>
             图片模型
-            <el-input v-model="settingsForm.image_model" />
+            <el-select v-model="settingsForm.image_model" :disabled="!settingsForm.image_provider_id" placeholder="选择图片模型"><el-option v-for="model in imageModels" :key="model.id" :label="`${model.display_name} · ${model.remote_model || model.model_key}${model.enabled ? '' : ' · 已停用'}`" :value="model.model_key" :disabled="!model.enabled" /></el-select>
           </label>
           <label>
             视频模型
-            <el-input v-model="settingsForm.video_model" />
+            <el-select v-model="settingsForm.video_model" :disabled="!settingsForm.video_provider_id" placeholder="选择视频模型"><el-option v-for="model in videoModels" :key="model.id" :label="`${model.display_name} · ${model.remote_model || model.model_key}${model.enabled ? '' : ' · 已停用'}`" :value="model.model_key" :disabled="!model.enabled" /></el-select>
           </label>
           <label>
             画面比例
