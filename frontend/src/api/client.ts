@@ -751,6 +751,24 @@ export interface ProviderRunReadiness extends ProviderVerificationRun {
   legacy_review_report_ids: number[];
   legacy_reason_codes: string[];
   workflow_approval_only: boolean;
+  scene_cut_check: {
+    status: "NOT_RUN" | "PASSED" | "WARNING" | "FAILED";
+    asset_ids: number[];
+    algorithm_version: string;
+    hard_cut_count: number;
+    review_candidate_count: number;
+    events: Array<{
+      asset_id: number;
+      timestamp_seconds: string;
+      previous_timestamp_seconds: string;
+      pixel_delta: string;
+      histogram_delta: string;
+      classification: "REVIEW_CANDIDATE" | "HARD_CUT";
+      blocking: boolean;
+    }>;
+    missing_asset_ids: number[];
+    calibration_scope: "SYNTHETIC_FIXTURES_ONLY";
+  };
 }
 
 export interface GenerationUsageRecord {

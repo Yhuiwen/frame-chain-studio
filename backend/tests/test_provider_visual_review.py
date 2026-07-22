@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 from pathlib import Path
+from typing import cast
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -20,6 +21,8 @@ from app.models.entities import (
     ProviderVerificationStatus,
     ProviderVerificationType,
     ProviderVisualReview,
+    QualityCheckResult,
+    QualityCheckSeverity,
     Shot,
     VisualAnalysisStatus,
     VisualContinuityReport,
@@ -83,6 +86,19 @@ def run_fixture(
     )
     session.add(run)
     session.flush()
+    for video in (video_1, video_2):
+        session.add(
+            QualityCheckResult(
+                project_id=project.id or 0,
+                shot_id=video.shot_id,
+                asset_id=video.id,
+                check_type="INTRA_SHOT_SCENE_CUT",
+                severity=QualityCheckSeverity.INFO,
+                message="synthetic pass",
+                details_json='{"asset_id": %d, "hard_cut_count": 0, "review_candidate_count": 0, "events": [], "status": "PASSED"}' % (video.id or 0),
+                algorithm_version="scene-cut-v1",
+            )
+        )
     if legacy_human is not None:
         session.add(
             VisualContinuityReport(
@@ -180,6 +196,45 @@ def test_legacy_run6_equivalent_stays_passed_rejected_and_blocked(session: Sessi
     assert payload["legacy_review_evidence"] is True
     assert payload["current_visual_review"] is None
     assert payload["workflow_approval_only"] is True
+
+
+def test_scene_cut_failure_blocks_approved_run_without_changing_semantics(session: Session) -> None:
+    run, render, _video = run_fixture(session)
+    check = session.exec(
+        select(QualityCheckResult).where(QualityCheckResult.check_type == "INTRA_SHOT_SCENE_CUT")
+    ).first()
+    assert check is not None
+    check.severity = QualityCheckSeverity.ERROR
+    check.details_json = '{"asset_id": %d, "hard_cut_count": 1, "review_candidate_count": 0, "events": [{"timestamp_seconds": "1.000000", "classification": "HARD_CUT"}], "status": "FAILED"}' % (check.asset_id or 0)
+    session.add(check)
+    session.commit()
+    provider_visual_review.create_review(
+        session, run_id=run.id or 0, asset_id=render.id or 0,
+        decision=VisualReviewDecision.APPROVED, reason_codes=[], notes="approved",
+        idempotency_key="approved-with-cut",
+    )
+    payload = provider_visual_review.readiness_payload(session, run.id or 0)
+    assert payload["technical_status"] == "PASSED"
+    assert payload["human_visual_status"] == "APPROVED"
+    assert payload["production_status"] == "BLOCKED"
+    assert "UNEXPECTED_SCENE_CUT" in cast(list[str], payload["production_blockers"])
+
+
+def test_missing_scene_cut_check_blocks_as_incomplete(session: Session) -> None:
+    run, render, _video = run_fixture(session)
+    for check in session.exec(
+        select(QualityCheckResult).where(QualityCheckResult.check_type == "INTRA_SHOT_SCENE_CUT")
+    ).all():
+        session.delete(check)
+    session.commit()
+    provider_visual_review.create_review(
+        session, run_id=run.id or 0, asset_id=render.id or 0,
+        decision=VisualReviewDecision.APPROVED, reason_codes=[], notes="approved",
+        idempotency_key="approved-missing-check",
+    )
+    payload = provider_visual_review.readiness_payload(session, run.id or 0)
+    assert cast(dict[str, object], payload["scene_cut_check"])["status"] == "NOT_RUN"
+    assert "AUTOMATED_VISUAL_CHECK_INCOMPLETE" in cast(list[str], payload["production_blockers"])
 
 
 def test_review_history_asset_binding_and_idempotency(session: Session) -> None:
@@ -382,6 +437,9 @@ def test_api_exposes_gates_and_safe_review_history(tmp_path: Path) -> None:
             assert detail.json()["technical_status"] == "PASSED"
             assert detail.json()["human_visual_status"] == "REJECTED"
             assert detail.json()["production_status"] == "BLOCKED"
+            assert detail.json()["scene_cut_check"]["algorithm_version"] == "scene-cut-v1"
+            assert detail.json()["scene_cut_check"]["hard_cut_count"] == 0
+            assert "storage/" not in detail.text
             history = client.get(f"/api/provider-verification-runs/{run_id}/visual-reviews")
             assert history.status_code == 200
             assert len(history.json()["history"]) == 1

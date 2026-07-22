@@ -330,7 +330,10 @@ class ProviderVerificationRunRead(BaseModel):
     selected_review_asset: dict[str, object] | None = None
     current_visual_review: dict[str, object] | None = None
     legacy_review_evidence: bool = False
+    legacy_review_report_ids: list[int] = Field(default_factory=list)
+    legacy_reason_codes: list[str] = Field(default_factory=list)
     workflow_approval_only: bool = False
+    scene_cut_check: dict[str, object] | None = None
 
 
 class LiveVerificationRequest(BaseModel):

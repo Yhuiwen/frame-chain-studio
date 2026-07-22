@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint
+from sqlalchemy import CheckConstraint, Index, UniqueConstraint, text
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -1203,6 +1203,13 @@ class GenerationTaskResult(SQLModel, table=True):
 
 class QualityCheckResult(SQLModel, table=True):
     __table_args__ = (
+        Index(
+            "uq_qualitycheck_scene_cut_asset_algorithm",
+            "asset_id",
+            "algorithm_version",
+            unique=True,
+            sqlite_where=text("check_type = 'INTRA_SHOT_SCENE_CUT'"),
+        ),
         Index("ix_qualitycheck_project_shot_created", "project_id", "shot_id", "created_at"),
         Index("ix_qualitycheck_asset_type_created", "asset_id", "check_type", "created_at"),
     )

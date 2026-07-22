@@ -67,8 +67,14 @@ def test_quality_checks_manual_run_is_idempotent_and_does_not_change_review_stat
     assert len(session.exec(select(QualityCheckResult).where(QualityCheckResult.asset_id == video.id)).all()) == len(second_run)
     check_types = {item.check_type for item in second_run}
     assert {"DURATION_DEVIATION", "START_ANCHOR_DHASH_DISTANCE", "TAIL_TARGET_DHASH_DISTANCE", "VIDEO_FPS"} <= check_types
+    assert "INTRA_SHOT_SCENE_CUT" in check_types
     assert all(item.algorithm_version for item in second_run)
     assert any(item.severity == "INFO" for item in second_run)
+    scene_checks = [item for item in second_run if item.check_type == "INTRA_SHOT_SCENE_CUT"]
+    assert len(scene_checks) == 1
+    assert scene_checks[0].algorithm_version == "scene-cut-v1"
+    assert video.sha256 is not None
+    assert video.sha256 in scene_checks[0].details_json
 
 
 def test_quality_api_rejects_no_current_video_and_hides_old_revision_results(session: Session, tmp_path: Path) -> None:

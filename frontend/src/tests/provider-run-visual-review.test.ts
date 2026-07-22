@@ -14,6 +14,12 @@ const run: ProviderRunReadiness = {
   selected_review_asset: { id: 94, type: "PROJECT_RENDER", sha256: "a".repeat(64), created_at: "2026-07-21T00:00:00Z", url: "/api/media/94" },
   current_visual_review: null, legacy_review_evidence: true, legacy_review_report_ids: [1, 2],
   legacy_reason_codes: ["CHARACTER_STYLE_DRIFT"], workflow_approval_only: true,
+  scene_cut_check: {
+    status: "FAILED", asset_ids: [86, 92], algorithm_version: "scene-cut-v1",
+    hard_cut_count: 1, review_candidate_count: 0, missing_asset_ids: [],
+    calibration_scope: "SYNTHETIC_FIXTURES_ONLY",
+    events: [{ asset_id: 92, timestamp_seconds: "2.083333", previous_timestamp_seconds: "2.000000", pixel_delta: "0.800000", histogram_delta: "0.700000", classification: "HARD_CUT", blocking: true }],
+  },
 };
 
 const stubs = {
@@ -35,6 +41,10 @@ describe("ProviderRunVisualReview", () => {
     expect(wrapper.text()).toContain("人工视觉审核REJECTED");
     expect(wrapper.text()).toContain("生产状态BLOCKED");
     expect(wrapper.text()).toContain("Asset ID94");
+    expect(wrapper.text()).toContain("scene-cut-v1");
+    expect(wrapper.text()).toContain("2.083333s");
+    expect(wrapper.text()).toContain("UNEXPECTED_SCENE_CUT");
+    expect(wrapper.text()).toContain("SYNTHETIC_FIXTURES_ONLY");
     expect(wrapper.text()).toContain("技术批准不代表生产批准");
     expect(wrapper.text()).not.toMatch(/live-enable|ExecutePaid/);
   });

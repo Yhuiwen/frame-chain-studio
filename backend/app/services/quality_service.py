@@ -1,6 +1,7 @@
 import json
 import tempfile
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from time import time
 
@@ -10,6 +11,7 @@ from sqlmodel import Session, col, select
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.media import quality
+from app.media import scene_cut
 from app.models.entities import (
     Asset,
     AssetStatus,
@@ -22,7 +24,7 @@ from app.models.entities import (
 )
 
 ALGORITHM_VERSION = "quality-v1"
-MAX_DETAILS_JSON_LENGTH = 4000
+MAX_DETAILS_JSON_LENGTH = 16000
 MAX_MESSAGE_LENGTH = 500
 MAX_SEGMENTS_PER_TYPE = 20
 
@@ -37,6 +39,7 @@ class QualityItem:
     details: dict[str, object]
     asset_id: int | None
     reference_asset_id: int | None = None
+    algorithm_version: str = ALGORITHM_VERSION
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,9 @@ class QualitySnapshot:
     shot_duration_seconds: float
     video_asset_id: int
     video_path: str
+    video_sha256: str
+    video_duration_seconds: float
+    video_fps: str
     keyframe_asset_id: int | None
     keyframe_path: str | None
     start_frame_asset_id: int | None
@@ -66,7 +72,6 @@ def list_shot_quality_checks(session: Session, shot_id: int) -> list[QualityChec
             .where(
                 QualityCheckResult.shot_id == shot_id,
                 QualityCheckResult.asset_id == current_video.id,
-                QualityCheckResult.algorithm_version == ALGORITHM_VERSION,
             )
             .order_by(col(QualityCheckResult.severity).desc(), col(QualityCheckResult.check_type))
         ).all()
@@ -169,6 +174,9 @@ def _snapshot_current_video(session: Session, shot_id: int) -> QualitySnapshot:
         shot_duration_seconds=float(shot.duration_seconds or 0.1),
         video_asset_id=video.id,
         video_path=video.path,
+        video_sha256=video.sha256 or "",
+        video_duration_seconds=float(video.duration_seconds or shot.duration_seconds or 0),
+        video_fps=str(video.fps or "unknown"),
         keyframe_asset_id=keyframe.id if keyframe else None,
         keyframe_path=keyframe.path if keyframe else None,
         start_frame_asset_id=start_frame.id if start_frame else None,
@@ -199,6 +207,7 @@ def _collect_items(snapshot: QualitySnapshot) -> list[QualityItem]:
     temp_root = settings.storage_dir / "temp" / "quality"
     temp_root.mkdir(parents=True, exist_ok=True)
     video_path = Path(snapshot.video_path)
+    items.append(_scene_cut_item(snapshot, video_path, settings.quality_check_timeout_seconds))
     try:
         metadata = quality.probe_video(video_path, timeout_seconds=settings.quality_check_timeout_seconds)
         expected_duration = snapshot.shot_duration_seconds
@@ -296,17 +305,35 @@ def _replace_results(session: Session, snapshot: QualitySnapshot, items: list[Qu
         or video.status not in {AssetStatus.ACTIVE, AssetStatus.APPROVED}
     ):
         raise AppError("QUALITY_TARGET_CHANGED", "Quality check target changed before results were saved.", 409)
-    for existing in session.exec(
+    existing_results = list(session.exec(
         select(QualityCheckResult).where(
             QualityCheckResult.asset_id == snapshot.video_asset_id,
-            QualityCheckResult.algorithm_version == ALGORITHM_VERSION,
         )
-    ).all():
-        session.delete(existing)
+    ).all())
+    scene_existing = next(
+        (
+            item
+            for item in existing_results
+            if item.check_type == "INTRA_SHOT_SCENE_CUT"
+            and item.algorithm_version == scene_cut.SCENE_CUT_ALGORITHM_VERSION
+        ),
+        None,
+    )
+    for existing in existing_results:
+        if existing is not scene_existing and existing.algorithm_version == ALGORITHM_VERSION:
+            session.delete(existing)
     for item in items:
         details_json = _safe_details_json(item.details)
-        session.add(
-            QualityCheckResult(
+        if item.check_type == "INTRA_SHOT_SCENE_CUT" and scene_existing is not None:
+            result = scene_existing
+            result.reference_asset_id = item.reference_asset_id
+            result.severity = item.severity
+            result.score = item.score
+            result.threshold = item.threshold
+            result.message = item.message[:MAX_MESSAGE_LENGTH]
+            result.details_json = details_json
+        else:
+            result = QualityCheckResult(
                 project_id=snapshot.project_id,
                 shot_id=snapshot.shot_id,
                 asset_id=snapshot.video_asset_id,
@@ -317,9 +344,9 @@ def _replace_results(session: Session, snapshot: QualitySnapshot, items: list[Qu
                 threshold=item.threshold,
                 message=item.message[:MAX_MESSAGE_LENGTH],
                 details_json=details_json,
-                algorithm_version=ALGORITHM_VERSION,
+                algorithm_version=item.algorithm_version,
             )
-        )
+        session.add(result)
 
 
 def _safe_details_json(details: dict[str, object]) -> str:
@@ -327,3 +354,63 @@ def _safe_details_json(details: dict[str, object]) -> str:
     if len(text) <= MAX_DETAILS_JSON_LENGTH:
         return text
     return json.dumps({"truncated": True, "algorithm_version": ALGORITHM_VERSION}, sort_keys=True)
+
+
+def _scene_cut_item(snapshot: QualitySnapshot, video_path: Path, timeout_seconds: int) -> QualityItem:
+    settings = get_settings()
+    storage_root = settings.storage_dir.resolve()
+    resolved = video_path.resolve()
+    base = {
+        "asset_id": snapshot.video_asset_id,
+        "asset_sha256": snapshot.video_sha256,
+        "algorithm_version": scene_cut.SCENE_CUT_ALGORITHM_VERSION,
+        "calibration_scope": scene_cut.CALIBRATION_SCOPE,
+    }
+    try:
+        if resolved == storage_root or storage_root not in resolved.parents:
+            raise scene_cut.SceneCutAnalysisError("SCENE_CUT_PATH_OUTSIDE_STORAGE")
+        if not snapshot.video_sha256 or _sha256_file(resolved) != snapshot.video_sha256:
+            raise scene_cut.SceneCutAnalysisError("SCENE_CUT_ASSET_SHA_MISMATCH")
+        result = scene_cut.analyze_video(
+            resolved,
+            asset_id=snapshot.video_asset_id,
+            asset_sha256=snapshot.video_sha256,
+            duration_seconds=snapshot.video_duration_seconds,
+            source_fps=snapshot.video_fps,
+            timeout_seconds=timeout_seconds,
+        )
+        evidence = result.evidence()
+        if result.hard_cut_count:
+            severity = QualityCheckSeverity.ERROR
+            status = "FAILED"
+            message = "Unexpected intra-shot hard cut detected."
+        elif result.review_candidate_count:
+            severity = QualityCheckSeverity.WARNING
+            status = "WARNING"
+            message = "Potential transition requires visual review."
+        else:
+            severity = QualityCheckSeverity.INFO
+            status = "PASSED"
+            message = "No intra-shot hard cut detected."
+        evidence["status"] = status
+        evidence["blocking"] = bool(result.hard_cut_count)
+        return QualityItem(
+            "INTRA_SHOT_SCENE_CUT", severity, float(result.maximum_pixel_delta),
+            float(scene_cut.SceneCutConfig().pixel_hard_threshold), message, evidence,
+            snapshot.video_asset_id, algorithm_version=scene_cut.SCENE_CUT_ALGORITHM_VERSION,
+        )
+    except Exception as exc:
+        return QualityItem(
+            "INTRA_SHOT_SCENE_CUT", QualityCheckSeverity.ERROR, None, None,
+            "Scene-cut analysis could not be completed.",
+            {**base, "status": "NOT_RUN", "blocking": True, "error_code": str(exc)[:100]},
+            snapshot.video_asset_id, algorithm_version=scene_cut.SCENE_CUT_ALGORITHM_VERSION,
+        )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

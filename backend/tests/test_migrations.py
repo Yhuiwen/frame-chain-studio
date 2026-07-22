@@ -198,7 +198,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260722_0027"
+            == "20260722_0028"
         )
         assert (
             connection.execute(
@@ -746,7 +746,7 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     with engine.connect() as connection:
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260722_0027"
+            == "20260722_0028"
         )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")
@@ -968,6 +968,25 @@ def test_provider_visual_review_migration_round_trip_from_0026(tmp_path: Path) -
     assert "providervisualreview" not in table_names(db_path)
     command.upgrade(config, "head")
     assert "providervisualreview" in table_names(db_path)
+
+
+def test_scene_cut_quality_identity_migration_round_trip(tmp_path: Path) -> None:
+    db_path = tmp_path / "scene-cut-quality.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260722_0027")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    command.upgrade(config, "20260722_0028")
+    with engine.connect() as connection:
+        indexes = connection.execute(sa.text("PRAGMA index_list('qualitycheckresult')")).mappings().all()
+        assert any(
+            item["name"] == "uq_qualitycheck_scene_cut_asset_algorithm" and item["unique"] == 1
+            for item in indexes
+        )
+    command.downgrade(config, "20260722_0027")
+    with engine.connect() as connection:
+        names = {item["name"] for item in connection.execute(sa.text("PRAGMA index_list('qualitycheckresult')")).mappings()}
+        assert "uq_qualitycheck_scene_cut_asset_algorithm" not in names
+    command.upgrade(config, "head")
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from app.models.entities import (
     ProviderVerificationRun,
     ProviderVerificationStatus,
     ProviderVisualReview,
+    QualityCheckResult,
     Shot,
     VisualAnalysisStatus,
     VisualContinuityReport,
@@ -50,6 +51,8 @@ BLOCKER_ORDER = (
     "HUMAN_VISUAL_PENDING",
     "HUMAN_VISUAL_REJECTED",
     "BLOCKING_VISUAL_EVIDENCE",
+    "AUTOMATED_VISUAL_CHECK_INCOMPLETE",
+    "UNEXPECTED_SCENE_CUT",
 )
 
 
@@ -303,6 +306,59 @@ def _automated_status(reports: list[VisualContinuityReport]) -> str:
     return "PASSED"
 
 
+def _scene_cut_summary(session: Session, run: ProviderVerificationRun) -> dict[str, object]:
+    asset_ids: list[int] = []
+    for shot_id in (run.shot_1_id, run.shot_2_id):
+        shot = session.get(Shot, shot_id) if shot_id else None
+        if shot is not None and shot.approved_video_asset_id is not None:
+            asset_ids.append(shot.approved_video_asset_id)
+    checks = list(
+        session.exec(
+            select(QualityCheckResult).where(
+                col(QualityCheckResult.asset_id).in_(asset_ids or [-1]),
+                QualityCheckResult.check_type == "INTRA_SHOT_SCENE_CUT",
+                QualityCheckResult.algorithm_version == "scene-cut-v1",
+            )
+        ).all()
+    )
+    by_asset = {check.asset_id: check for check in checks}
+    missing = sorted(asset_id for asset_id in asset_ids if asset_id not in by_asset)
+    evidence = [
+        provider_management.loads_dict(check.details_json)
+        for check in sorted(checks, key=lambda item: (item.asset_id or 0, item.id or 0))
+    ]
+    hard_count = sum(int(item.get("hard_cut_count", 0)) for item in evidence)
+    review_count = sum(int(item.get("review_candidate_count", 0)) for item in evidence)
+    incomplete = bool(missing) or not asset_ids or any(item.get("status") == "NOT_RUN" for item in evidence)
+    if incomplete:
+        status = "NOT_RUN"
+    elif hard_count:
+        status = "FAILED"
+    elif review_count:
+        status = "WARNING"
+    else:
+        status = "PASSED"
+    events = sorted(
+        [
+            {**event, "asset_id": item.get("asset_id")}
+            for item in evidence
+            for event in item.get("events", [])
+            if isinstance(event, dict)
+        ],
+        key=lambda event: (int(event.get("asset_id") or 0), str(event.get("timestamp_seconds", ""))),
+    )
+    return {
+        "status": status,
+        "asset_ids": asset_ids,
+        "algorithm_version": "scene-cut-v1",
+        "hard_cut_count": hard_count,
+        "review_candidate_count": review_count,
+        "events": events,
+        "missing_asset_ids": missing,
+        "calibration_scope": "SYNTHETIC_FIXTURES_ONLY",
+    }
+
+
 def review_payload(review: ProviderVisualReview) -> dict[str, object]:
     return {
         **review.model_dump(exclude={"reason_codes_json", "request_hash"}),
@@ -329,7 +385,14 @@ def readiness_payload(session: Session, run_id: int) -> dict[str, object]:
     technical = run.status.value
     lineage = _lineage_status(session, run)
     automated = _automated_status(legacy)
-    blocking_visual = automated in {"FAILED", "WARNING"}
+    scene_cut = _scene_cut_summary(session, run)
+    legacy_blocking_visual = automated in {"FAILED", "WARNING"}
+    if scene_cut["status"] == "FAILED":
+        automated = "FAILED"
+    elif scene_cut["status"] == "WARNING" and automated in {"NOT_RUN", "PASSED"}:
+        automated = "WARNING"
+    elif scene_cut["status"] == "PASSED" and automated == "NOT_RUN":
+        automated = "PASSED"
     blockers: list[str] = []
     if technical != "PASSED":
         blockers.append("TECHNICAL_NOT_PASSED")
@@ -339,8 +402,12 @@ def readiness_payload(session: Session, run_id: int) -> dict[str, object]:
         blockers.append("HUMAN_VISUAL_PENDING")
     elif human == "REJECTED":
         blockers.append("HUMAN_VISUAL_REJECTED")
-    if blocking_visual:
+    if legacy_blocking_visual:
         blockers.append("BLOCKING_VISUAL_EVIDENCE")
+    if scene_cut["status"] == "NOT_RUN":
+        blockers.append("AUTOMATED_VISUAL_CHECK_INCOMPLETE")
+    elif scene_cut["status"] == "FAILED":
+        blockers.append("UNEXPECTED_SCENE_CUT")
     blockers.sort(key=BLOCKER_ORDER.index)
     selected_asset = session.get(Asset, selected_asset_id) if selected_asset_id else None
     return {
@@ -374,4 +441,5 @@ def readiness_payload(session: Session, run_id: int) -> dict[str, object]:
             }
         ),
         "workflow_approval_only": run.auto_approve_for_verification,
+        "scene_cut_check": scene_cut,
     }

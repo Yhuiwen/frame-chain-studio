@@ -93,6 +93,18 @@ onMounted(() => void load());
         <article v-for="card in cards" :key="card[0]"><span>{{ card[0] }}</span><strong :class="String(card[1]).toLowerCase()">{{ card[1] }}</strong></article>
       </div>
       <el-alert v-if="selected.technical_status === 'PASSED' && selected.production_status === 'BLOCKED'" title="技术流程已通过，但视觉或其他生产门禁未通过，不能进入生产。" type="warning" :closable="false" />
+      <section class="scene-cut-panel">
+        <h3>离线场景硬切证据</h3>
+        <p><strong>{{ selected.scene_cut_check.status }}</strong> · {{ selected.scene_cut_check.algorithm_version }}</p>
+        <p>硬切：{{ selected.scene_cut_check.hard_cut_count }} · 待复核：{{ selected.scene_cut_check.review_candidate_count }}</p>
+        <el-alert v-if="selected.scene_cut_check.hard_cut_count" title="UNEXPECTED_SCENE_CUT 阻止生产，但不会修改技术任务结果。" type="error" :closable="false" />
+        <p class="calibration">CALIBRATION_SCOPE={{ selected.scene_cut_check.calibration_scope }}；自动证据不会修改技术状态或人工审核。</p>
+        <ul v-if="selected.scene_cut_check.events.length">
+          <li v-for="event in selected.scene_cut_check.events" :key="`${event.asset_id}-${event.timestamp_seconds}`">
+            Asset {{ event.asset_id }} · {{ event.timestamp_seconds }}s · pixel {{ event.pixel_delta }} · histogram {{ event.histogram_delta }} · {{ event.classification }}
+          </li>
+        </ul>
+      </section>
       <div class="run-layout">
         <section class="asset-panel">
           <h3>当前被审核 Asset</h3>
@@ -133,5 +145,5 @@ onMounted(() => void load());
 </template>
 
 <style scoped>
-.provider-run-review{margin-bottom:18px;padding:16px;background:#fff;border:1px solid #d9e0ea;border-radius:10px}.provider-run-review header{display:flex;justify-content:space-between;gap:16px}.gate-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}.gate-cards article,.asset-panel,.form-panel,.history-panel{padding:12px;border:1px solid #e1e6ef;border-radius:8px}.gate-cards span{display:block;color:#667085;font-size:12px}.gate-cards strong{display:block;margin-top:6px}.passed,.ready,.approved{color:#067647}.failed,.rejected,.blocked{color:#b42318}.pending,.warning{color:#b54708}.run-layout{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:14px}.asset-panel video,.asset-panel img{width:100%;max-height:240px;object-fit:contain;background:#111}.asset-panel dl{display:grid;grid-template-columns:100px 1fr}.asset-panel dd{margin:0;word-break:break-all}.form-panel .el-checkbox-group{display:flex;flex-direction:column;margin:12px 0}.validation{color:#b42318}.history-panel article{padding:8px 0;border-bottom:1px solid #e1e6ef}.asset-panel .el-tag{margin:3px}@media(max-width:1100px){.gate-cards,.run-layout{grid-template-columns:1fr}}
+.provider-run-review{margin-bottom:18px;padding:16px;background:#fff;border:1px solid #d9e0ea;border-radius:10px}.provider-run-review header{display:flex;justify-content:space-between;gap:16px}.gate-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}.gate-cards article,.asset-panel,.form-panel,.history-panel,.scene-cut-panel{padding:12px;border:1px solid #e1e6ef;border-radius:8px}.scene-cut-panel{margin-top:12px}.scene-cut-panel .calibration{color:#667085;font-size:12px}.gate-cards span{display:block;color:#667085;font-size:12px}.gate-cards strong{display:block;margin-top:6px}.passed,.ready,.approved{color:#067647}.failed,.rejected,.blocked{color:#b42318}.pending,.warning{color:#b54708}.run-layout{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:14px}.asset-panel video,.asset-panel img{width:100%;max-height:240px;object-fit:contain;background:#111}.asset-panel dl{display:grid;grid-template-columns:100px 1fr}.asset-panel dd{margin:0;word-break:break-all}.form-panel .el-checkbox-group{display:flex;flex-direction:column;margin:12px 0}.validation{color:#b42318}.history-panel article{padding:8px 0;border-bottom:1px solid #e1e6ef}.asset-panel .el-tag{margin:3px}@media(max-width:1100px){.gate-cards,.run-layout{grid-template-columns:1fr}}
 </style>
