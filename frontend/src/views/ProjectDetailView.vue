@@ -198,7 +198,7 @@ async function guarded(action: () => Promise<unknown>, pollAfter = false) {
       startPolling();
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "鎿嶄綔澶辫触");
+    ElMessage.error(error instanceof Error ? error.message : "操作失败");
   } finally {
     actionBusy.value = false;
   }
@@ -391,7 +391,7 @@ async function uploadTargetKeyframe(event: Event) {
         </el-button>
         <el-button native-type="button" @click="navigateTo(`/projects/${projectId}/visual-review`)">视觉连续性审核</el-button>
         <el-button native-type="button" :icon="Refresh" :loading="store.refreshing" @click="refreshProjectDetail">
-          鍒锋柊
+          刷新
         </el-button>
         <el-button
           native-type="button"
@@ -400,7 +400,7 @@ async function uploadTargetKeyframe(event: Event) {
           :loading="actionBusy"
           @click="guarded(() => store.createShot(projectId))"
         >
-          娣诲姞 Shot
+          添加镜头
         </el-button>
       </div>
     </section>
@@ -570,7 +570,7 @@ async function uploadTargetKeyframe(event: Event) {
 
         <div class="asset-panel">
           <div class="panel-title">
-            <h2>璧峰甯?Start Frame</h2>
+            <h2>起始帧</h2>
             <div class="button-row compact">
               <input ref="startFrameInput" class="hidden-input" type="file" accept="image/png,image/jpeg,image/webp" @change="uploadAndSetStartFrame" />
               <el-button native-type="button" size="small" :icon="Picture" @click="startFrameInput?.click()">
@@ -755,8 +755,8 @@ async function uploadTargetKeyframe(event: Event) {
 
         <div class="log-panel">
           <div class="panel-title">
-            <h2>浠诲姟鏃ュ織</h2>
-            <el-button native-type="button" :icon="CaretRight" text @click="refreshProjectDetail">鍚屾</el-button>
+            <h2>任务日志</h2>
+            <el-button native-type="button" :icon="CaretRight" text @click="refreshProjectDetail">同步</el-button>
           </div>
           <div class="task-list">
             <div v-for="{ task, request } in selectedTaskGroups" :key="task.id" class="task-row">

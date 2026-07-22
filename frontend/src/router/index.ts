@@ -12,6 +12,7 @@ import StoryboardEditorView from "@/views/StoryboardEditorView.vue";
 import TasksView from "@/views/TasksView.vue";
 import VisualContinuityReview from "@/views/VisualContinuityReview.vue";
 import VisualRegenerationView from "@/views/VisualRegenerationView.vue";
+import NotFoundView from "@/views/NotFoundView.vue";
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -29,5 +30,6 @@ export const router = createRouter({
     { path: "/projects/:projectId/storyboards/:storyboardId", name: "storyboard-editor", component: StoryboardEditorView },
     { path: "/projects/:projectId/shot/:shotId/spec", name: "shot-spec", component: ShotSpecView },
     { path: "/tasks", name: "tasks", component: TasksView },
+    { path: "/:pathMatch(.*)*", name: "not-found", component: NotFoundView },
   ],
 });

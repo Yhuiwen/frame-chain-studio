@@ -29,18 +29,18 @@ async function createProject() {
     <section class="toolbar">
       <div>
         <h1>Frame Chain Studio</h1>
-        <p>关键帧审核、短片段生成、尾帧继承的长视频分镜工作台。</p>
+        <p>从关键帧审核、镜头生成到尾帧衔接，集中管理长视频分镜工作流。</p>
       </div>
       <el-form class="create-form" :inline="true" @submit.prevent="createProject">
         <el-input v-model="form.name" placeholder="项目名称" />
-        <el-input v-model="form.description" placeholder="项目描述" />
-        <el-button native-type="button" type="primary" :icon="Plus" @click="createProject">创建</el-button>
+        <el-input v-model="form.description" placeholder="项目描述（可选）" />
+        <el-button native-type="button" type="primary" :icon="Plus" @click="createProject">创建项目</el-button>
       </el-form>
     </section>
 
     <el-table v-loading="store.loading" :data="store.projects" stripe class="project-table">
       <el-table-column prop="name" label="项目" min-width="220" />
-      <el-table-column prop="description" label="描述" min-width="320" />
+      <el-table-column prop="description" label="描述" min-width="320" show-overflow-tooltip />
       <el-table-column prop="updated_at" label="更新时间" width="220" />
       <el-table-column width="120" align="right">
         <template #default="{ row }">

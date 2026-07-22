@@ -1,8 +1,12 @@
-param([int]$TimeoutSeconds = 5)
+param(
+  [int]$TimeoutSeconds = 5,
+  [string]$RunRoot = ""
+)
 
 $ErrorActionPreference = "SilentlyContinue"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$PidFile = Join-Path $ProjectRoot ".run\dev-processes.json"
+if (-not $RunRoot) { $RunRoot = Join-Path $ProjectRoot ".run" }
+$PidFile = Join-Path ([System.IO.Path]::GetFullPath($RunRoot)) "dev-processes.json"
 
 function Get-ProcessTreeIds($RootPid) {
   $children = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $RootPid })

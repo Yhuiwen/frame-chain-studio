@@ -317,7 +317,12 @@ async function archiveProfile(profile: ProviderProfile) {
 .layout {
   display: grid;
   gap: 18px;
-  grid-template-columns: minmax(280px, 340px) 1fr;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+}
+
+.content {
+  min-width: 0;
+  overflow: hidden;
 }
 
 .sidebar {

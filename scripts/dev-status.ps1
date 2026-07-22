@@ -1,12 +1,15 @@
 param(
   [int]$BackendPort = 8000,
   [int]$FrontendPort = 5173,
-  [int]$FakeProviderPort = 8090
+  [int]$FakeProviderPort = 8090,
+  [string]$RunRoot = "",
+  [string]$DatabasePath = ""
 )
 
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $BackendRoot = Join-Path $ProjectRoot "backend"
-$PidFile = Join-Path $ProjectRoot ".run\dev-processes.json"
+if (-not $RunRoot) { $RunRoot = Join-Path $ProjectRoot ".run" }
+$PidFile = Join-Path ([System.IO.Path]::GetFullPath($RunRoot)) "dev-processes.json"
 
 function Http-Status($Url) {
   try {
@@ -63,8 +66,12 @@ try {
 
 Push-Location $BackendRoot
 try {
+  if ($DatabasePath) {
+    $env:FCS_DATABASE_URL = "sqlite:///" + ([System.IO.Path]::GetFullPath($DatabasePath) -replace "\\", "/")
+  }
   Write-Host "Alembic:"
   python -m alembic current
 } finally {
+  Remove-Item Env:FCS_DATABASE_URL -ErrorAction SilentlyContinue
   Pop-Location
 }

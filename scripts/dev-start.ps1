@@ -1,23 +1,36 @@
 param(
   [int]$FrontendPort = 5173,
   [int]$BackendPort = 8000,
-  [int]$FakeProviderPort = 8090
+  [int]$FakeProviderPort = 8090,
+  [string]$RunRoot = "",
+  [string]$DatabasePath = "",
+  [string]$StorageRoot = "",
+  [string]$LogRoot = "",
+  [string]$ProviderConfigFile = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $BackendRoot = Join-Path $ProjectRoot "backend"
 $FrontendRoot = Join-Path $ProjectRoot "frontend"
-$RunRoot = Join-Path $ProjectRoot ".run"
-$LogRoot = Join-Path $RunRoot "logs"
+$ProductionDatabase = [System.IO.Path]::GetFullPath((Join-Path $BackendRoot "data\frame_chain.db"))
+$ProductionStorage = [System.IO.Path]::GetFullPath((Join-Path $BackendRoot "data\storage"))
+if (-not $RunRoot) { $RunRoot = Join-Path $ProjectRoot ".run" }
+$RunRoot = [System.IO.Path]::GetFullPath($RunRoot)
+if (-not $LogRoot) { $LogRoot = Join-Path $RunRoot "logs" }
 $PidFile = Join-Path $RunRoot "dev-processes.json"
-$DatabaseUrl = "sqlite:///" + ((Join-Path $BackendRoot "data\frame_chain.db") -replace "\\", "/")
-$StorageDir = Join-Path $BackendRoot "data\storage"
-$ProviderConfig = Join-Path $BackendRoot "provider-config.dev.json"
+if (-not $DatabasePath) { $DatabasePath = $ProductionDatabase }
+if (-not $StorageRoot) { $StorageRoot = $ProductionStorage }
+if (-not $ProviderConfigFile) { $ProviderConfigFile = Join-Path $BackendRoot "provider-config.dev.json" }
+$DatabasePath = [System.IO.Path]::GetFullPath($DatabasePath)
+$StorageDir = [System.IO.Path]::GetFullPath($StorageRoot)
+$LogRoot = [System.IO.Path]::GetFullPath($LogRoot)
+$ProviderConfig = [System.IO.Path]::GetFullPath($ProviderConfigFile)
+$DatabaseUrl = "sqlite:///" + ($DatabasePath -replace "\\", "/")
 
 function Fail($Message) {
   Write-Error $Message
-  powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "dev-stop.ps1") | Out-Null
+  powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "dev-stop.ps1") -RunRoot $RunRoot | Out-Null
   exit 1
 }
 
@@ -103,7 +116,7 @@ if (Test-Path $PidFile) {
   }
 }
 
-New-Item -ItemType Directory -Force -Path $RunRoot, $LogRoot, $StorageDir | Out-Null
+New-Item -ItemType Directory -Force -Path $RunRoot, $LogRoot, $StorageDir, (Split-Path $DatabasePath), (Split-Path $ProviderConfig) | Out-Null
 Require-Command python
 Require-Command node
 Require-Command npm.cmd
@@ -123,6 +136,7 @@ Set-Content -Path $ProviderConfig -Value $providerJson -Encoding UTF8
 Push-Location $BackendRoot
 try {
   $env:FCS_DATABASE_URL = $DatabaseUrl
+  $env:TOAPIS_API_KEY = ""
   python -m alembic upgrade head
 } finally {
   Pop-Location
@@ -131,6 +145,7 @@ try {
 $commonEnv = @(
   "`$env:FCS_DATABASE_URL=$(Quote-Ps $DatabaseUrl)",
   "`$env:FCS_STORAGE_DIR=$(Quote-Ps $StorageDir)",
+  "`$env:FCS_LOG_DIR=$(Quote-Ps $LogRoot)",
   "`$env:FCS_FIXTURE_DIR=$(Quote-Ps (Join-Path $BackendRoot "tests\fixtures"))",
   "`$env:FCS_PROVIDER_CONFIG_FILE=$(Quote-Ps $ProviderConfig)",
   "`$env:FCS_ENV='development'",
@@ -139,7 +154,8 @@ $commonEnv = @(
   "`$env:FCS_DEFAULT_VIDEO_PROVIDER_ID='fake-http'",
   "`$env:FCS_BACKEND_PORT='$BackendPort'",
   "`$env:FCS_FRONTEND_PORT='$FrontendPort'",
-  "`$env:FCS_FAKE_PROVIDER_PORT='$FakeProviderPort'"
+  "`$env:FCS_FAKE_PROVIDER_PORT='$FakeProviderPort'",
+  "`$env:TOAPIS_API_KEY=''"
 ) -join "; "
 
 $processes = @()
