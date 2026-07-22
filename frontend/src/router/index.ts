@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 import ProjectDetailView from "@/views/ProjectDetailView.vue";
+import ProjectWorkspaceLayout from "@/components/ProjectWorkspaceLayout.vue";
 import ProjectLibraryView from "@/views/ProjectLibraryView.vue";
 import ProjectListView from "@/views/ProjectListView.vue";
 import ProjectUsageView from "@/views/ProjectUsageView.vue";
@@ -18,18 +19,78 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", name: "projects", component: ProjectListView },
-    { path: "/projects/:id", name: "project-detail", component: ProjectDetailView },
-    { path: "/projects/:projectId/library", name: "project-library", component: ProjectLibraryView },
-    { path: "/projects/:projectId/usage", name: "project-usage", component: ProjectUsageView },
     { path: "/visual-review", redirect: "/projects/22/visual-review" },
-    { path: "/projects/:projectId/visual-review", name: "visual-review", component: VisualContinuityReview },
-    { path: "/projects/:projectId/visual-regeneration", name: "visual-regeneration", component: VisualRegenerationView },
-    { path: "/settings/providers", name: "provider-settings", component: ProviderSettingsView },
-    { path: "/projects/:projectId/settings/providers", name: "project-provider-settings", component: ProviderSettingsView },
-    { path: "/projects/:projectId/scripts", name: "script-library", component: ScriptLibraryView },
-    { path: "/projects/:projectId/scripts/:scriptId", name: "script-editor", component: ScriptEditorView },
-    { path: "/projects/:projectId/storyboards/:storyboardId", name: "storyboard-editor", component: StoryboardEditorView },
-    { path: "/projects/:projectId/shot/:shotId/spec", name: "shot-spec", component: ShotSpecView },
+    {
+      path: "/settings/providers",
+      name: "provider-settings",
+      component: ProviderSettingsView,
+    },
+    {
+      path: "/projects/:projectId",
+      component: ProjectWorkspaceLayout,
+      children: [
+        {
+          path: "",
+          name: "project-workbench",
+          component: ProjectDetailView,
+          meta: { workspaceTitle: "项目工作台" },
+        },
+        {
+          path: "library",
+          name: "project-library",
+          component: ProjectLibraryView,
+          meta: { workspaceTitle: "连续性资料库" },
+        },
+        {
+          path: "usage",
+          name: "project-usage",
+          component: ProjectUsageView,
+          meta: { workspaceTitle: "用量与预算" },
+        },
+        {
+          path: "visual-review",
+          name: "project-visual-review",
+          component: VisualContinuityReview,
+          meta: { workspaceTitle: "视觉连续性审核" },
+        },
+        {
+          path: "visual-regeneration",
+          name: "visual-regeneration",
+          component: VisualRegenerationView,
+          meta: { workspaceTitle: "视觉再生成计划" },
+        },
+        {
+          path: "settings/providers",
+          name: "project-provider-settings",
+          component: ProviderSettingsView,
+          meta: { workspaceTitle: "服务商设置" },
+        },
+        {
+          path: "scripts",
+          name: "project-scripts",
+          component: ScriptLibraryView,
+          meta: { workspaceTitle: "脚本与分镜" },
+        },
+        {
+          path: "scripts/:scriptId",
+          name: "script-editor",
+          component: ScriptEditorView,
+          meta: { workspaceTitle: "脚本解析" },
+        },
+        {
+          path: "storyboards/:storyboardId",
+          name: "storyboard-editor",
+          component: StoryboardEditorView,
+          meta: { workspaceTitle: "分镜编辑" },
+        },
+        {
+          path: "shot/:shotId/spec",
+          name: "project-shot-spec",
+          component: ShotSpecView,
+          meta: { workspaceTitle: "镜头规范" },
+        },
+      ],
+    },
     { path: "/tasks", name: "tasks", component: TasksView },
     { path: "/:pathMatch(.*)*", name: "not-found", component: NotFoundView },
   ],

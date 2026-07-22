@@ -2,9 +2,14 @@
 import { Download, Refresh } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { computed, onMounted, ref } from "vue";
-import { RouterLink, useRoute } from "vue-router";
+import { useRoute } from "vue-router";
 
-import { api, type GenerationUsageRecord, type ProjectBudgetPolicy, type UsageSummary } from "@/api/client";
+import {
+  api,
+  type GenerationUsageRecord,
+  type ProjectBudgetPolicy,
+  type UsageSummary,
+} from "@/api/client";
 import { statusLabel } from "@/constants/uiText";
 
 const route = useRoute();
@@ -20,7 +25,8 @@ const budgetForm = ref({
   warning_limit: "",
   hard_limit: "",
   per_request_limit: "",
-  unknown_cost_policy: "ALLOW_WITH_WARNING" as ProjectBudgetPolicy["unknown_cost_policy"],
+  unknown_cost_policy:
+    "ALLOW_WITH_WARNING" as ProjectBudgetPolicy["unknown_cost_policy"],
 });
 
 onMounted(loadUsage);
@@ -45,7 +51,9 @@ async function loadUsage() {
       unknown_cost_policy: budgetResult.unknown_cost_policy,
     };
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "Failed to load usage");
+    ElMessage.error(
+      error instanceof Error ? error.message : "Failed to load usage",
+    );
   } finally {
     loading.value = false;
   }
@@ -66,7 +74,9 @@ async function saveBudget() {
     ElMessage.success("Budget policy saved");
     await loadUsage();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "Save budget failed");
+    ElMessage.error(
+      error instanceof Error ? error.message : "Save budget failed",
+    );
   } finally {
     saving.value = false;
   }
@@ -85,20 +95,26 @@ function statusTag(status: GenerationUsageRecord["status"]) {
 </script>
 
 <template>
-  <main class="usage-page" v-loading="loading">
-    <header class="page-header">
-      <div>
-        <h1>用量与预算</h1>
-        <RouterLink :to="`/projects/${projectId}`">返回项目</RouterLink>
-      </div>
-      <div class="actions">
-        <el-button :icon="Download" tag="a" :href="api.usageCsvUrl(projectId)">导出 CSV</el-button>
-        <el-button :icon="Refresh" :loading="loading" @click="loadUsage">刷新</el-button>
-      </div>
-    </header>
+  <main
+    class="usage-page workspace-page"
+    data-testid="workspace-page-usage"
+    v-loading="loading"
+  >
+    <Teleport key="usage-actions" to="#project-workspace-actions">
+      <el-button :icon="Download" tag="a" :href="api.usageCsvUrl(projectId)"
+        >导出 CSV</el-button
+      >
+      <el-button :icon="Refresh" :loading="loading" @click="loadUsage"
+        >刷新</el-button
+      >
+    </Teleport>
 
     <section class="summary-grid">
-      <div class="metric" v-for="item in summary?.currencies ?? []" :key="item.currency">
+      <div
+        class="metric"
+        v-for="item in summary?.currencies ?? []"
+        :key="item.currency"
+      >
         <span>{{ item.currency }}</span>
         <strong>{{ item.actual_total }}</strong>
         <small>预估 {{ item.estimated_total }}</small>
@@ -106,7 +122,10 @@ function statusTag(status: GenerationUsageRecord["status"]) {
       <div class="metric">
         <span>生成请求</span>
         <strong>{{ summary?.request_count ?? 0 }}</strong>
-        <small>{{ summary?.image_request_count ?? 0 }} image · {{ summary?.video_request_count ?? 0 }} video</small>
+        <small
+          >{{ summary?.image_request_count ?? 0 }} image ·
+          {{ summary?.video_request_count ?? 0 }} video</small
+        >
       </div>
       <div class="metric">
         <span>费用未知</span>
@@ -118,14 +137,26 @@ function statusTag(status: GenerationUsageRecord["status"]) {
     <section class="budget-panel">
       <header class="panel-header">
         <h2>预算策略</h2>
-        <el-button type="primary" :loading="saving" @click="saveBudget">保存预算</el-button>
+        <el-button type="primary" :loading="saving" @click="saveBudget"
+          >保存预算</el-button
+        >
       </header>
       <el-form label-position="top" class="budget-form">
-        <el-form-item label="启用"><el-switch v-model="budgetForm.enabled" /></el-form-item>
-        <el-form-item label="币种"><el-input v-model="budgetForm.currency" /></el-form-item>
-        <el-form-item label="警告额度"><el-input v-model="budgetForm.warning_limit" /></el-form-item>
-        <el-form-item label="硬性额度"><el-input v-model="budgetForm.hard_limit" /></el-form-item>
-        <el-form-item label="单次请求额度"><el-input v-model="budgetForm.per_request_limit" /></el-form-item>
+        <el-form-item label="启用"
+          ><el-switch v-model="budgetForm.enabled"
+        /></el-form-item>
+        <el-form-item label="币种"
+          ><el-input v-model="budgetForm.currency"
+        /></el-form-item>
+        <el-form-item label="警告额度"
+          ><el-input v-model="budgetForm.warning_limit"
+        /></el-form-item>
+        <el-form-item label="硬性额度"
+          ><el-input v-model="budgetForm.hard_limit"
+        /></el-form-item>
+        <el-form-item label="单次请求额度"
+          ><el-input v-model="budgetForm.per_request_limit"
+        /></el-form-item>
         <el-form-item label="未知费用策略">
           <el-select v-model="budgetForm.unknown_cost_policy">
             <el-option label="允许并警告" value="ALLOW_WITH_WARNING" />
@@ -138,22 +169,32 @@ function statusTag(status: GenerationUsageRecord["status"]) {
     <el-table :data="records" stripe>
       <el-table-column prop="created_at" label="创建时间" min-width="180" />
       <el-table-column label="请求" width="110">
-        <template #default="{ row }">#{{ row.generation_request_id ?? "-" }}</template>
+        <template #default="{ row }"
+          >#{{ row.generation_request_id ?? "-" }}</template
+        >
       </el-table-column>
       <el-table-column label="任务" width="100">
-        <template #default="{ row }">#{{ row.generation_task_id ?? "-" }}</template>
+        <template #default="{ row }"
+          >#{{ row.generation_task_id ?? "-" }}</template
+        >
       </el-table-column>
       <el-table-column prop="record_type" label="类型" min-width="150" />
       <el-table-column label="状态" width="130">
         <template #default="{ row }">
-          <el-tag :type="statusTag(row.status)" :title="row.status">{{ statusLabel(row.status) }}</el-tag>
+          <el-tag :type="statusTag(row.status)" :title="row.status">{{
+            statusLabel(row.status)
+          }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="预估费用" min-width="150">
-        <template #default="{ row }">{{ displayCost(row.estimated_cost, row.currency) }}</template>
+        <template #default="{ row }">{{
+          displayCost(row.estimated_cost, row.currency)
+        }}</template>
       </el-table-column>
       <el-table-column label="实际费用" min-width="150">
-        <template #default="{ row }">{{ displayCost(row.actual_cost, row.currency) }}</template>
+        <template #default="{ row }">{{
+          displayCost(row.actual_cost, row.currency)
+        }}</template>
       </el-table-column>
       <el-table-column prop="cost_source" label="费用来源" min-width="150" />
     </el-table>
@@ -162,7 +203,7 @@ function statusTag(status: GenerationUsageRecord["status"]) {
 
 <style scoped>
 .usage-page {
-  padding: 24px;
+  overflow-x: hidden;
 }
 
 .page-header,

@@ -2,7 +2,7 @@
 import { Plus, Refresh } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { computed, onMounted, reactive, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 
 import {
   api,
@@ -15,7 +15,6 @@ import {
 } from "@/api/client";
 
 const route = useRoute();
-const router = useRouter();
 const projectId = computed(() => Number(route.params.projectId));
 const shotId = computed(() => Number(route.params.shotId));
 const loading = ref(false);
@@ -56,13 +55,14 @@ onMounted(() => {
 async function loadAll() {
   loading.value = true;
   try {
-    const [nextSpec, nextHistory, nextCharacters, nextLocations, nextStyles] = await Promise.all([
-      api.getShotSpec(shotId.value),
-      api.listShotSpecHistory(shotId.value),
-      api.listCharacters(projectId.value),
-      api.listLocations(projectId.value),
-      api.listStyleProfiles(projectId.value),
-    ]);
+    const [nextSpec, nextHistory, nextCharacters, nextLocations, nextStyles] =
+      await Promise.all([
+        api.getShotSpec(shotId.value),
+        api.listShotSpecHistory(shotId.value),
+        api.listCharacters(projectId.value),
+        api.listLocations(projectId.value),
+        api.listStyleProfiles(projectId.value),
+      ]);
     spec.value = nextSpec;
     history.value = nextHistory;
     characters.value = nextCharacters;
@@ -86,18 +86,30 @@ async function loadAll() {
       props: [...nextSpec.props],
       provider_overrides: { ...nextSpec.provider_overrides },
     });
-    characterRows.value = nextSpec.characters.map((item) => ({ ...item, props: [...item.props], reference_asset_ids: [...item.reference_asset_ids] }));
+    characterRows.value = nextSpec.characters.map((item) => ({
+      ...item,
+      props: [...item.props],
+      reference_asset_ids: [...item.reference_asset_ids],
+    }));
     propsText.value = nextSpec.props.join("\n");
     overridesText.value = JSON.stringify(nextSpec.provider_overrides, null, 2);
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "Shot spec load failed");
+    ElMessage.error(
+      error instanceof Error ? error.message : "Shot spec load failed",
+    );
   } finally {
     loading.value = false;
   }
 }
 
 function addCharacter() {
-  if (!selectedCharacterId.value || characterRows.value.some((item) => item.character_id === selectedCharacterId.value)) return;
+  if (
+    !selectedCharacterId.value ||
+    characterRows.value.some(
+      (item) => item.character_id === selectedCharacterId.value,
+    )
+  )
+    return;
   characterRows.value.push({
     character_id: selectedCharacterId.value,
     role: "SECONDARY",
@@ -122,7 +134,10 @@ function removeCharacter(index: number) {
 }
 
 function characterName(characterId: number) {
-  return characters.value.find((item) => item.id === characterId)?.name ?? `角色 #${characterId}`;
+  return (
+    characters.value.find((item) => item.id === characterId)?.name ??
+    `角色 #${characterId}`
+  );
 }
 
 function parseList(value: string) {
@@ -135,7 +150,9 @@ function parseList(value: string) {
 function parseOverrides() {
   try {
     const parsed = JSON.parse(overridesText.value || "{}") as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
   } catch {
     throw new Error("Provider overrides must be valid JSON object");
   }
@@ -165,7 +182,11 @@ async function saveRevision() {
       props: parseList(propsText.value),
       provider_overrides: parseOverrides(),
     };
-    await api.reviseShotSpec(shotId.value, { reason: reason.value, changes, characters: cleanCharacters() });
+    await api.reviseShotSpec(shotId.value, {
+      reason: reason.value,
+      changes,
+      characters: cleanCharacters(),
+    });
     await loadAll();
     ElMessage.success("ShotSpec revision saved");
   } catch (error) {
@@ -178,7 +199,9 @@ async function saveRevision() {
 async function syncSpec() {
   busy.value = true;
   try {
-    await api.syncShotSpec(shotId.value, { reason: "sync structured defaults" });
+    await api.syncShotSpec(shotId.value, {
+      reason: "sync structured defaults",
+    });
     await loadAll();
     ElMessage.success("ShotSpec synced");
   } catch (error) {
@@ -190,39 +213,76 @@ async function syncSpec() {
 </script>
 
 <template>
-  <main class="page" v-loading="loading">
+  <main
+    class="page workspace-page"
+    data-testid="workspace-page-shot-spec"
+    v-loading="loading"
+  >
     <section class="toolbar">
       <div>
-        <h1>镜头规范</h1>
-        <p v-if="spec">第 {{ spec.revision }} 版 · {{ spec.compiler_version }}</p>
+        <p v-if="spec">
+          第 {{ spec.revision }} 版 · {{ spec.compiler_version }}
+        </p>
       </div>
-      <div class="actions">
-        <el-button native-type="button" @click="router.push(`/projects/${projectId}`)">返回项目</el-button>
-        <el-button native-type="button" :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
-        <el-button native-type="button" :loading="busy" @click="syncSpec">同步默认值</el-button>
-        <el-button native-type="button" type="primary" :loading="busy" @click="saveRevision">保存新版本</el-button>
-      </div>
+      <Teleport key="shot-spec-actions" to="#project-workspace-actions">
+        <el-button
+          native-type="button"
+          :icon="Refresh"
+          :loading="loading"
+          @click="loadAll"
+          >刷新</el-button
+        >
+        <el-button native-type="button" :loading="busy" @click="syncSpec"
+          >同步默认值</el-button
+        >
+        <el-button
+          native-type="button"
+          type="primary"
+          :loading="busy"
+          @click="saveRevision"
+          >保存新版本</el-button
+        >
+      </Teleport>
     </section>
-
     <section v-if="spec" class="spec-layout">
       <div class="editor-panel">
         <div class="field-row">
           <label>
             场景
             <el-select v-model="form.location_id" clearable>
-              <el-option v-for="item in locations" :key="item.id" :label="item.name" :value="item.id" />
+              <el-option
+                v-for="item in locations"
+                :key="item.id"
+                :label="item.name"
+                :value="item.id"
+              />
             </el-select>
           </label>
           <label>
             风格
             <el-select v-model="form.style_profile_id" clearable>
-              <el-option v-for="item in styles" :key="item.id" :label="item.name" :value="item.id" />
+              <el-option
+                v-for="item in styles"
+                :key="item.id"
+                :label="item.name"
+                :value="item.id"
+              />
             </el-select>
           </label>
         </div>
         <el-input v-model="reason" placeholder="版本修改原因" />
-        <el-input v-model="form.summary" type="textarea" :rows="2" placeholder="镜头摘要" />
-        <el-input v-model="form.action" type="textarea" :rows="2" placeholder="动作" />
+        <el-input
+          v-model="form.summary"
+          type="textarea"
+          :rows="2"
+          placeholder="镜头摘要"
+        />
+        <el-input
+          v-model="form.action"
+          type="textarea"
+          :rows="2"
+          placeholder="动作"
+        />
         <el-input v-model="form.emotion" placeholder="情绪" />
         <div class="field-row">
           <el-input v-model="form.composition" placeholder="构图" />
@@ -235,23 +295,58 @@ async function syncSpec() {
           <el-input v-model="form.time_of_day" placeholder="时间段" />
           <el-input v-model="form.weather" placeholder="天气" />
         </div>
-        <el-input v-model="form.dialogue" type="textarea" :rows="2" placeholder="对白" />
-        <el-input v-model="form.continuity_notes" type="textarea" :rows="3" placeholder="连续性说明" />
-        <el-input v-model="propsText" type="textarea" :rows="3" placeholder="道具，每行一个" />
-        <el-input v-model="overridesText" type="textarea" :rows="4" placeholder="服务商覆盖参数 JSON" />
+        <el-input
+          v-model="form.dialogue"
+          type="textarea"
+          :rows="2"
+          placeholder="对白"
+        />
+        <el-input
+          v-model="form.continuity_notes"
+          type="textarea"
+          :rows="3"
+          placeholder="连续性说明"
+        />
+        <el-input
+          v-model="propsText"
+          type="textarea"
+          :rows="3"
+          placeholder="道具，每行一个"
+        />
+        <el-input
+          v-model="overridesText"
+          type="textarea"
+          :rows="4"
+          placeholder="服务商覆盖参数 JSON"
+        />
       </div>
 
       <div class="characters-panel">
         <div class="panel-title">
           <h2>角色</h2>
           <div class="add-row">
-            <el-select v-model="selectedCharacterId" placeholder="选择角色" clearable>
-              <el-option v-for="item in characters" :key="item.id" :label="item.name" :value="item.id" />
+            <el-select
+              v-model="selectedCharacterId"
+              placeholder="选择角色"
+              clearable
+            >
+              <el-option
+                v-for="item in characters"
+                :key="item.id"
+                :label="item.name"
+                :value="item.id"
+              />
             </el-select>
-            <el-button native-type="button" :icon="Plus" @click="addCharacter">添加</el-button>
+            <el-button native-type="button" :icon="Plus" @click="addCharacter"
+              >添加</el-button
+            >
           </div>
         </div>
-        <article v-for="(item, index) in characterRows" :key="item.character_id" class="character-card">
+        <article
+          v-for="(item, index) in characterRows"
+          :key="item.character_id"
+          class="character-card"
+        >
           <div class="card-title">
             <strong>{{ characterName(item.character_id) }}</strong>
             <el-select v-model="item.role">
@@ -260,20 +355,38 @@ async function syncSpec() {
               <el-option label="背景角色" value="BACKGROUND" />
             </el-select>
           </div>
-          <el-input v-model="item.appearance_override" placeholder="Appearance override" />
-          <el-input v-model="item.clothing_override" placeholder="Clothing override" />
+          <el-input
+            v-model="item.appearance_override"
+            placeholder="Appearance override"
+          />
+          <el-input
+            v-model="item.clothing_override"
+            placeholder="Clothing override"
+          />
           <el-input v-model="item.expression" placeholder="Expression" />
           <el-input v-model="item.action" placeholder="Action" />
           <el-input v-model="item.position" placeholder="Position" />
-          <el-input v-model="item.continuity_notes" type="textarea" :rows="2" placeholder="Continuity notes" />
-          <el-button native-type="button" type="danger" @click="removeCharacter(index)">移除</el-button>
+          <el-input
+            v-model="item.continuity_notes"
+            type="textarea"
+            :rows="2"
+            placeholder="Continuity notes"
+          />
+          <el-button
+            native-type="button"
+            type="danger"
+            @click="removeCharacter(index)"
+            >移除</el-button
+          >
         </article>
       </div>
 
       <div class="preview-panel">
         <div class="panel-title">
           <h2>编译后的提示词</h2>
-          <el-tag size="small">{{ spec.reference_asset_ids.length }} 个参考素材</el-tag>
+          <el-tag size="small"
+            >{{ spec.reference_asset_ids.length }} 个参考素材</el-tag
+          >
         </div>
         <pre>{{ spec.compiled_prompt }}</pre>
         <h3>负面提示词</h3>
@@ -285,12 +398,20 @@ async function syncSpec() {
       <div class="history-panel">
         <h2>版本历史</h2>
         <el-timeline>
-          <el-timeline-item v-for="item in history" :key="item.id" :timestamp="item.created_at">
+          <el-timeline-item
+            v-for="item in history"
+            :key="item.id"
+            :timestamp="item.created_at"
+          >
             第 {{ item.revision }} 版 · {{ item.compiler_version }}
           </el-timeline-item>
         </el-timeline>
       </div>
     </section>
+    <el-empty
+      v-else
+      description="该镜头尚无规范，使用“同步默认值”创建第一版。"
+    />
   </main>
 </template>
 
