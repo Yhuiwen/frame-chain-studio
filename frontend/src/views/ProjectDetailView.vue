@@ -14,7 +14,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { api, type GenerationStartOptions, type GenerationTask, type ProviderModelProfile, type ProviderProfile, type QualityCheckResult, type Shot, type ShotAssetSummary } from "@/api/client";
-import ProjectWorkspaceNav from "@/components/ProjectWorkspaceNav.vue";
+import ProjectWorkspaceLayout from "@/components/ProjectWorkspaceLayout.vue";
 import { useProjectPolling } from "@/composables/useProjectPolling";
 import { useStudioStore } from "@/stores/studio";
 import { formatDateTime, statusLabel } from "@/constants/uiText";
@@ -31,6 +31,7 @@ const providerProfiles = ref<ProviderProfile[]>([]);
 const providerModels = ref<Record<string, ProviderModelProfile[]>>({});
 const renderBusy = ref(false);
 const activeMediaStep = ref("start");
+const qualityDetailsOpen = ref(true);
 const expandedLogIds = ref<Set<number>>(new Set());
 const startFrameInput = ref<HTMLInputElement | null>(null);
 const targetKeyframeInput = ref<HTMLInputElement | null>(null);
@@ -413,22 +414,18 @@ async function uploadTargetKeyframe(event: Event) {
 </script>
 
 <template>
-  <main class="workspace" v-loading="store.loading">
-    <section class="workspace-header">
+  <ProjectWorkspaceLayout :project-id="projectId" :project-name="store.current?.name || '项目工作台'" :project-status="completedShotCount === totalShotCount && totalShotCount ? '已完成' : '制作中'" page-title="项目工作台" :shot-id="selected?.id">
+    <template #actions>
+      <el-button native-type="button" :icon="Refresh" :loading="store.refreshing" @click="refreshProjectDetail">刷新</el-button>
+      <el-button @click="archiveCurrentProject">移除项目</el-button>
+    </template>
+    <main class="workspace" v-loading="store.loading">
+    <section class="workspace-intro">
       <div>
-        <el-tooltip :content="store.current?.name" placement="bottom"><h1>{{ store.current?.name }}</h1></el-tooltip>
         <p>{{ store.current?.description || "包含审核、工作进程、服务商与最终渲染的连续性生成工作流。" }}</p>
         <div class="project-meta"><el-tag type="primary">{{ completedShotCount === totalShotCount && totalShotCount ? "已完成" : "制作中" }}</el-tag><span>{{ totalShotCount }} 个镜头</span><span>更新于 {{ formatDateTime(store.current?.updated_at) }}</span></div>
       </div>
-      <div class="header-actions">
-        <el-button native-type="button" :icon="Refresh" :loading="store.refreshing" @click="refreshProjectDetail">
-          刷新
-        </el-button>
-        <el-button @click="archiveCurrentProject">移除项目</el-button><el-button @click="navigateTo('/')">返回项目列表</el-button>
-      </div>
     </section>
-
-    <ProjectWorkspaceNav :project-id="projectId" :shot-id="selected?.id" />
 
     <section class="ops-panel">
       <div class="settings-panel">
@@ -587,6 +584,7 @@ async function uploadTargetKeyframe(event: Event) {
           </el-form>
         </div>
 
+        <section class="shot-media-workspace">
         <nav class="media-steps" aria-label="镜头素材流程"><button :class="{active:activeMediaStep==='start'}" @click="activeMediaStep='start'">1 起始帧</button><button :class="{active:activeMediaStep==='keyframe'}" @click="activeMediaStep='keyframe'">2 目标关键帧</button><button :class="{active:activeMediaStep==='video'}" @click="activeMediaStep='video'">3 视频</button><button :class="{active:activeMediaStep==='tail'}" @click="activeMediaStep='tail'">4 已锁定尾帧</button></nav>
 
         <div v-show="activeMediaStep === 'start'" class="asset-panel media-detail">
@@ -610,7 +608,7 @@ async function uploadTargetKeyframe(event: Event) {
               v-if="selected.start_frame"
               :src="selected.start_frame.url"
               :preview-src-list="[selected.start_frame.url]"
-              fit="cover"
+              fit="contain"
             >
               <template #error>
                 <div class="asset-error">图片加载失败</div>
@@ -698,7 +696,7 @@ async function uploadTargetKeyframe(event: Event) {
           </div>
           <div class="asset-strip">
             <video v-for="asset in videos" :key="asset.id" controls :src="asset.url" />
-            <el-empty v-if="!videos.length" description="暂无视频" />
+            <div v-if="!videos.length" class="compact-empty"><strong>暂无视频</strong><span>生成完成后可在此预览和审核。</span></div>
           </div>
           <div class="quality-panel">
             <div class="quality-header">
@@ -715,8 +713,9 @@ async function uploadTargetKeyframe(event: Event) {
               >
                 重新检查
               </el-button>
+              <el-button v-if="selectedQualityChecks.length" native-type="button" size="small" text @click="qualityDetailsOpen = !qualityDetailsOpen">{{ qualityDetailsOpen ? '收起详情' : '查看详情' }}</el-button>
             </div>
-            <div v-if="selectedQualityChecks.length" class="quality-list">
+            <div v-if="qualityDetailsOpen && selectedQualityChecks.length" class="quality-list">
               <div v-for="item in selectedQualityChecks" :key="item.id" class="quality-row">
                 <el-tag size="small" :type="qualityTagType(item.severity)" :title="item.severity">{{ statusLabel(item.severity) }}</el-tag>
                 <div>
@@ -726,7 +725,7 @@ async function uploadTargetKeyframe(event: Event) {
                 </div>
               </div>
             </div>
-            <el-empty v-else description="暂无当前素材的质量检查" />
+            <p v-else class="quality-hint">{{ videos.length ? '质量检查详情已收起。' : '质量检查将在视频生成完成后运行。' }}</p>
           </div>
           <div class="button-row">
             <el-button
@@ -758,7 +757,7 @@ async function uploadTargetKeyframe(event: Event) {
               v-if="selected.locked_tail_frame"
               :src="selected.locked_tail_frame.url"
               :preview-src-list="[selected.locked_tail_frame.url]"
-              fit="cover"
+              fit="contain"
             >
               <template #error>
                 <div class="asset-error">尾帧加载失败</div>
@@ -773,6 +772,7 @@ async function uploadTargetKeyframe(event: Event) {
             </dl>
           </div>
         </div>
+        </section>
 
         <div class="log-panel">
           <div class="panel-title">
@@ -886,16 +886,13 @@ async function uploadTargetKeyframe(event: Event) {
         </div>
       </section>
     </section>
-  </main>
+    </main>
+  </ProjectWorkspaceLayout>
 </template>
 
 <style scoped>
-.workspace { padding-left: 250px; position: relative; }
-.project-nav { position: fixed; z-index: 10; left: max(18px, calc((100vw - 1600px) / 2 + 18px)); top: 28px; width: 205px; max-height: calc(100vh - 56px); overflow:auto; padding:14px; background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow); display:grid; gap:6px; }
-.project-nav strong { padding:8px 10px; }
-.project-nav button { border:0; background:transparent; color:var(--muted); border-radius:8px; padding:10px; text-align:left; cursor:pointer; }
-.project-nav button:hover,.project-nav button.active { color:var(--primary); background:#edf3ff; font-weight:700; }
-.workspace-header h1 { max-width:680px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.workspace { width: 100%; min-height: 0; padding: 20px 24px 48px; position: relative; overflow: visible; }
+.workspace-intro { margin-bottom: 18px; }
 .project-meta,.progress-summary,.shot-flags { display:flex; flex-wrap:wrap; align-items:center; gap:10px; color:var(--muted); font-size:13px; margin-top:10px; }
 .progress-summary { display:grid; align-items:stretch; }
 .settings-summary { margin-top:14px; padding:10px; background:var(--surface-soft); border-radius:8px; }
@@ -903,10 +900,14 @@ async function uploadTargetKeyframe(event: Event) {
 .timeline-header { position:sticky; top:-12px; z-index:2; background:var(--surface); display:flex; justify-content:space-between; align-items:center; padding:8px 0 12px; }
 .timeline-item { grid-template-columns:34px minmax(0,1fr) auto; }
 .shot-flags { grid-column:2 / -1; margin:0; gap:6px; font-size:11px; }
-.media-steps { grid-column:2; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:12px; }
+.shot-media-workspace { grid-column: 2; min-width: 0; height: 600px; min-height: 600px; max-height: 600px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.media-steps { display:grid; grid-template-columns:repeat(4,minmax(126px,1fr)); gap:8px; padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow-x:auto; }
 .media-steps button { border:1px solid var(--border); border-radius:8px; padding:10px 6px; background:var(--surface-soft); cursor:pointer; }
 .media-steps button.active { border-color:var(--primary); color:var(--primary); background:#edf3ff; font-weight:700; }
-.media-detail { grid-column:2; }
+.media-detail { min-width: 0; min-height: 0; height: 100%; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.asset-strip, .asset-card { min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
+.asset-strip video, .asset-strip :deep(.el-image), .asset-card :deep(.el-image) { width: 100%; height: 100%; max-height: 100%; object-fit: contain; }
+.compact-empty { height: 100%; display: grid; place-content: center; gap: 6px; text-align: center; color: var(--muted); }
 .editor-panel { grid-row:1 / span 2; }
 .render-panel { border-left:4px solid var(--primary) !important; }
 .task-list {
@@ -1038,6 +1039,9 @@ async function uploadTargetKeyframe(event: Event) {
   display: grid;
   gap: 10px;
   padding-top: 12px;
+  min-height: 0;
+  max-height: 132px;
+  overflow: auto;
 }
 
 .quality-header {
@@ -1051,6 +1055,7 @@ async function uploadTargetKeyframe(event: Event) {
   display: grid;
   gap: 8px;
 }
+.quality-hint { margin: 0; color: var(--el-text-color-secondary); font-size: 12px; }
 
 .quality-row {
   align-items: flex-start;
@@ -1081,16 +1086,12 @@ async function uploadTargetKeyframe(event: Event) {
 }
 
 @media (max-width: 900px) {
-  .workspace { padding-left:14px; }
-  .project-nav { position:static; width:auto; max-height:none; display:flex; overflow-x:auto; margin-bottom:16px; }
-  .project-nav strong { display:none; }
-  .project-nav button { flex:0 0 auto; }
+  .workspace { padding: 14px; }
   .ops-panel,
   .settings-grid {
     grid-template-columns: 1fr;
   }
-  .media-steps { grid-column:1; grid-template-columns:repeat(2,1fr); }
-  .media-detail { grid-column:1; }
+  .shot-media-workspace { grid-column: 1; height: 560px; min-height: 560px; max-height: 560px; }
   .editor-panel { grid-row:auto; }
   .timeline { position:static; max-height:300px; }
 }

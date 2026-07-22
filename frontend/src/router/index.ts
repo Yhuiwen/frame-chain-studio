@@ -25,6 +25,7 @@ export const router = createRouter({
     { path: "/projects/:projectId/visual-review", name: "visual-review", component: VisualContinuityReview },
     { path: "/projects/:projectId/visual-regeneration", name: "visual-regeneration", component: VisualRegenerationView },
     { path: "/settings/providers", name: "provider-settings", component: ProviderSettingsView },
+    { path: "/projects/:projectId/settings/providers", name: "project-provider-settings", component: ProviderSettingsView },
     { path: "/projects/:projectId/scripts", name: "script-library", component: ScriptLibraryView },
     { path: "/projects/:projectId/scripts/:scriptId", name: "script-editor", component: ScriptEditorView },
     { path: "/projects/:projectId/storyboards/:storyboardId", name: "storyboard-editor", component: StoryboardEditorView },
