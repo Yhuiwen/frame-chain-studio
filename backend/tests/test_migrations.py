@@ -198,7 +198,7 @@ def test_upgrade_phase_one_database_preserves_existing_rows_and_adds_defaults(
         assert connection.execute(sa.text("SELECT COUNT(*) FROM tasklog")).scalar_one() == 1
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260721_0026"
+            == "20260722_0027"
         )
         assert (
             connection.execute(
@@ -746,7 +746,7 @@ def test_toapis_verification_orchestrator_migration_round_trip(tmp_path: Path) -
     with engine.connect() as connection:
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "20260721_0026"
+            == "20260722_0027"
         )
         assert connection.execute(sa.text("PRAGMA foreign_key_check")).all() == []
     command.downgrade(config, "20260720_0014")
@@ -944,6 +944,30 @@ def test_visual_experiment_authorization_migration_from_0024(tmp_path: Path) -> 
     assert {"source_asset_id", "baseline_hash", "human_review_status", "superseded_by_id"}.issubset(set(columns(db_path, "projectvisualbaseline")))
     assert {"candidate_type", "experiment_plan_hash", "maximum_image_submits", "authorization_status"}.issubset(set(columns(db_path, "visualexperimentauthorizationpackage")))
     assert "review_source" in columns(db_path, "projectvisualbaseline")
+
+
+def test_provider_visual_review_migration_round_trip_from_0026(tmp_path: Path) -> None:
+    db_path = tmp_path / "provider-visual-review.db"
+    config = alembic_config(db_path)
+    command.upgrade(config, "20260721_0026")
+    assert "providervisualreview" not in table_names(db_path)
+
+    command.upgrade(config, "20260722_0027")
+    assert {
+        "provider_verification_run_id",
+        "asset_id",
+        "asset_sha256",
+        "decision",
+        "reason_codes_json",
+        "reviewer_source",
+        "idempotency_key",
+        "request_hash",
+    } <= columns(db_path, "providervisualreview")
+
+    command.downgrade(config, "20260721_0026")
+    assert "providervisualreview" not in table_names(db_path)
+    command.upgrade(config, "head")
+    assert "providervisualreview" in table_names(db_path)
 
 
 def test_asset_revision_identity_migration_rejects_unsafe_downgrade(tmp_path: Path) -> None:

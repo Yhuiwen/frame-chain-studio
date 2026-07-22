@@ -712,6 +712,47 @@ export interface ProviderVerificationRun {
   created_at: string;
 }
 
+export interface ProviderVisualReview {
+  id: number;
+  project_id: number;
+  provider_verification_run_id: number;
+  asset_id: number;
+  asset_sha256: string;
+  asset_url: string;
+  review_scope: "PROVIDER_VERIFICATION";
+  decision: "APPROVED" | "REJECTED";
+  reason_codes: string[];
+  notes: string;
+  reviewer_source: "HUMAN_OPERATOR" | "SYSTEM_MIGRATION" | "TEST_FIXTURE";
+  reviewer_reference: string | null;
+  reviewed_at: string;
+  created_at: string;
+  idempotency_key: string | null;
+}
+
+export interface ProviderRunReadiness extends ProviderVerificationRun {
+  run_id: number;
+  technical_status: "PENDING" | "RUNNING" | "PASSED" | "FAILED" | "BLOCKED" | "CANCELLED";
+  lineage_status: "PENDING" | "PASSED" | "FAILED" | "BLOCKED";
+  automated_visual_status: "NOT_RUN" | "PENDING" | "PASSED" | "WARNING" | "FAILED";
+  human_visual_status: HumanVisualStatus;
+  production_status: "BLOCKED" | "READY";
+  production_ready: boolean;
+  production_blockers: string[];
+  selected_review_asset: {
+    id: number;
+    type: Asset["type"];
+    sha256: string;
+    created_at: string;
+    url: string;
+  } | null;
+  current_visual_review: ProviderVisualReview | null;
+  legacy_review_evidence: boolean;
+  legacy_review_report_ids: number[];
+  legacy_reason_codes: string[];
+  workflow_approval_only: boolean;
+}
+
 export interface GenerationUsageRecord {
   id: number;
   project_id: number;
@@ -848,6 +889,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listProjectProviderVerificationRuns: (projectId: number) =>
+    request<ProviderRunReadiness[]>(`/api/projects/${projectId}/provider-verification-runs`),
+  getProviderVerificationRun: (runId: number) =>
+    request<ProviderRunReadiness>(`/api/provider-verification-runs/${runId}`),
+  getProviderVisualReviews: (runId: number) =>
+    request<{ current: ProviderVisualReview | null; history: ProviderVisualReview[] }>(
+      `/api/provider-verification-runs/${runId}/visual-reviews`,
+    ),
+  createProviderVisualReview: (
+    runId: number,
+    body: { asset_id: number; decision: "APPROVED" | "REJECTED"; reason_codes: string[]; notes: string },
+    idempotencyKey: string,
+  ) => request<ProviderVisualReview>(`/api/provider-verification-runs/${runId}/visual-reviews`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(body),
+  }),
   planVisualExperiment: (body: {project_id:number;source_run_id:number;candidate:string;selected_baseline_asset_id?:number|null;save_draft?:boolean}) =>
     request<VisualExperimentPlanOnly>("/api/visual-experiments/plan-only", {method:"POST",body:JSON.stringify(body)}),
   planVisualRegeneration: (body: { project_id: number; source_run_id: number; strategy: string; maximum_billing_units: string; save_draft?: boolean }) =>

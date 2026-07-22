@@ -1240,6 +1240,21 @@ class ProductionGateStatus(str, Enum):
     ALLOWED = "ALLOWED"
 
 
+class VisualReviewDecision(str, Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class VisualReviewScope(str, Enum):
+    PROVIDER_VERIFICATION = "PROVIDER_VERIFICATION"
+
+
+class VisualReviewerSource(str, Enum):
+    HUMAN_OPERATOR = "HUMAN_OPERATOR"
+    SYSTEM_MIGRATION = "SYSTEM_MIGRATION"
+    TEST_FIXTURE = "TEST_FIXTURE"
+
+
 class VisualContinuityReport(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint(
@@ -1294,9 +1309,47 @@ class VisualContinuityReviewEvent(SQLModel, table=True):
     reviewed_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class ProviderVisualReview(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_verification_run_id",
+            "idempotency_key",
+            name="uq_providervisualreview_run_idempotency",
+        ),
+        Index(
+            "ix_providervisualreview_run_asset_reviewed",
+            "provider_verification_run_id",
+            "asset_id",
+            "reviewed_at",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    provider_verification_run_id: int = Field(foreign_key="providerverificationrun.id", index=True)
+    asset_id: int = Field(foreign_key="asset.id", index=True)
+    asset_sha256: str = Field(max_length=64, index=True)
+    review_scope: VisualReviewScope = Field(default=VisualReviewScope.PROVIDER_VERIFICATION)
+    decision: VisualReviewDecision = Field(index=True)
+    reason_codes_json: str = Field(default="[]")
+    notes: str = Field(default="", max_length=2000)
+    reviewer_source: VisualReviewerSource = Field(default=VisualReviewerSource.HUMAN_OPERATOR)
+    reviewer_reference: str | None = Field(default=None, max_length=160)
+    reviewed_at: datetime = Field(default_factory=utcnow, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    idempotency_key: str | None = Field(default=None, max_length=160)
+    request_hash: str = Field(max_length=64)
+
+
 class VisualRegenerationPlan(SQLModel, table=True):
     __table_args__ = (
-        UniqueConstraint("source_run_id", "plan_version", "config_hash", "strategy", name="uq_visualregen_source_version_config_strategy"),
+        UniqueConstraint(
+            "source_run_id",
+            "plan_version",
+            "config_hash",
+            "strategy",
+            name="uq_visualregen_source_version_config_strategy",
+        ),
     )
     id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)

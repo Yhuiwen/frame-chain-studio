@@ -5,6 +5,7 @@ import { useRoute } from "vue-router";
 
 import { ApiError, api, type ProjectDetail, type VisualComparisonPair, type VisualContinuityReport, type VisualPreviewManifest } from "@/api/client";
 import FrameComparison from "@/components/FrameComparison.vue";
+import ProviderRunVisualReview from "@/components/ProviderRunVisualReview.vue";
 import VisualReviewPlayer, { type TimelineMarker } from "@/components/VisualReviewPlayer.vue";
 
 const route = useRoute();
@@ -108,6 +109,7 @@ watch(projectId, () => void load()); onMounted(() => void load());
 <template>
   <main class="visual-review-page">
     <header class="review-header"><div><h1>视觉连续性审核</h1><p>供应商任务成功和视频可播放，不代表生产视觉质量通过。</p></div><div><el-button @click="$router.push(`/projects/${projectId}/visual-regeneration`)">视觉再生成 PlanOnly</el-button><el-button @click="reanalyze" :loading="state === 'submitting'">重新进行离线分析（不调用 TOAPIS、零费用）</el-button></div></header>
+    <ProviderRunVisualReview :project-id="projectId" />
     <el-alert v-if="state === 'error' || state === 'conflict'" :title="errorMessage" type="error" show-icon />
     <el-empty v-else-if="state === 'empty'" description="该项目暂无视觉分析报告" />
     <div v-else class="review-layout" v-loading="state === 'loading'">

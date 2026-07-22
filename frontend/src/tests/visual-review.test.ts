@@ -37,7 +37,7 @@ describe("VisualContinuityReview", () => {
     vi.spyOn(api, "getVisualReviewHistory").mockResolvedValue([]);
   });
   it("separates technical, automatic, human and production states", async () => {
-    const wrapper = mount(VisualContinuityReview, { global: { stubs: { ElDescriptions: false, ElDescriptionsItem: false } } });
+    const wrapper = mount(VisualContinuityReview, { global: { stubs: { ElDescriptions: false, ElDescriptionsItem: false, ProviderRunVisualReview: true } } });
     await flushPromises();
     expect(wrapper.text()).toContain("技术任务"); expect(wrapper.text()).toContain("自动视觉");
     expect(wrapper.text()).toContain("REJECTED"); expect(wrapper.text()).toContain("BLOCKED");
@@ -49,7 +49,7 @@ describe("VisualContinuityReview", () => {
     expect(wrapper.find("button.timeline-marker.confirmed").exists()).toBe(true);
   });
   it("keeps historical Run 6 rejection locked", async () => {
-    const wrapper = mount(VisualContinuityReview); await flushPromises();
+    const wrapper = mount(VisualContinuityReview, { global: { stubs: { ProviderRunVisualReview: true } } }); await flushPromises();
     const submit = wrapper.findAll("el-button").find((item) => item.text().includes("提交人工审核"));
     expect(submit?.attributes("disabled")).toBe("true");
     expect(wrapper.html()).toContain("历史 REJECTED 已锁定展示");

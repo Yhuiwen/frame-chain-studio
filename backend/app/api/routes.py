@@ -11,7 +11,7 @@ from alembic.script import ScriptDirectory
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy import text
-from sqlmodel import Session
+from sqlmodel import Session, col, select
 
 from app.core.config import BACKEND_ROOT, get_settings
 from app.core.errors import AppError
@@ -98,6 +98,9 @@ from app.models.schemas import (
     ProviderValidationRead,
     ProviderVerificationRunRead,
     ProviderVerificationAdvanceRead,
+    ProviderVisualReviewCreateRequest,
+    ProviderVisualReviewHistoryRead,
+    ProviderVisualReviewRead,
     ToApisAccountBalanceRequest,
     ToApisCanaryRecoveryRequest,
     ToApisFailedRunRecoveryRequest,
@@ -124,6 +127,7 @@ from app.services import (
     live_orchestration,
     provider_management,
     provider_resolution,
+    provider_visual_review,
     quality_service,
     script_workflow,
     studio,
@@ -337,7 +341,66 @@ def verify_provider_live(
 def get_provider_verification_run(
     run_id: int, session: Session = Depends(get_session)
 ) -> dict[str, object]:
-    return provider_management.get_verification_run(session, run_id)
+    run_payload = provider_management.get_verification_run(session, run_id)
+    return {**run_payload, **provider_visual_review.readiness_payload(session, run_id)}
+
+
+@router.get("/projects/{project_id}/provider-verification-runs")
+def list_project_provider_verification_runs(
+    project_id: int, session: Session = Depends(get_session)
+) -> list[dict[str, object]]:
+    runs = session.exec(
+        select(ProviderVerificationRun)
+        .where(ProviderVerificationRun.verification_project_id == project_id)
+        .order_by(col(ProviderVerificationRun.created_at).desc())
+    ).all()
+    return [
+        {
+            **provider_management.verification_payload(run),
+            **provider_visual_review.readiness_payload(session, run.id or 0),
+        }
+        for run in runs
+    ]
+
+
+@router.post(
+    "/provider-verification-runs/{run_id}/visual-reviews",
+    response_model=ProviderVisualReviewRead,
+    status_code=201,
+)
+def create_provider_visual_review(
+    run_id: int,
+    payload: ProviderVisualReviewCreateRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    review = provider_visual_review.create_review(
+        session,
+        run_id=run_id,
+        asset_id=payload.asset_id,
+        decision=payload.decision,
+        reason_codes=payload.reason_codes,
+        notes=payload.notes,
+        idempotency_key=idempotency_key,
+    )
+    return provider_visual_review.review_payload(review)
+
+
+@router.get(
+    "/provider-verification-runs/{run_id}/visual-reviews",
+    response_model=ProviderVisualReviewHistoryRead,
+)
+def list_provider_visual_reviews(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict[str, object]:
+    run = provider_visual_review.get_run_or_404(session, run_id)
+    reviews = provider_visual_review.list_reviews(session, run_id)
+    selected_asset_id = provider_visual_review.selected_review_asset_id(run)
+    current = next((item for item in reviews if item.asset_id == selected_asset_id), None)
+    return {
+        "current": provider_visual_review.review_payload(current) if current else None,
+        "history": [provider_visual_review.review_payload(item) for item in reviews],
+    }
 
 
 @router.post(

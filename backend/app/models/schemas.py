@@ -40,6 +40,7 @@ from app.models.entities import (
     WorkerType,
     VisualAnalysisStatus,
     ProductionGateStatus,
+    VisualReviewDecision,
 )
 
 PROVIDER_ID_MAX_LENGTH = 80
@@ -319,6 +320,17 @@ class ProviderVerificationRunRead(BaseModel):
     error_code: str | None
     error_message: str | None
     created_at: datetime
+    technical_status: str | None = None
+    lineage_status: str | None = None
+    automated_visual_status: str | None = None
+    human_visual_status: str | None = None
+    production_status: str | None = None
+    production_ready: bool | None = None
+    production_blockers: list[str] = Field(default_factory=list)
+    selected_review_asset: dict[str, object] | None = None
+    current_visual_review: dict[str, object] | None = None
+    legacy_review_evidence: bool = False
+    workflow_approval_only: bool = False
 
 
 class LiveVerificationRequest(BaseModel):
@@ -463,6 +475,36 @@ class VisualContinuityReviewEventRead(BaseModel):
     resulting_production_gate_status: ProductionGateStatus
     report_hash: str
     reviewed_at: datetime
+
+
+class ProviderVisualReviewCreateRequest(BaseModel):
+    asset_id: int = Field(gt=0)
+    decision: VisualReviewDecision
+    reason_codes: list[str] = Field(default_factory=list, max_length=32)
+    notes: str = Field(default="", max_length=2000)
+
+
+class ProviderVisualReviewRead(BaseModel):
+    id: int
+    project_id: int
+    provider_verification_run_id: int
+    asset_id: int
+    asset_sha256: str
+    asset_url: str
+    review_scope: str
+    decision: VisualReviewDecision
+    reason_codes: list[object]
+    notes: str
+    reviewer_source: str
+    reviewer_reference: str | None
+    reviewed_at: datetime
+    created_at: datetime
+    idempotency_key: str | None
+
+
+class ProviderVisualReviewHistoryRead(BaseModel):
+    current: ProviderVisualReviewRead | None
+    history: list[ProviderVisualReviewRead]
 
 
 class VisualRegenerationPlanRequest(BaseModel):
