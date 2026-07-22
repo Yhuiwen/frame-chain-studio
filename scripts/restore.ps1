@@ -1,5 +1,6 @@
 param(
   [Parameter(Mandatory = $true)][string]$BackupPath,
+  [string]$DestinationDatabaseUrl = "",
   [switch]$Force
 )
 
@@ -21,6 +22,7 @@ if (-not $Force) {
 
 Push-Location $BackendRoot
 try {
+  if ($DestinationDatabaseUrl) { $env:FCS_DATABASE_URL = $DestinationDatabaseUrl }
   $env:FCS_RESTORE_SOURCE = (Resolve-Path $BackupPath)
   @'
 import shutil

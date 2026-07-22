@@ -1,14 +1,16 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
-from app.core.config import BACKEND_ROOT, Settings, normalize_sqlite_url, resolve_backend_path
+from app.core.config import BACKEND_ROOT, PRODUCTION_DATABASE_PATH, Settings, normalize_sqlite_url, resolve_backend_path
 from app.main import create_app
 
 
 def test_relative_paths_resolve_from_backend_root() -> None:
     settings = Settings(
         database_url="sqlite:///./data/example.db",
+        storage_root=None,
         storage_dir=Path("./data/storage"),
         fixture_dir=Path("./tests/fixtures"),
         provider_config_file=Path("provider-config.example.json"),
@@ -20,6 +22,16 @@ def test_relative_paths_resolve_from_backend_root() -> None:
     assert settings.provider_config_file == (BACKEND_ROOT / "provider-config.example.json").resolve()
     assert normalize_sqlite_url("sqlite://") == "sqlite://"
     assert resolve_backend_path("provider-config.example.json") == (BACKEND_ROOT / "provider-config.example.json").resolve()
+
+
+def test_test_environment_rejects_production_database() -> None:
+    with pytest.raises(ValueError, match="TEST_DATABASE_POINTS_TO_PRODUCTION"):
+        Settings(env="test", database_url=f"sqlite:///{PRODUCTION_DATABASE_PATH.as_posix()}")
+
+
+def test_development_environment_keeps_default_database_support() -> None:
+    settings = Settings(env="development", database_url=f"sqlite:///{PRODUCTION_DATABASE_PATH.as_posix()}")
+    assert settings.database_url == f"sqlite:///{PRODUCTION_DATABASE_PATH.as_posix()}"
 
 
 def test_ready_response_is_safe() -> None:

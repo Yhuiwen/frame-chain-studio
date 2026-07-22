@@ -908,7 +908,7 @@ print(json.dumps({
 function Run-BackupRestoreVerification($ProjectId, $RenderId, $RenderUrl, $RenderSize) {
   Write-Host "==> Backup same E2E database"
   $env:FCS_DATABASE_URL = $DatabaseUrl
-  $backupOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "backup.ps1") -OutputDir $BackupDir
+  $backupOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "backup.ps1") -OutputDir $BackupDir -SourceDatabaseUrl $DatabaseUrl
   if ($LASTEXITCODE -ne 0) { Fail "backup" "backup.ps1 failed." }
   $backupLine = @($backupOutput | Where-Object { $_ -like "backup=*" })[0]
   if (-not $backupLine) { Fail "backup" "backup.ps1 did not print a backup path." }
@@ -927,7 +927,7 @@ function Run-BackupRestoreVerification($ProjectId, $RenderId, $RenderUrl, $Rende
   Wait-FileUnlocked $DatabasePath
   Move-Item -LiteralPath $DatabasePath -Destination "$DatabasePath.before-restore" -Force
   Set-Content -Path $DatabasePath -Value "not sqlite" -Encoding ASCII
-  $restoreOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "restore.ps1") -BackupPath $backupPath -Force
+  $restoreOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "restore.ps1") -BackupPath $backupPath -DestinationDatabaseUrl $DatabaseUrl -Force
   if ($LASTEXITCODE -ne 0) { Fail "restore" "restore.ps1 failed." }
   $restoreCheck = Invoke-SqliteCheck $DatabasePath $ProjectId $RenderId
   if ($restoreCheck.quick_check -ne "ok" -or $restoreCheck.project_count -ne 1 -or $restoreCheck.shot_count -ne 3 -or $restoreCheck.task_count -ne 7 -or $restoreCheck.render_count -ne 1 -or $restoreCheck.quality_count -lt 1 -or $restoreCheck.quality_duplicate_count -ne 0) {

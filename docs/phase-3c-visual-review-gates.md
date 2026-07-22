@@ -16,3 +16,9 @@ production_status=BLOCKED
 ```
 
 The migration only creates the new review-history table. It performs no network access, media processing, task transitions, Provider operations, live enablement, or paid execution.
+
+## Phase 3C-2A validation incident
+
+During Phase 3C-2A validation, the production SQLite database was unintentionally migrated and then logically restored from the pre-run backup. The restored file was not byte-identical to the original, although schema revision, business rows, registered assets, task state, integrity checks, and deterministic logical hashes matched.
+
+The cause was the unified check entry point running application-lifespan tests without an explicit test database URL. Phase 3C-2A.1 isolates the check runtime under `.run/check`, establishes a separate pytest database before application imports, and rejects `FCS_ENV=test` when it resolves to `backend/data/frame_chain.db`.

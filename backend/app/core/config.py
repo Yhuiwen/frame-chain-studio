@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = BACKEND_ROOT.parent
+PRODUCTION_DATABASE_PATH = (BACKEND_ROOT / "data" / "frame_chain.db").resolve()
 
 
 def resolve_backend_path(value: Path | str | None) -> Path | None:
@@ -114,6 +115,10 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def normalize_paths(self) -> "Settings":
         self.database_url = normalize_sqlite_url(self.database_url)
+        if self.env == "test" and self.database_url.startswith("sqlite:///"):
+            database_path = Path(self.database_url.removeprefix("sqlite:///"))
+            if database_path.resolve() == PRODUCTION_DATABASE_PATH:
+                raise ValueError("TEST_DATABASE_POINTS_TO_PRODUCTION")
         if self.storage_root is not None:
             self.storage_dir = self.storage_root
         self.storage_dir = resolve_backend_path(self.storage_dir) or self.storage_dir

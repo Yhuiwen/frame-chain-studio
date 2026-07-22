@@ -1,4 +1,7 @@
-param([string]$OutputDir = "")
+param(
+  [string]$OutputDir = "",
+  [string]$SourceDatabaseUrl = ""
+)
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -10,6 +13,7 @@ $backupPath = Join-Path $OutputDir "frame-chain-$timestamp.db"
 
 Push-Location $BackendRoot
 try {
+  if ($SourceDatabaseUrl) { $env:FCS_DATABASE_URL = $SourceDatabaseUrl }
   $env:FCS_BACKUP_PATH = $backupPath
   @'
 import hashlib

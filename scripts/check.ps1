@@ -1,6 +1,28 @@
 $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$checkBase = Join-Path $root ".run\check"
+$checkRoot = Join-Path $checkBase ([guid]::NewGuid().ToString("N"))
+$previousEnvironment = @{}
+$isolatedEnvironment = @{
+    FCS_ENV = "test"
+    FCS_DATABASE_URL = "sqlite:///" + ((Join-Path $checkRoot "check.db") -replace "\\", "/")
+    FCS_STORAGE_DIR = Join-Path $checkRoot "storage"
+    FCS_STORAGE_ROOT = Join-Path $checkRoot "storage"
+    FCS_FIXTURE_DIR = Join-Path $root "backend\tests\fixtures"
+    FCS_LOG_DIR = Join-Path $checkRoot "logs"
+}
+
+New-Item -ItemType Directory -Force -Path $checkRoot | Out-Null
+$resolvedCheckBase = (Resolve-Path -LiteralPath $checkBase).Path
+$resolvedCheckRoot = (Resolve-Path -LiteralPath $checkRoot).Path
+if (-not $resolvedCheckRoot.StartsWith($resolvedCheckBase + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unsafe check runtime path: $resolvedCheckRoot"
+}
+foreach ($name in $isolatedEnvironment.Keys) {
+    $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    [Environment]::SetEnvironmentVariable($name, $isolatedEnvironment[$name], "Process")
+}
 
 function Invoke-Step {
     param(
@@ -52,4 +74,8 @@ try {
 }
 finally {
     Pop-Location
+    foreach ($name in $isolatedEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], "Process")
+    }
+    Remove-Item -LiteralPath $checkRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
