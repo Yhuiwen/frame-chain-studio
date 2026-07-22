@@ -16,7 +16,12 @@ from PIL import Image, UnidentifiedImageError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
+from app.core.errors import AppError  # noqa: E402
 from app.services.toapis_pricing import TOAPIS_PRICING_CONTRACT  # noqa: E402
+from app.services.toapis_verification_candidates import (  # noqa: E402
+    ToApisVerificationCandidate,
+    resolve_toapis_verification_candidate,
+)
 
 OFFICIAL_BASE_URL = "https://toapis.com/v1"
 IMAGE_MODEL = TOAPIS_PRICING_CONTRACT.image.remote_model
@@ -27,7 +32,10 @@ def _get_json(path: str, api_key: str) -> dict[str, Any]:
     request = Request(
         f"{OFFICIAL_BASE_URL}{path}",
         method="GET",
-        headers={"Authorization": f"Bearer {api_key}", "User-Agent": "frame-chain-studio-readiness/1"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "frame-chain-studio-readiness/1",
+        },
     )
     try:
         with urlopen(request, timeout=30) as response:  # noqa: S310 - fixed HTTPS host
@@ -51,7 +59,9 @@ def _database_path(repo_root: Path) -> Path:
     if not configured.startswith(prefix):
         raise RuntimeError("READINESS_REQUIRES_LOCAL_SQLITE")
     raw = Path(configured.removeprefix(prefix))
-    return raw.resolve() if raw.is_absolute() else (repo_root / "backend" / raw).resolve()
+    return (
+        raw.resolve() if raw.is_absolute() else (repo_root / "backend" / raw).resolve()
+    )
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -64,7 +74,11 @@ def _parse_time(value: object) -> datetime | None:
     return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
 
 
-def _pricing_state(connection: sqlite3.Connection, expected_hash: str) -> tuple[bool, bool, Decimal | None]:
+def _pricing_state(
+    connection: sqlite3.Connection,
+    expected_hash: str,
+    candidate: ToApisVerificationCandidate,
+) -> tuple[bool, bool, Decimal | None]:
     rows = connection.execute(
         """SELECT remote_model, pricing_json, pricing_review_status, pricing_reviewed_at,
                   pricing_snapshot_hash, pricing_version, billing_unit, pricing_source_kind,
@@ -75,7 +89,10 @@ def _pricing_state(connection: sqlite3.Connection, expected_hash: str) -> tuple[
     ).fetchall()
     if len(rows) != 2:
         return False, False, None
-    matched = all(row[4] == expected_hash for row in rows) and expected_hash == TOAPIS_PRICING_CONTRACT.snapshot_hash()
+    matched = (
+        all(row[4] == expected_hash for row in rows)
+        and expected_hash == TOAPIS_PRICING_CONTRACT.snapshot_hash()
+    )
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     fresh = all(
         row[2] == "REVIEWED"
@@ -86,7 +103,10 @@ def _pricing_state(connection: sqlite3.Connection, expected_hash: str) -> tuple[
         and (_parse_time(row[8]) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
         for row in rows
     )
-    contract_by_model = {IMAGE_MODEL: TOAPIS_PRICING_CONTRACT.image, VIDEO_MODEL: TOAPIS_PRICING_CONTRACT.video}
+    contract_by_model = {
+        IMAGE_MODEL: TOAPIS_PRICING_CONTRACT.image,
+        VIDEO_MODEL: TOAPIS_PRICING_CONTRACT.video,
+    }
     for row in rows:
         contract_model = contract_by_model[row[0]]
         expected_assumptions = contract_model.assumptions.model_dump(mode="json")
@@ -94,7 +114,11 @@ def _pricing_state(connection: sqlite3.Connection, expected_hash: str) -> tuple[
             actual_assumptions = json.loads(row[10] or "{}")
         except json.JSONDecodeError:
             actual_assumptions = {}
-        fresh = fresh and row[9] == contract_model.source_reference and actual_assumptions == expected_assumptions
+        fresh = (
+            fresh
+            and row[9] == contract_model.source_reference
+            and actual_assumptions == expected_assumptions
+        )
     prices: dict[str, Decimal] = {}
     try:
         model_rows = connection.execute(
@@ -105,13 +129,27 @@ def _pricing_state(connection: sqlite3.Connection, expected_hash: str) -> tuple[
         for model, raw in model_rows:
             rules = json.loads(raw or "{}").get("rules", [])
             wanted = "IMAGE_REQUEST" if model == IMAGE_MODEL else "VIDEO_SECOND"
-            matches = [Decimal(str(rule["price"])) for rule in rules if isinstance(rule, dict) and rule.get("unit") == wanted]
+            matches = [
+                Decimal(str(rule["price"]))
+                for rule in rules
+                if isinstance(rule, dict) and rule.get("unit") == wanted
+            ]
             if len(matches) != 1:
                 return matched, fresh, None
             prices[model] = matches[0]
     except (json.JSONDecodeError, InvalidOperation, KeyError, TypeError):
         return matched, fresh, None
-    return matched, fresh, prices[IMAGE_MODEL] * 2 + prices[VIDEO_MODEL] * 8
+    return (
+        matched,
+        fresh,
+        candidate.estimated_billing(
+            image_price=prices[IMAGE_MODEL], video_price_per_second=prices[VIDEO_MODEL]
+        ),
+    )
+
+
+def _readonly_connection(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
 
 
 def _credit_balance(raw: dict[str, Any]) -> tuple[bool, bool, Decimal | None]:
@@ -135,18 +173,28 @@ def _anchor_ready(repo_root: Path) -> bool:
             return False
         with Image.open(path) as image:
             image.load()
-            return image.mode == "RGB" and image.size == (1280, 720) and not image.getexif()
+            return (
+                image.mode == "RGB"
+                and image.size == (1280, 720)
+                and not image.getexif()
+            )
     except (FileNotFoundError, UnidentifiedImageError, OSError, ValueError):
         return False
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate", required=True)
     parser.add_argument("--billing-unit", required=True)
     parser.add_argument("--pricing-snapshot-hash", required=True)
     parser.add_argument("--max-billing-units", required=True)
     parser.add_argument("--balance-evidence-precheck", action="store_true")
     args = parser.parse_args()
+    try:
+        candidate = resolve_toapis_verification_candidate(args.candidate)
+    except AppError:
+        print("candidateError=TOAPIS_VERIFICATION_CANDIDATE_INVALID", file=sys.stderr)
+        return 2
     try:
         maximum = Decimal(args.max_billing_units)
     except InvalidOperation:
@@ -174,7 +222,9 @@ def main() -> int:
             token_raw = _get_json("/balance", key)
             token_gets = 1
             token_active, token_unlimited, token_credits = _credit_balance(token_raw)
-            balance_readable = token_active and (token_unlimited or token_credits is not None)
+            balance_readable = token_active and (
+                token_unlimited or token_credits is not None
+            )
             if token_unlimited:
                 balance_sufficient = True
             elif token_credits is not None:
@@ -191,7 +241,7 @@ def main() -> int:
     unfinished_tasks = 0
     balance_review_valid = False
     try:
-        with sqlite3.connect(_database_path(repo_root)) as connection:
+        with _readonly_connection(_database_path(repo_root)) as connection:
             connection.row_factory = sqlite3.Row
             profile = connection.execute(
                 """SELECT id, live_orchestration_enabled, account_balance_sufficient,
@@ -207,10 +257,13 @@ def main() -> int:
                 except InvalidOperation:
                     confirmed = Decimal("0")
                 balance_review_valid = bool(
-                    profile["account_balance_sufficient"] and reviewed_at
+                    profile["account_balance_sufficient"]
+                    and reviewed_at
                     and reviewed_at >= datetime.now(timezone.utc) - timedelta(hours=24)
-                    and profile["account_balance_pricing_snapshot_hash"] == args.pricing_snapshot_hash
-                    and profile["account_balance_evidence_type"] == "TOKEN_BALANCE_READ_ONLY"
+                    and profile["account_balance_pricing_snapshot_hash"]
+                    == args.pricing_snapshot_hash
+                    and profile["account_balance_evidence_type"]
+                    == "TOKEN_BALANCE_READ_ONLY"
                     and confirmed >= maximum
                 )
                 active_runs = connection.execute(
@@ -220,19 +273,18 @@ def main() -> int:
             unfinished_tasks = connection.execute(
                 "SELECT COUNT(*) FROM generationtask WHERE provider_id='toapis' AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED','STALE_RESULT')"
             ).fetchone()[0]
-            pricing_matched, pricing_fresh, estimated = _pricing_state(connection, args.pricing_snapshot_hash)
+            pricing_matched, pricing_fresh, estimated = _pricing_state(
+                connection, args.pricing_snapshot_hash, candidate
+            )
     except (OSError, sqlite3.Error, RuntimeError):
         pass
 
-    if maximum <= TOAPIS_PRICING_CONTRACT.recommended_ceiling and maximum <= Decimal("10"):
-        estimated = TOAPIS_PRICING_CONTRACT.image.price
-    canary = maximum <= Decimal("10")
     ready = all(
         (
             process_configured,
             models_checked,
             image_accessible,
-            canary or video_accessible,
+            video_accessible,
             token_active,
             balance_readable,
             balance_sufficient,
@@ -244,11 +296,19 @@ def main() -> int:
             active_runs == 0,
             unfinished_tasks == 0,
             not live_enabled,
-            canary or anchor_ready,
+            not candidate.requires_initial_anchor or anchor_ready,
             args.balance_evidence_precheck or balance_review_valid,
         )
     )
     values = {
+        "candidate": candidate.key.value,
+        "imageTasksMax": candidate.image_task_limit,
+        "videoTasksMax": candidate.video_task_limit,
+        "videoDurationSecondsEach": candidate.video_duration_seconds_each,
+        "totalVideoSeconds": candidate.total_video_seconds,
+        "recommendedCeiling": str(candidate.recommended_billing_ceiling),
+        "maxAttemptsPerTask": candidate.max_attempts_per_task,
+        "automaticRetryAllowed": candidate.automatic_retry_allowed,
         "ProcessConfigured": process_configured,
         "modelsChecked": models_checked,
         "imageModelAccessible": image_accessible,
@@ -273,6 +333,10 @@ def main() -> int:
         "videoSubmits": 0,
         "generationPolls": 0,
         "unfinishedPaidTasks": unfinished_tasks,
+        "paidCommandPreviewAvailable": bool(
+            candidate.paid_execution_entry_implemented and ready
+        ),
+        "paidCommandPreviewExecuted": False,
     }
     for name, value in values.items():
         rendered = str(value).lower() if isinstance(value, bool) else value
@@ -282,18 +346,20 @@ def main() -> int:
     if not pricing_fresh:
         print("MANUAL_PRICING_REVIEW_REQUIRED")
     if ready:
-        command = (
-            ".\\scripts\\e2e-real-provider.ps1 -ConfirmLive -ExecutePaid "
-            + ("-CanaryImageOnly " if canary else "")
-            + f"-BillingUnit TOAPIS_CREDIT -MaxBillingUnits {maximum} "
-            + f"-PricingSnapshotHash {args.pricing_snapshot_hash} "
-            + ("" if canary else "-InitialAnchorPath .\\.run\\toapis-verification-anchor.png -AutoApproveForVerification ")
-            + f"-PollIntervalSeconds 10 -TimeoutMinutes {20 if canary else 45}"
-        )
-        print(f"suggestedCommand={command}")
-        print("THIS COMMAND CREATES PAID REMOTE TASKS.")
+        if candidate.paid_execution_entry_implemented:
+            command = (
+                ".\\scripts\\e2e-real-provider.ps1 -ConfirmLive -ExecutePaid "
+                f"-BillingUnit TOAPIS_CREDIT -MaxBillingUnits {maximum} "
+                f"-PricingSnapshotHash {args.pricing_snapshot_hash} "
+                "-InitialAnchorPath .\\.run\\toapis-verification-anchor.png -AutoApproveForVerification "
+                "-PollIntervalSeconds 10 -TimeoutMinutes 45"
+            )
+            print(f"suggestedCommand={command}")
+            print("THIS COMMAND CREATES PAID REMOTE TASKS.")
+        else:
+            print("paidCommandPreviewReason=SHORT_PAID_EXECUTION_ENTRY_NOT_IMPLEMENTED")
         print("It has not been executed.")
-        print("Explicit operator authorization is still required.")
+        print("New explicit natural-language paid authorization is still required.")
     return 0
 
 

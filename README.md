@@ -8,6 +8,8 @@ The same workspace prepares human-reviewed production baseline candidates and SH
 
 Project visual baselines require hash-bound operator review; see [the baseline review record](docs/phase-3c-visual-baseline-review.md).
 
+TOAPIS readiness is candidate-aware: SHORT and legacy full/recovery cost and duration contracts remain isolated. See [the SHORT readiness contract](docs/phase-3c-short-readiness.md).
+
 Phase 4A includes an offline-contract-verified dedicated TOAPIS adapter for Seedream 5.0 images and Vidu Q3 Pro first/last-frame video. See [TOAPIS Provider](docs/providers/toapis.md). Live verification remains opt-in, cost-bounded, and blocked by default.
 
 Live enable uses an auditable, expiring `TOAPIS_CREDIT` pricing review, read-only model-access preflight, manual capacity confirmation, and a centralized backend submit gate. It does not convert credits or token quota into USD.

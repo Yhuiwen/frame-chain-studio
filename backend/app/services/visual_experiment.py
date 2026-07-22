@@ -21,6 +21,7 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.toapis_pricing import TOAPIS_PRICING_CONTRACT
+from app.services.toapis_verification_candidates import SHORT_CONTINUITY_CANARY as SHORT_CONTRACT
 from app.services.visual_regeneration import (
     STRATEGY_A,
     STRATEGY_B,
@@ -261,12 +262,14 @@ def build_authorization_plan_only(
     plan = build_plan_only(
         session, project_id=project_id, source_run_id=source_run_id, strategy=STRATEGY_B
     )
-    duration = 2 if candidate == SHORT else 4
-    total_seconds = duration * 2
-    image_billing = TOAPIS_PRICING_CONTRACT.image.price * 2
+    duration = SHORT_CONTRACT.video_duration_seconds_each if candidate == SHORT else 4
+    total_seconds = SHORT_CONTRACT.total_video_seconds if candidate == SHORT else 8
+    image_requests = SHORT_CONTRACT.image_task_limit if candidate == SHORT else 2
+    video_requests = SHORT_CONTRACT.video_task_limit if candidate == SHORT else 2
+    image_billing = TOAPIS_PRICING_CONTRACT.image.price * image_requests
     video_billing = TOAPIS_PRICING_CONTRACT.video.price * Decimal(total_seconds)
     estimated = image_billing + video_billing
-    maximum = Decimal("110") if candidate == SHORT else Decimal("190")
+    maximum = SHORT_CONTRACT.recommended_billing_ceiling if candidate == SHORT else Decimal("190")
     contracts = production_contracts()
     compiled = []
     for contract in contracts:
@@ -314,8 +317,8 @@ def build_authorization_plan_only(
         "compiledImagePromptHashes": [x["image"]["promptHash"] for x in compiled],
         "compiledVideoPromptHashes": [x["video"]["promptHash"] for x in compiled],
         "targetShotIds": [62, 63],
-        "imageSubmitLimit": 2,
-        "videoSubmitLimit": 2,
+        "imageSubmitLimit": image_requests,
+        "videoSubmitLimit": video_requests,
         "videoDurationSecondsEach": duration,
         "maximumTotalVideoSeconds": total_seconds,
         "estimatedBillingUnits": str(estimated),
@@ -325,8 +328,10 @@ def build_authorization_plan_only(
         "visualAnalysisVersion": "visual-continuity-v1",
         "visualGateConfigHash": plan["configHash"],
         "selectedBaselineAssetSha": selected_asset.sha256 if selected_asset else None,
-        "maxAttemptsPerTask": 1,
-        "automaticRetryAllowed": False,
+        "maxAttemptsPerTask": SHORT_CONTRACT.max_attempts_per_task if candidate == SHORT else 1,
+        "automaticRetryAllowed": SHORT_CONTRACT.automatic_retry_allowed
+        if candidate == SHORT
+        else False,
     }
     experiment_hash = _stable_hash(core)
     package = session.exec(
@@ -394,8 +399,8 @@ def build_authorization_plan_only(
         "humanCandidateDecision": candidate if plan_approved else "PENDING",
         "promptContracts": {"shot1": contracts[0], "shot2": contracts[1]},
         "compiledPrompts": compiled,
-        "imageRequests": 2,
-        "videoRequests": 2,
+        "imageRequests": image_requests,
+        "videoRequests": video_requests,
         "totalVideoSeconds": total_seconds,
         "estimatedImageBilling": str(image_billing),
         "estimatedVideoBilling": str(video_billing),

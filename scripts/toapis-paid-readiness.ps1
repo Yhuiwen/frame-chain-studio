@@ -1,4 +1,5 @@
 param(
+    [Parameter(Mandatory = $true)][ValidateSet("SHORT_CONTINUITY_CANARY", "LEGACY_FULL_TWO_SHOT")][string]$Candidate,
     [ValidateSet("https://toapis.com/v1")][string]$ApiBaseUrl = "https://toapis.com/v1",
     [Parameter(Mandatory = $true)][ValidateSet("TOAPIS_CREDIT")][string]$BillingUnit,
     [Parameter(Mandatory = $true)][ValidatePattern("^[a-fA-F0-9]{64}$")][string]$PricingSnapshotHash,
@@ -18,6 +19,7 @@ Push-Location $repoRoot
 try {
     $arguments = @(
         $helper,
+        "--candidate", $Candidate,
         "--billing-unit", $BillingUnit,
         "--pricing-snapshot-hash", $PricingSnapshotHash,
         "--max-billing-units", ([string]$MaxBillingUnits)

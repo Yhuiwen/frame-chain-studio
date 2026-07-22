@@ -1,4 +1,5 @@
 param(
+    [Parameter(Mandatory = $true)][ValidateSet("SHORT_CONTINUITY_CANARY", "LEGACY_FULL_TWO_SHOT")][string]$Candidate,
     [switch]$AcknowledgeBalance,
     [ValidateSet("TOKEN_BALANCE_READ_ONLY")][string]$EvidenceType = "TOKEN_BALANCE_READ_ONLY",
     [Parameter(Mandatory = $true)][ValidatePattern("^[a-fA-F0-9]{64}$")][string]$PricingSnapshotHash,
@@ -13,7 +14,7 @@ if (-not $AcknowledgeBalance) {
 }
 
 $readiness = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "toapis-paid-readiness.ps1") `
-    -BillingUnit TOAPIS_CREDIT -PricingSnapshotHash $PricingSnapshotHash -MaxBillingUnits $RequiredBillingUnits -BalanceEvidencePrecheck
+    -Candidate $Candidate -BillingUnit TOAPIS_CREDIT -PricingSnapshotHash $PricingSnapshotHash -MaxBillingUnits $RequiredBillingUnits -BalanceEvidencePrecheck
 if ($LASTEXITCODE -ne 0 -or $readiness -notcontains "ready=true") {
     Write-Host "BALANCE_READINESS_FAILED"
     Write-Host "databaseUpdated=false"

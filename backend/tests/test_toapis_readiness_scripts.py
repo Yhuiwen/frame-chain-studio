@@ -32,6 +32,11 @@ def test_readiness_script_is_read_only_and_only_suggests_paid_command() -> None:
     assert "suggestedCommand=" in helper
     assert "THIS COMMAND CREATES PAID REMOTE TASKS." in helper
     assert "subprocess" not in helper
+    assert "--candidate" in helper
+    assert "mode=ro" in helper
+    assert 'ValidateSet("SHORT_CONTINUITY_CANARY", "LEGACY_FULL_TWO_SHOT")' in wrapper
+    assert '"--candidate", $Candidate' in wrapper
+    assert "SHORT_PAID_EXECUTION_ENTRY_NOT_IMPLEMENTED" in helper
 
 
 def test_review_script_requires_explicit_acknowledgement() -> None:
